@@ -15,6 +15,7 @@ import { z } from 'zod';
 import {
   assetReceiptSchema,
   opinionsResponseSchema,
+  optimizationNotesReceiptSchema,
 } from '../../../packages/contracts/src/assets';
 import type { Asset } from '../../../packages/contracts/src/assets';
 import { api, describeError } from './api';
@@ -97,7 +98,11 @@ export function AssetReviewPanel({
       await api(
         `/projects/${projectId}/assets/${asset.id}/${path}`,
         { method, body },
-        created ? opinionCreatedSchema : assetReceiptSchema,
+        created
+          ? opinionCreatedSchema
+          : path === 'optimization-notes'
+            ? optimizationNotesReceiptSchema
+            : assetReceiptSchema,
       );
       await onChanged();
       await load();

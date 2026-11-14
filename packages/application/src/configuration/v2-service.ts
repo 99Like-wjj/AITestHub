@@ -419,17 +419,8 @@ export class ModelConfigurationV2Service {
         this.active(current);
         if (current.row_version !== input.rowVersion) stale();
         const endpoint = input.baseUrl.replace(/\/+$/, '');
-        if (
-          current.credential_ref &&
-          (current.protocol !== input.protocol ||
-            current.base_url !== endpoint ||
-            current.auth_scheme !== input.authScheme)
-        )
-          throw new DomainError(
-            'PRECONDITIONS_MISSING',
-            '目的地址、协议或鉴权方式变化前请明确撤销旧Key，再安全配置新Key。',
-            422,
-          );
+        // The credential belongs to this stable service ID. Connection edits keep
+        // it; only the explicit credential endpoints replace or revoke it.
         const existing = (await this.entries(tx, id)).rows,
           kept = new Set(input.models.map((e) => e.id)),
           removed = new Set(input.removedModelEntryIds);

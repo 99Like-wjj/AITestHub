@@ -7,6 +7,7 @@ import type {
 import { describeError } from './api';
 import { readAiTaskSession, terminalAiTaskStates } from './ai-task-reader';
 import type { TaskConnection, TaskCursor } from './ai-task-reader';
+import type { AiTaskReadMetric } from './ai-task-reader';
 import type { AiRetryState } from './ai-retry-state';
 
 export const taskStateLabels: Record<TaskState, string> = {
@@ -33,6 +34,23 @@ export function useAiTask(taskId: string | null) {
     cursor: '0',
     seen: new Set(),
   });
+  const latestTask = useRef<AiTaskStatus['task'] | null>(null);
+  const metrics = useRef<AiTaskReadMetric[]>([]);
+  const firstMetrics = useRef(new Map<string, AiTaskReadMetric>());
+  const recordMetric = (metric: AiTaskReadMetric) => {
+    const firstKey =
+      metric.stage === 'snapshot'
+        ? 'snapshot'
+        : metric.stage === 'event' && metric.isPublicText && metric.segmentId
+          ? `text:${metric.segmentId}`
+          : metric.stage === 'paint' && metric.segmentId
+            ? `paint:${metric.segmentId}`
+            : null;
+    if (firstKey && !firstMetrics.current.has(firstKey))
+      firstMetrics.current.set(firstKey, metric);
+    metrics.current.push(metric);
+    if (metrics.current.length > 500) metrics.current.shift();
+  };
   const generation = useRef(0),
     controllerRef = useRef<AbortController | null>(null);
   useEffect(() => {
@@ -42,6 +60,9 @@ export function useAiTask(taskId: string | null) {
     if (remembered.current.id !== taskId) {
       remembered.current = { id: taskId, cursor: '0', seen: new Set() };
       setTask(null);
+      latestTask.current = null;
+      metrics.current = [];
+      firstMetrics.current.clear();
       setEvents([]);
       setRetry(null);
     }
@@ -67,9 +88,20 @@ export function useAiTask(taskId: string | null) {
         cursor: remembered.current,
         signal: controller.signal,
         current,
+        initialTask: latestTask.current,
         onTask: (value) => {
-          if (current()) setTask(value);
+          if (!current()) return;
+          const before = latestTask.current?.presentation?.snapshotSequence;
+          const after = value.presentation?.snapshotSequence;
+          if (
+            before !== undefined &&
+            (after === undefined || BigInt(after) < BigInt(before))
+          )
+            return;
+          latestTask.current = value;
+          setTask(value);
         },
+        onMetric: recordMetric,
         onEvent: (event) => {
           if (current()) setEvents((previous) => [...previous, event]);
         },
@@ -122,6 +154,20 @@ export function useAiTask(taskId: string | null) {
     retry,
     reconnect,
     pause,
+    getReadMetrics: () =>
+      [...new Set([...firstMetrics.current.values(), ...metrics.current])].sort(
+        (a, b) => a.monotonicMs - b.monotonicMs,
+      ),
+    markPaint: (sequence: string, segmentId?: string) => {
+      if (taskId)
+        recordMetric({
+          taskId,
+          stage: 'paint',
+          sequence,
+          monotonicMs: performance.now(),
+          ...(segmentId ? { segmentId } : {}),
+        });
+    },
     terminal: task ? terminalAiTaskStates.has(task.status) : false,
   };
 }

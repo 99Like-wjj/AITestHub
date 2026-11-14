@@ -2,6 +2,11 @@ import { z } from 'zod';
 import { idSchema } from '../../../packages/contracts/src/base';
 const changedSchema = z.discriminatedUnion('type', [
   z.strictObject({
+    type: z.literal('requirementGroupRestored'),
+    projectId: idSchema,
+    requirementId: idSchema,
+  }),
+  z.strictObject({
     type: z.literal('conversationRestored'),
     conversationId: idSchema,
   }),

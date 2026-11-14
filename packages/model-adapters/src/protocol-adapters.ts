@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { ModelProtocol } from '../../contracts/src/model-protocol.js';
+import { resolveModelEndpoint } from './model-endpoint.js';
 import {
   OpenAiCompatibleAdapter,
   ModelAdapterError,
+  maximumNativeModelOutputTokens,
   emptyUsage,
   mergeUsage,
   parseModelRetryAfter,
@@ -70,9 +72,7 @@ class TypedProtocolAdapter implements NativeModelAdapter {
     this.#options = Object.freeze({ ...options });
     let endpoint: URL;
     try {
-      endpoint = new URL(
-        `${options.baseUrl.replace(/\/+$/, '')}/${protocol === 'responses' ? 'responses' : 'messages'}`,
-      );
+      endpoint = resolveModelEndpoint(options.baseUrl, protocol);
     } catch {
       throw new ModelAdapterError(
         'INVALID_CONFIGURATION',
@@ -108,10 +108,11 @@ class TypedProtocolAdapter implements NativeModelAdapter {
   #body(request: ModelRequest, id: string) {
     const invalid = () =>
       new ModelAdapterError('INVALID_REQUEST', 'notDispatched', id);
+    if (request.sampling !== undefined) throw invalid();
     if (
       !Number.isSafeInteger(request.maxTokens) ||
       request.maxTokens < 1 ||
-      request.maxTokens > 393216
+      request.maxTokens > maximumNativeModelOutputTokens
     )
       throw invalid();
     if (
@@ -511,6 +512,29 @@ class TypedProtocolAdapter implements NativeModelAdapter {
           requestId,
         );
       if (this.protocol === 'responses') {
+        if (event.type === 'response.reasoning_summary_text.delta') {
+          if (
+            typeof event.delta !== 'string' ||
+            !Number.isSafeInteger(event.summary_index) ||
+            Number(event.summary_index) < 0 ||
+            Number(event.summary_index) > 1000
+          )
+            throw invalid();
+          try {
+            request.onDelta?.({
+              type: 'summary',
+              summaryIndex: Number(event.summary_index),
+              text: event.delta,
+            });
+          } catch {
+            throw new ModelAdapterError(
+              'OUTPUT_REJECTED',
+              'responseReceived',
+              id,
+              requestId,
+            );
+          }
+        }
         if (
           event.type === 'response.output_text.delta' &&
           typeof event.delta === 'string'
@@ -829,7 +853,9 @@ class TypedProtocolAdapter implements NativeModelAdapter {
           clientRequestId,
         );
       dispatched = true;
-      const response = await (this.#options.fetch ?? globalThis.fetch)(
+      const startedAt = new Date().toISOString();
+      const monotonicMs = performance.now();
+      const pendingResponse = (this.#options.fetch ?? globalThis.fetch)(
         this.#endpoint,
         {
           method: 'POST',
@@ -839,6 +865,12 @@ class TypedProtocolAdapter implements NativeModelAdapter {
           signal,
         },
       );
+      try {
+        this.#options.onFetchStarted?.({ startedAt, monotonicMs });
+      } catch {
+        // A metadata observer cannot turn an already-dispatched request into a retry.
+      }
+      const response = await pendingResponse;
       requestId = identifier(
         response.headers.get('request-id') ??
           response.headers.get('x-request-id'),

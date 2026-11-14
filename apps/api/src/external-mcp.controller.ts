@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { idSchema } from '../../../packages/contracts/src/base.js';
 import { ExternalMcpService } from '../../../packages/application/src/external-mcp/service.js';
 import { ExternalMcpInvocations } from '../../../packages/application/src/external-mcp/invocations.js';
+import { booleanQueryValue } from './query-values.js';
 import { ExternalMcpTransportError } from '../../../packages/application/src/external-mcp/transport.js';
 import { IdentityService } from '../../../packages/application/src/identity/service.js';
 import { DomainError } from '../../../packages/application/src/errors.js';
@@ -113,6 +114,14 @@ export class ExternalMcpController {
             req.query.taskId === undefined
               ? undefined
               : idSchema.parse(req.query.taskId),
+            {
+              ...(req.query.conversationId === undefined
+                ? {}
+                : { conversationId: idSchema.parse(req.query.conversationId) }),
+              pendingOnly: booleanQueryValue(false).parse(
+                req.query.pendingOnly,
+              ),
+            },
           ),
         );
       if (path === 'invocations' && req.method === 'POST')

@@ -4,6 +4,7 @@ import type { SecretBroker } from '../configuration/secrets.js';
 import type { Database } from '../../../persistence/src/database.js';
 import type { AuxiliaryModelFactory } from './worker.js';
 import { resolveAcceptedAuxiliaryModel } from './model-snapshot.js';
+import { resolveModelOutputBudget } from '../ai/model-output-budget.js';
 /** One native request, no tools/retry/fallback. Only this code receives the broker credential. */
 export function createAuxiliaryModelFactory(
   _db: Database,
@@ -19,6 +20,10 @@ export function createAuxiliaryModelFactory(
     );
     const protocol =
       'schemaVersion' in model ? model.protocol : 'chatCompletions';
+    const outputBudget = resolveModelOutputBudget(
+      selected,
+      purpose === 'alias' ? 512 : purpose === 'issueAdvice' ? 4096 : 2048,
+    );
     const native = createNativeModelAdapter(protocol, {
       baseUrl: model.baseUrl,
       model: model.modelId,
@@ -41,10 +46,7 @@ export function createAuxiliaryModelFactory(
       },
     });
     return {
-      maxTokens: Math.min(
-        purpose === 'alias' ? 512 : purpose === 'issueAdvice' ? 4096 : 2048,
-        selected.maxOutput ?? 4096,
-      ),
+      maxTokens: outputBudget,
       complete: native.complete.bind(native),
       release: native.release.bind(native),
     };

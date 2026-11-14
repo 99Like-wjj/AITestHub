@@ -873,6 +873,15 @@
       "description": "TypeScript definitions for connect"
     },
     {
+      "name": "@types/debug",
+      "versions": [
+        "4.1.13"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/debug",
+      "description": "TypeScript definitions for debug"
+    },
+    {
       "name": "@types/deep-eql",
       "versions": [
         "4.0.2"
@@ -889,6 +898,15 @@
       "license": "MIT",
       "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/estree",
       "description": "TypeScript definitions for estree"
+    },
+    {
+      "name": "@types/estree-jsx",
+      "versions": [
+        "1.0.5"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/estree-jsx",
+      "description": "TypeScript definitions for estree-jsx"
     },
     {
       "name": "@types/express",
@@ -909,6 +927,15 @@
       "description": "TypeScript definitions for express-serve-static-core"
     },
     {
+      "name": "@types/hast",
+      "versions": [
+        "3.0.5"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/hast",
+      "description": "TypeScript definitions for hast"
+    },
+    {
       "name": "@types/http-errors",
       "versions": [
         "2.0.5"
@@ -927,6 +954,15 @@
       "description": "TypeScript definitions for json-schema"
     },
     {
+      "name": "@types/mdast",
+      "versions": [
+        "4.0.4"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/mdast",
+      "description": "TypeScript definitions for mdast"
+    },
+    {
       "name": "@types/mime",
       "versions": [
         "1.3.5"
@@ -934,6 +970,15 @@
       "license": "MIT",
       "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/mime",
       "description": "TypeScript definitions for mime"
+    },
+    {
+      "name": "@types/ms",
+      "versions": [
+        "2.1.0"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/ms",
+      "description": "TypeScript definitions for ms"
     },
     {
       "name": "@types/node",
@@ -1018,6 +1063,16 @@
       "description": "TypeScript definitions for serve-static"
     },
     {
+      "name": "@types/unist",
+      "versions": [
+        "2.0.11",
+        "3.0.3"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/unist",
+      "description": "TypeScript definitions for unist"
+    },
+    {
       "name": "@vitejs/plugin-react",
       "versions": [
         "6.3.0"
@@ -1091,6 +1146,16 @@
       "author": "https://github.com/wellwelwel",
       "homepage": "https://github.com/mysqljs/aws-ssl-profiles#readme",
       "description": "AWS RDS SSL certificates bundles."
+    },
+    {
+      "name": "bail",
+      "versions": [
+        "2.0.2"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/bail#readme",
+      "description": "Throw a given error"
     },
     {
       "name": "base64-js",
@@ -1180,6 +1245,16 @@
       "description": "Robust call-bound JavaScript intrinsics, using `call-bind` and `get-intrinsic`."
     },
     {
+      "name": "ccount",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/ccount#readme",
+      "description": "Count how often a character (or substring) is used in a string"
+    },
+    {
       "name": "chai",
       "versions": [
         "6.3.0"
@@ -1190,6 +1265,46 @@
       "description": "BDD/TDD assertion library for node.js and the browser. Test framework agnostic."
     },
     {
+      "name": "character-entities",
+      "versions": [
+        "2.0.2"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/character-entities#readme",
+      "description": "Map of named character references"
+    },
+    {
+      "name": "character-entities-html4",
+      "versions": [
+        "2.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/character-entities-html4#readme",
+      "description": "Map of named character references from HTML 4"
+    },
+    {
+      "name": "character-entities-legacy",
+      "versions": [
+        "3.0.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/character-entities-legacy#readme",
+      "description": "List of legacy HTML named character references that don’t need a trailing semicolon"
+    },
+    {
+      "name": "character-reference-invalid",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/character-reference-invalid#readme",
+      "description": "Map of invalid numeric character references to their replacements, according to HTML"
+    },
+    {
       "name": "clsx",
       "versions": [
         "2.1.1"
@@ -1198,6 +1313,16 @@
       "author": "Luke Edwards",
       "homepage": "https://github.com/lukeed/clsx#readme",
       "description": "A tiny (239B) utility for constructing className strings conditionally."
+    },
+    {
+      "name": "comma-separated-tokens",
+      "versions": [
+        "2.0.3"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/comma-separated-tokens#readme",
+      "description": "Parse and stringify comma-separated tokens"
     },
     {
       "name": "compute-scroll-into-view",
@@ -1300,6 +1425,16 @@
       "description": "Lightweight debugging utility for Node.js and the browser"
     },
     {
+      "name": "decode-named-character-reference",
+      "versions": [
+        "1.3.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/decode-named-character-reference#readme",
+      "description": "Decode named character references"
+    },
+    {
       "name": "deepagents",
       "versions": [
         "1.16.4"
@@ -1318,6 +1453,26 @@
       "author": "Douglas Christopher Wilson",
       "homepage": "https://github.com/dougwilson/nodejs-depd#readme",
       "description": "Deprecate all the things"
+    },
+    {
+      "name": "dequal",
+      "versions": [
+        "2.0.3"
+      ],
+      "license": "MIT",
+      "author": "Luke Edwards",
+      "homepage": "https://github.com/lukeed/dequal#readme",
+      "description": "A tiny (304B to 489B) utility for check for deep equality"
+    },
+    {
+      "name": "devlop",
+      "versions": [
+        "1.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/devlop#readme",
+      "description": "Do things in development and nothing otherwise"
     },
     {
       "name": "drizzle-kit",
@@ -1418,6 +1573,26 @@
       "description": "Escape string for use in HTML"
     },
     {
+      "name": "escape-string-regexp",
+      "versions": [
+        "5.0.0"
+      ],
+      "license": "MIT",
+      "author": "Sindre Sorhus",
+      "homepage": "https://github.com/sindresorhus/escape-string-regexp#readme",
+      "description": "Escape RegExp special characters"
+    },
+    {
+      "name": "estree-util-is-identifier-name",
+      "versions": [
+        "3.0.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/estree-util-is-identifier-name#readme",
+      "description": "Check if something can be an ecmascript (javascript) identifier name"
+    },
+    {
       "name": "estree-walker",
       "versions": [
         "3.0.3"
@@ -1476,6 +1651,16 @@
       "author": "TJ Holowaychuk",
       "homepage": "https://expressjs.com/",
       "description": "Fast, unopinionated, minimalist web framework"
+    },
+    {
+      "name": "extend",
+      "versions": [
+        "3.0.2"
+      ],
+      "license": "MIT",
+      "author": "Stefan Thomas",
+      "homepage": "https://github.com/justmoon/node-extend#readme",
+      "description": "Port of jQuery.extend for node.js and the browser"
     },
     {
       "name": "fast-glob",
@@ -1637,6 +1822,26 @@
       "description": "A robust, ES3 compatible, \"has own property\" predicate."
     },
     {
+      "name": "hast-util-to-jsx-runtime",
+      "versions": [
+        "2.3.7"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/hast-util-to-jsx-runtime#readme",
+      "description": "hast utility to transform to preact, react, solid, svelte, vue, etc"
+    },
+    {
+      "name": "hast-util-whitespace",
+      "versions": [
+        "3.0.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/hast-util-whitespace#readme",
+      "description": "hast utility to check if a node is inter-element whitespace"
+    },
+    {
       "name": "hono",
       "versions": [
         "4.13.17"
@@ -1645,6 +1850,16 @@
       "author": "Yusuke Wada",
       "homepage": "https://hono.dev",
       "description": "Web framework built on Web Standards"
+    },
+    {
+      "name": "html-url-attributes",
+      "versions": [
+        "3.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/rehypejs/rehype-minify/tree/main#readme",
+      "description": "Map of URL attributes in HTML"
     },
     {
       "name": "http-errors",
@@ -1667,6 +1882,15 @@
       "description": "Convert character encodings in pure javascript."
     },
     {
+      "name": "inline-style-parser",
+      "versions": [
+        "0.2.9"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/remarkablemark/inline-style-parser#readme",
+      "description": "An inline style parser."
+    },
+    {
       "name": "ipaddr.js",
       "versions": [
         "1.9.1"
@@ -1675,6 +1899,36 @@
       "author": "whitequark",
       "homepage": "https://github.com/whitequark/ipaddr.js#readme",
       "description": "A library for manipulating IPv4 and IPv6 addresses in JavaScript."
+    },
+    {
+      "name": "is-alphabetical",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/is-alphabetical#readme",
+      "description": "Check if a character is alphabetical"
+    },
+    {
+      "name": "is-alphanumerical",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/is-alphanumerical#readme",
+      "description": "Check if a character is alphanumerical"
+    },
+    {
+      "name": "is-decimal",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/is-decimal#readme",
+      "description": "Check if a character is decimal"
     },
     {
       "name": "is-extglob",
@@ -1695,6 +1949,16 @@
       "author": "Jon Schlinkert",
       "homepage": "https://github.com/micromatch/is-glob",
       "description": "Returns `true` if the given string looks like a glob pattern or an extglob pattern. This makes it easy to create code that only uses external modules like node-glob when necessary, resulting in much faster code execution and initialization time, and a better user experience."
+    },
+    {
+      "name": "is-hexadecimal",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/is-hexadecimal#readme",
+      "description": "Check if a character is hexadecimal"
     },
     {
       "name": "is-mobile",
@@ -1725,6 +1989,16 @@
       "author": "Jon Schlinkert",
       "homepage": "https://github.com/jonschlinkert/is-number",
       "description": "Returns true if a number or string value is a finite number. Useful for regex matches, parsing, user input, etc."
+    },
+    {
+      "name": "is-plain-obj",
+      "versions": [
+        "4.1.0"
+      ],
+      "license": "MIT",
+      "author": "Sindre Sorhus",
+      "homepage": "https://github.com/sindresorhus/is-plain-obj#readme",
+      "description": "Check if a value is a plain object"
     },
     {
       "name": "is-promise",
@@ -1817,6 +2091,16 @@
       "description": "Utility to dynamically load ESM modules in TypeScript CommonJS projects"
     },
     {
+      "name": "longest-streak",
+      "versions": [
+        "3.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/longest-streak#readme",
+      "description": "Count the longest repeating streak of a substring"
+    },
+    {
       "name": "lru.min",
       "versions": [
         "1.1.5"
@@ -1837,6 +2121,16 @@
       "description": "Modify strings, generate sourcemaps"
     },
     {
+      "name": "markdown-table",
+      "versions": [
+        "3.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/markdown-table#readme",
+      "description": "Generate a markdown (GFM) table"
+    },
+    {
       "name": "math-intrinsics",
       "versions": [
         "1.1.0"
@@ -1845,6 +2139,156 @@
       "author": "Jordan Harband",
       "homepage": "https://github.com/es-shims/math-intrinsics#readme",
       "description": "ES Math-related intrinsics and helpers, robustly cached."
+    },
+    {
+      "name": "mdast-util-find-and-replace",
+      "versions": [
+        "3.0.4"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-find-and-replace#readme",
+      "description": "mdast utility to find and replace text in a tree"
+    },
+    {
+      "name": "mdast-util-from-markdown",
+      "versions": [
+        "2.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-from-markdown#readme",
+      "description": "mdast utility to parse markdown"
+    },
+    {
+      "name": "mdast-util-gfm",
+      "versions": [
+        "3.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-gfm#readme",
+      "description": "mdast extension to parse and serialize GFM (GitHub Flavored Markdown)"
+    },
+    {
+      "name": "mdast-util-gfm-autolink-literal",
+      "versions": [
+        "2.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-gfm-autolink-literal#readme",
+      "description": "mdast extension to parse and serialize GFM autolink literals"
+    },
+    {
+      "name": "mdast-util-gfm-footnote",
+      "versions": [
+        "2.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-gfm-footnote#readme",
+      "description": "mdast extension to parse and serialize GFM footnotes"
+    },
+    {
+      "name": "mdast-util-gfm-strikethrough",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-gfm-strikethrough#readme",
+      "description": "mdast extension to parse and serialize GFM strikethrough"
+    },
+    {
+      "name": "mdast-util-gfm-table",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-gfm-table#readme",
+      "description": "mdast extension to parse and serialize GFM tables"
+    },
+    {
+      "name": "mdast-util-gfm-task-list-item",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-gfm-task-list-item#readme",
+      "description": "mdast extension to parse and serialize GFM task list items"
+    },
+    {
+      "name": "mdast-util-mdx-expression",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-mdx-expression#readme",
+      "description": "mdast extension to parse and serialize MDX (or MDX.js) expressions"
+    },
+    {
+      "name": "mdast-util-mdx-jsx",
+      "versions": [
+        "3.2.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-mdx-jsx#readme",
+      "description": "mdast extension to parse and serialize MDX or MDX.js JSX"
+    },
+    {
+      "name": "mdast-util-mdxjs-esm",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-mdxjs-esm#readme",
+      "description": "mdast extension to parse and serialize MDX.js ESM (import/exports)"
+    },
+    {
+      "name": "mdast-util-phrasing",
+      "versions": [
+        "4.1.0"
+      ],
+      "license": "MIT",
+      "author": "Victor Felder",
+      "homepage": "https://github.com/syntax-tree/mdast-util-phrasing#readme",
+      "description": "mdast utility to check if a node is phrasing content"
+    },
+    {
+      "name": "mdast-util-to-hast",
+      "versions": [
+        "13.2.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-to-hast#readme",
+      "description": "mdast utility to transform to hast"
+    },
+    {
+      "name": "mdast-util-to-markdown",
+      "versions": [
+        "2.2.3"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-to-markdown#readme",
+      "description": "mdast utility to serialize markdown"
+    },
+    {
+      "name": "mdast-util-to-string",
+      "versions": [
+        "4.0.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/mdast-util-to-string#readme",
+      "description": "mdast utility to get the plain text content of a node"
     },
     {
       "name": "media-typer",
@@ -1874,6 +2318,296 @@
       "license": "MIT",
       "homepage": "https://github.com/teambition/merge2",
       "description": "Merge multiple streams into one stream in sequence or parallel."
+    },
+    {
+      "name": "micromark",
+      "versions": [
+        "4.0.3"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "small commonmark compliant markdown parser with positional info and concrete tokens"
+    },
+    {
+      "name": "micromark-core-commonmark",
+      "versions": [
+        "2.0.4"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "The CommonMark markdown constructs"
+    },
+    {
+      "name": "micromark-extension-gfm",
+      "versions": [
+        "3.0.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark-extension-gfm#readme",
+      "description": "micromark extension to support GFM (GitHub Flavored Markdown)"
+    },
+    {
+      "name": "micromark-extension-gfm-autolink-literal",
+      "versions": [
+        "2.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark-extension-gfm-autolink-literal#readme",
+      "description": "micromark extension to support GFM autolink literals"
+    },
+    {
+      "name": "micromark-extension-gfm-footnote",
+      "versions": [
+        "2.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark-extension-gfm-footnote#readme",
+      "description": "micromark extension to support GFM footnotes"
+    },
+    {
+      "name": "micromark-extension-gfm-strikethrough",
+      "versions": [
+        "2.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark-extension-gfm-strikethrough#readme",
+      "description": "micromark extension to support GFM strikethrough"
+    },
+    {
+      "name": "micromark-extension-gfm-table",
+      "versions": [
+        "2.1.2"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark-extension-gfm-table#readme",
+      "description": "micromark extension to support GFM tables"
+    },
+    {
+      "name": "micromark-extension-gfm-tagfilter",
+      "versions": [
+        "2.0.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark-extension-gfm-tagfilter#readme",
+      "description": "micromark extension to support GFM tagfilter"
+    },
+    {
+      "name": "micromark-extension-gfm-task-list-item",
+      "versions": [
+        "2.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark-extension-gfm-task-list-item#readme",
+      "description": "micromark extension to support GFM task list items"
+    },
+    {
+      "name": "micromark-factory-destination",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark factory to parse destinations (found in resources, definitions)"
+    },
+    {
+      "name": "micromark-factory-label",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark factory to parse labels (found in media, definitions)"
+    },
+    {
+      "name": "micromark-factory-space",
+      "versions": [
+        "2.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark factory to parse markdown space (found in lots of places)"
+    },
+    {
+      "name": "micromark-factory-title",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark factory to parse markdown titles (found in resources, definitions)"
+    },
+    {
+      "name": "micromark-factory-whitespace",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark factory to parse markdown whitespace (found in lots of places)"
+    },
+    {
+      "name": "micromark-util-character",
+      "versions": [
+        "2.1.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility to handle character codes"
+    },
+    {
+      "name": "micromark-util-chunked",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility to splice and push with giant arrays"
+    },
+    {
+      "name": "micromark-util-classify-character",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility to classify whether a character is whitespace or punctuation"
+    },
+    {
+      "name": "micromark-util-combine-extensions",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility to combine syntax or html extensions"
+    },
+    {
+      "name": "micromark-util-decode-numeric-character-reference",
+      "versions": [
+        "2.0.2"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility to decode numeric character references"
+    },
+    {
+      "name": "micromark-util-decode-string",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility to decode markdown strings"
+    },
+    {
+      "name": "micromark-util-edit-map",
+      "versions": [
+        "1.0.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility to batch changes to lists of events"
+    },
+    {
+      "name": "micromark-util-encode",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility to encode dangerous html characters"
+    },
+    {
+      "name": "micromark-util-html-tag-name",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility with list of html tag names"
+    },
+    {
+      "name": "micromark-util-normalize-identifier",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility normalize identifiers (as found in references, definitions)"
+    },
+    {
+      "name": "micromark-util-resolve-all",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility to resolve subtokens"
+    },
+    {
+      "name": "micromark-util-sanitize-uri",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility to sanitize urls"
+    },
+    {
+      "name": "micromark-util-subtokenize",
+      "versions": [
+        "2.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility to tokenize subtokens"
+    },
+    {
+      "name": "micromark-util-symbol",
+      "versions": [
+        "2.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility with symbols"
+    },
+    {
+      "name": "micromark-util-types",
+      "versions": [
+        "2.0.3"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/micromark/micromark/tree/main#readme",
+      "description": "micromark utility with a couple of typescript types"
     },
     {
       "name": "micromatch",
@@ -2051,6 +2785,16 @@
       "author": "Sindre Sorhus",
       "homepage": "https://github.com/sindresorhus/p-timeout#readme",
       "description": "Timeout a promise after a specified amount of time"
+    },
+    {
+      "name": "parse-entities",
+      "versions": [
+        "4.0.2"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/parse-entities#readme",
+      "description": "Parse HTML character references"
     },
     {
       "name": "parseurl",
@@ -2231,6 +2975,16 @@
       "description": "Prettier is an opinionated code formatter"
     },
     {
+      "name": "property-information",
+      "versions": [
+        "7.2.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/property-information#readme",
+      "description": "Info on the properties and attributes of the web platform"
+    },
+    {
       "name": "proxy-addr",
       "versions": [
         "2.0.8"
@@ -2314,6 +3068,56 @@
       "license": "MIT",
       "homepage": "https://react.dev/",
       "description": "Brand checking of React Elements."
+    },
+    {
+      "name": "react-markdown",
+      "versions": [
+        "10.1.0"
+      ],
+      "license": "MIT",
+      "author": "Espen Hovlandsdal",
+      "homepage": "https://github.com/remarkjs/react-markdown#readme",
+      "description": "React component to render markdown"
+    },
+    {
+      "name": "remark-gfm",
+      "versions": [
+        "4.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/remarkjs/remark-gfm#readme",
+      "description": "remark plugin to support GFM (autolink literals, footnotes, strikethrough, tables, tasklists)"
+    },
+    {
+      "name": "remark-parse",
+      "versions": [
+        "11.0.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://remark.js.org",
+      "description": "remark plugin to add support for parsing markdown input"
+    },
+    {
+      "name": "remark-rehype",
+      "versions": [
+        "11.1.2"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/remarkjs/remark-rehype#readme",
+      "description": "remark plugin that turns markdown into HTML to support rehype"
+    },
+    {
+      "name": "remark-stringify",
+      "versions": [
+        "11.0.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://remark.js.org",
+      "description": "remark plugin to add support for serializing markdown"
     },
     {
       "name": "resolve-pkg-maps",
@@ -2483,6 +3287,16 @@
       "description": "Fixes stack traces for files with source maps"
     },
     {
+      "name": "space-separated-tokens",
+      "versions": [
+        "2.0.2"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/space-separated-tokens#readme",
+      "description": "Parse and stringify space separated tokens"
+    },
+    {
       "name": "sql-escaper",
       "versions": [
         "1.5.2"
@@ -2540,6 +3354,16 @@
       "description": "String convertions"
     },
     {
+      "name": "stringify-entities",
+      "versions": [
+        "4.0.4"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/stringify-entities#readme",
+      "description": "Serialize (encode) HTML character references"
+    },
+    {
       "name": "strtok3",
       "versions": [
         "10.7.0"
@@ -2548,6 +3372,16 @@
       "author": "Borewit",
       "homepage": "https://github.com/Borewit/strtok3#readme",
       "description": "A promise based streaming tokenizer"
+    },
+    {
+      "name": "style-to-object",
+      "versions": [
+        "2.0.2"
+      ],
+      "license": "MIT",
+      "author": "Mark",
+      "homepage": "https://github.com/remarkablemark/style-to-object#readme",
+      "description": "Parse CSS inline style to JavaScript object."
     },
     {
       "name": "stylis",
@@ -2629,6 +3463,26 @@
       "description": "Common token types for decoding and encoding numeric and string values"
     },
     {
+      "name": "trim-lines",
+      "versions": [
+        "3.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/trim-lines#readme",
+      "description": "Remove spaces and tabs around line-breaks"
+    },
+    {
+      "name": "trough",
+      "versions": [
+        "2.2.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/trough#readme",
+      "description": "`trough` is middleware"
+    },
+    {
       "name": "ts-algebra",
       "versions": [
         "2.0.0"
@@ -2688,6 +3542,66 @@
       "description": "A stand-alone types package for Undici"
     },
     {
+      "name": "unified",
+      "versions": [
+        "11.0.5"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://unifiedjs.com",
+      "description": "parse, inspect, transform, and serialize content through syntax trees"
+    },
+    {
+      "name": "unist-util-is",
+      "versions": [
+        "6.0.1"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/unist-util-is#readme",
+      "description": "unist utility to check if a node passes a test"
+    },
+    {
+      "name": "unist-util-position",
+      "versions": [
+        "5.0.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/unist-util-position#readme",
+      "description": "unist utility to get the position of a node"
+    },
+    {
+      "name": "unist-util-stringify-position",
+      "versions": [
+        "4.0.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/unist-util-stringify-position#readme",
+      "description": "unist utility to serialize a node, position, or point as a human readable location"
+    },
+    {
+      "name": "unist-util-visit",
+      "versions": [
+        "5.2.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/unist-util-visit#readme",
+      "description": "unist utility to visit nodes"
+    },
+    {
+      "name": "unist-util-visit-parents",
+      "versions": [
+        "6.1.0"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/syntax-tree/unist-util-visit-parents#readme",
+      "description": "unist utility to recursively walk over nodes, with ancestral information"
+    },
+    {
       "name": "unpipe",
       "versions": [
         "1.0.0"
@@ -2706,6 +3620,26 @@
       "author": "Douglas Christopher Wilson",
       "homepage": "https://github.com/jshttp/vary#readme",
       "description": "Manipulate the HTTP Vary header"
+    },
+    {
+      "name": "vfile",
+      "versions": [
+        "6.0.3"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/vfile/vfile#readme",
+      "description": "Virtual file format for text processing"
+    },
+    {
+      "name": "vfile-message",
+      "versions": [
+        "4.0.4"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/vfile/vfile-message#readme",
+      "description": "vfile utility to create a virtual message"
     },
     {
       "name": "vite",
@@ -2756,6 +3690,16 @@
       "author": "Colin McDonnell",
       "homepage": "https://zod.dev",
       "description": "TypeScript-first schema declaration and validation library with static type inference"
+    },
+    {
+      "name": "zwitch",
+      "versions": [
+        "2.0.4"
+      ],
+      "license": "MIT",
+      "author": "Titus Wormer",
+      "homepage": "https://github.com/wooorm/zwitch#readme",
+      "description": "Handle values based on a property"
     }
   ],
   "Apache-2.0": [
@@ -3202,6 +4146,16 @@
       "author": "Philipp Dunkel",
       "homepage": "https://github.com/js-temporal/temporal-polyfill#readme",
       "description": "Polyfill for Temporal (https://github.com/tc39/proposal-temporal), an ECMA TC39 Stage 3 proposal"
+    },
+    {
+      "name": "@ungap/structured-clone",
+      "versions": [
+        "1.4.0"
+      ],
+      "license": "ISC",
+      "author": "Andrea Giammarchi",
+      "homepage": "https://github.com/ungap/structured-clone#readme",
+      "description": "A structuredClone polyfill"
     },
     {
       "name": "fastq",

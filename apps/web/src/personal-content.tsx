@@ -21,6 +21,8 @@ import {
   conversationMutationSchema,
   deletionPreviewSchema,
   personalResourceListSchema,
+  requirementGroupCandidatesSchema,
+  requirementGroupMutationSchema,
 } from '../../../packages/contracts/src/conversations';
 import type {
   Conversation,
@@ -197,24 +199,36 @@ function PermanentDelete({
 
 export function ArchivedConversationsPanel() {
   const [rows, setRows] = useState<Conversation[]>([]);
+  const [groups, setGroups] = useState<
+    z.infer<typeof requirementGroupCandidatesSchema>['groups']
+  >([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [target, setTarget] = useState<DeleteTarget | null>(null);
   async function load(signal?: AbortSignal) {
     setLoading(true);
     try {
-      const response = await api(
-        '/me/conversations?archived=true',
-        signal ? { signal } : {},
-        conversationListSchema,
-      );
+      const [response, archivedGroups] = await Promise.all([
+        api(
+          '/me/conversations?archived=true',
+          signal ? { signal } : {},
+          conversationListSchema,
+        ),
+        api(
+          '/me/requirement-groups/archived',
+          signal ? { signal } : {},
+          requirementGroupCandidatesSchema,
+        ),
+      ]);
       if (!signal?.aborted) {
         setRows(response.conversations);
+        setGroups(archivedGroups.groups);
         setError(undefined);
       }
     } catch (failure) {
       if (!signal?.aborted) {
         setRows([]);
+        setGroups([]);
         setError(describeError(failure));
       }
     } finally {
@@ -252,6 +266,35 @@ export function ArchivedConversationsPanel() {
       setLoading(false);
     }
   }
+  async function restoreGroup(group: (typeof groups)[number]) {
+    setLoading(true);
+    try {
+      await api(
+        `/me/requirement-groups/${group.projectId}/${group.requirementId}`,
+        {
+          method: 'PUT',
+          body: {
+            commandId: crypto.randomUUID(),
+            rowVersion: group.rowVersion,
+            archived: false,
+            hidden: false,
+            expanded: true,
+          },
+        },
+        requirementGroupMutationSchema,
+      );
+      personalContentChanged({
+        type: 'requirementGroupRestored',
+        projectId: group.projectId,
+        requirementId: group.requirementId,
+      });
+      await load();
+    } catch (failure) {
+      setError(describeError(failure));
+    } finally {
+      setLoading(false);
+    }
+  }
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <Space style={{ justifyContent: 'space-between', width: '100%' }}>
@@ -265,6 +308,36 @@ export function ArchivedConversationsPanel() {
         </Button>
       </Space>
       {error && <Alert type="error" title={error} showIcon />}
+      <Typography.Text type="secondary">
+        恢复单个会话会同时显示其需求分组；不会恢复其他手工归档的会话。
+      </Typography.Text>
+      {groups.length > 0 && (
+        <Table
+          rowKey={(group) => `${group.projectId}:${group.requirementId}`}
+          size="small"
+          loading={loading}
+          dataSource={groups}
+          pagination={false}
+          columns={[
+            {
+              title: '归档需求分组',
+              render: (_, group) =>
+                group.alias ?? group.generatedName ?? group.formalTitle,
+            },
+            {
+              title: '操作',
+              render: (_, group) => (
+                <Button
+                  disabled={loading}
+                  onClick={() => void restoreGroup(group)}
+                >
+                  恢复整个分组
+                </Button>
+              ),
+            },
+          ]}
+        />
+      )}
       <Table
         rowKey="id"
         size="small"

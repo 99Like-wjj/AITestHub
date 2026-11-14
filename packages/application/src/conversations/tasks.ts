@@ -46,6 +46,17 @@ import {
   type ModelRetryEvent,
 } from '../../../contracts/src/ai-retry.js';
 import { AiModelAttemptStore } from './model-attempts.js';
+import {
+  applyAiPresentationEvent,
+  emptyAiTaskPresentation,
+  type AiTaskPresentation,
+  type aiSegmentFinishedPayloadSchema,
+  type aiProgressPayloadSchema,
+  aiSummaryPayloadSchema,
+  type aiModelDispatchedPayloadSchema,
+} from '../../../contracts/src/ai-presentation.js';
+import { ModelTimingSamples } from './model-timing.js';
+import { assertPublicSummaryText } from './public-summary.js';
 
 export interface RunnerInvocation {
   callId: string;
@@ -59,7 +70,17 @@ export interface RunnerInvocation {
     'notDispatched' | 'fetchInvoked' | 'responseReceived' | 'unknown';
 }
 export type RunnerEvent =
-  | { type: 'text'; text: string; modelAttemptId?: string }
+  | {
+      type: 'text';
+      text: string;
+      modelAttemptId?: string;
+      receivedAt?: string;
+      receivedMonotonicMs?: number;
+    }
+  | z.infer<typeof aiSegmentFinishedPayloadSchema>
+  | z.infer<typeof aiProgressPayloadSchema>
+  | z.infer<typeof aiSummaryPayloadSchema>
+  | z.infer<typeof aiModelDispatchedPayloadSchema>
   | { type: 'modelRetry'; retry: ModelRetryEvent }
   | {
       type: 'tool';
@@ -183,6 +204,9 @@ export class AiTasksService {
   }
   async status(actor: ActorContext, id: string) {
     return this.db.transaction(async (tx) => {
+      // Content, attempts and the event watermark must share one MVCC view.
+      // A read-committed sequence of SELECTs can skip a concurrently committed delta.
+      await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
       const task = await this.ownedTask(actor, id, tx);
       const message = (
         await tx.query<{ content: string; status: string }>(
@@ -208,6 +232,48 @@ export class AiTasksService {
         )
       ).rows[0];
       const retry = modelRetryEventSchema.safeParse(retryRow?.retry);
+      const rows = await tx.query<{
+        sequence: string;
+        event_type: string;
+        payload: unknown;
+        created_at: Date;
+      }>(
+        'SELECT e.sequence::text,e.event_type,e.payload,e.created_at FROM app.ai_task_events e WHERE e.task_id=$1 ORDER BY e.sequence',
+        [id],
+      );
+      let presentation: AiTaskPresentation = emptyAiTaskPresentation();
+      for (const event of rows.rows)
+        presentation = applyAiPresentationEvent(presentation, {
+          sequence: event.sequence,
+          type: event.event_type,
+          payload: event.payload,
+          createdAt: event.created_at.toISOString(),
+        });
+      // Old workers did not publish semantic segment boundaries. Preserve their
+      // actual aggregate, without inventing commentary/final history.
+      if (!presentation.segments.length && message?.content)
+        presentation = {
+          ...presentation,
+          segments: [
+            {
+              id: task.assistant_message_id,
+              logicalCallId: task.id,
+              modelOrdinal: 1,
+              attemptNo: 0,
+              phase: 'unclassified',
+              state: terminal.has(task.state)
+                ? task.state === 'completed'
+                  ? 'completed'
+                  : task.state === 'cancelled'
+                    ? 'cancelled'
+                    : 'interrupted'
+                : 'streaming',
+              text: message.content,
+              startedAt: (task.started_at ?? task.created_at).toISOString(),
+              finishedAt: task.finished_at?.toISOString() ?? null,
+            },
+          ],
+        };
       return {
         task: {
           id: task.id,
@@ -227,6 +293,7 @@ export class AiTasksService {
             actor.userId,
           ),
           modelRetry: retry.success ? retry.data : null,
+          presentation,
           messageStatus: message?.status ?? 'deleted',
           createdAt: task.created_at.toISOString(),
           startedAt: task.started_at?.toISOString() ?? null,
@@ -249,7 +316,7 @@ export class AiTasksService {
         payload: unknown;
         created_at: Date;
       }>(
-        'SELECT sequence::text,event_type,payload,created_at FROM app.ai_task_events WHERE task_id=$1 AND sequence>$2::bigint ORDER BY sequence LIMIT 200',
+        'SELECT e.sequence::text,e.event_type,e.payload,e.created_at FROM app.ai_task_events e WHERE e.task_id=$1 AND e.sequence>$2::bigint ORDER BY e.sequence LIMIT 200',
         [id, after],
       );
       return {
@@ -316,6 +383,7 @@ export class AiTaskWorker {
   readonly workerId = randomUUID();
   readonly #controllers = new Set<AbortController>();
   #stopping = false;
+  readonly #timings = new Map<string, Map<string, ModelTimingSamples>>();
   constructor(
     readonly tasks: AiTasksService,
     readonly factory: ConversationRunnerFactory,
@@ -469,6 +537,7 @@ export class AiTaskWorker {
     type: string,
     payload: Record<string, unknown>,
   ): Promise<void> {
+    let appended = false;
     await this.tasks.db.transaction(async (tx) => {
       const live = await tx.query(
         `SELECT t.id FROM app.ai_tasks t JOIN app.ai_conversations c ON c.id=t.conversation_id
@@ -476,6 +545,28 @@ export class AiTaskWorker {
         [task.id, this.workerId, task.fence],
       );
       if (!live.rowCount) return;
+      if (type === 'ai.summary') {
+        const parsed = aiSummaryPayloadSchema.safeParse(payload);
+        if (!parsed.success)
+          throw new DomainError(
+            'INVALID_MODEL_OUTPUT',
+            '模型公开摘要结构无效，未保存该片段。',
+            422,
+          );
+        const summary = parsed.data;
+        const previous =
+          (
+            await tx.query<{ text: string }>(
+              `SELECT COALESCE(string_agg(payload->>'text','' ORDER BY sequence),'') text
+             FROM app.ai_task_events WHERE task_id=$1 AND event_type='ai.summary'
+             AND payload->>'segmentId'=$2 AND payload->'summaryIndex'=to_jsonb($3::integer)`,
+              [task.id, summary.segmentId, summary.summaryIndex],
+            )
+          ).rows[0]?.text ?? '';
+        // The task row lock serializes the prefix read with this insertion, so a
+        // credential split across deltas cannot bypass the visible-output check.
+        assertPublicSummaryText(previous, summary.text);
+      }
       if (
         type === 'ai.text' &&
         typeof payload.text === 'string' &&
@@ -496,6 +587,7 @@ export class AiTaskWorker {
         WHERE t.id=$1 AND t.worker_id=$2 AND t.fence=$3 AND c.deleted_at IS NULL AND t.state IN ('running','cancelling') RETURNING task_id`,
         [task.id, this.workerId, task.fence, type, payload],
       );
+      appended = Boolean(inserted.rowCount);
       if (
         inserted.rowCount &&
         type === 'ai.text' &&
@@ -506,12 +598,23 @@ export class AiTaskWorker {
           [task.assistant_message_id, payload.text],
         );
     });
+    if (
+      appended &&
+      type === 'ai.text' &&
+      typeof payload.modelAttemptId === 'string'
+    )
+      this.#timings
+        .get(task.id)
+        ?.get(payload.modelAttemptId)
+        ?.committedText(new Date().toISOString(), performance.now());
   }
   async tick(taskId?: string): Promise<boolean> {
     if (this.#stopping) return false;
     await this.heartbeat();
     const task = await this.#claim(taskId);
     if (!task) return false;
+    const timings = new Map<string, ModelTimingSamples>();
+    this.#timings.set(task.id, timings);
     const actor: ActorContext = {
       userId: task.owner_id,
       entrypoint: 'internal-ai',
@@ -764,6 +867,24 @@ export class AiTaskWorker {
             }
           : {}),
         onEvent: (event) => {
+          if (event.type === 'modelDispatched') {
+            const sample = timings.get(event.segmentId);
+            if (sample)
+              sample.requested = {
+                at: event.startedAt,
+                monotonic: event.monotonicMs,
+                ...(event.sampling ? { sampling: event.sampling } : {}),
+              };
+          }
+          if (
+            event.type === 'text' &&
+            event.modelAttemptId &&
+            event.receivedAt !== undefined &&
+            event.receivedMonotonicMs !== undefined
+          )
+            timings
+              .get(event.modelAttemptId)
+              ?.receivedText(event.receivedAt, event.receivedMonotonicMs);
           if (
             event.type === 'tool' &&
             (event.state === 'completed' ||
@@ -873,6 +994,11 @@ export class AiTaskWorker {
                 context: attempt,
               });
           });
+          if (attempt)
+            await this.#append(task, 'ai.segment.started', {
+              context: attempt,
+            });
+          if (attempt) timings.set(intentId, new ModelTimingSamples());
         },
         afterModelCall: async (
           intentId,
@@ -939,6 +1065,18 @@ export class AiTaskWorker {
               projectId: null,
             });
           });
+          if (attempt && errorCode)
+            await this.#append(task, 'ai.segment', {
+              type: 'segment',
+              segmentId: intentId,
+              phase: 'pending',
+              state: errorCode === 'CANCELLED' ? 'cancelled' : 'interrupted',
+            });
+          const timing = timings.get(intentId);
+          if (timing)
+            await this.#append(task, 'ai.modelTiming', {
+              ...timing.result(intentId),
+            });
         },
         onModelRetry: async (event) => {
           await eventChain;
@@ -1001,6 +1139,7 @@ export class AiTaskWorker {
     } finally {
       clearInterval(poll);
       this.#controllers.delete(controller);
+      this.#timings.delete(task.id);
       runner?.dispose?.();
     }
     return true;

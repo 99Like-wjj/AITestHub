@@ -5,6 +5,22 @@ import { requirementEligibleParticipantsSchema } from '../../../packages/contrac
 import { requirementDetailSchema } from '../../../packages/contracts/src/requirements';
 import { api, describeError } from './api';
 import { useIssueReadScope } from './issues-counts';
+
+export const issueSourceLabels = {
+  manualTester: '测试人员手工发现',
+  manualProduct: '产品人员手工发现',
+  confirmedProblem: '待确认问题经测试确认',
+  uiResult: 'UI结果发现',
+  apiResult: '接口结果发现',
+  extraFinding: '其他人工发现',
+} as const;
+
+export const problemExecutionProvenanceLabels = {
+  'local-ai': '本地AI执行来源',
+  'protocol-synthetic': '合成协议来源，非真实UI执行',
+  unknown: '执行来源未确认',
+  'platform-api': '平台接口执行来源',
+} as const;
 export type IssueNavigation = z.infer<
   typeof assetNavigationSchema
 >['requirements'];

@@ -25,6 +25,7 @@ import {
   problemStateLabels,
   severityLabels,
   useRequirementMetadata,
+  issueSourceLabels,
 } from './issue-context';
 import type { IssueMember, IssueNavigation } from './issue-context';
 import type { ActionTarget, EditorTarget, HandlingAction } from './issue-forms';
@@ -231,17 +232,7 @@ export function IssueDetailPanel({
                         : '需求版本资料暂不可用';
                   })()
                 : '未指定需求版本'}{' '}
-              ·{' '}
-              {(
-                {
-                  manualTester: '测试人员手工发现',
-                  manualProduct: '产品人员手工发现',
-                  confirmedProblem: '待确认问题经测试确认',
-                  uiResult: 'UI结果发现',
-                  apiResult: '接口结果发现',
-                  extraFinding: '其他人工发现',
-                } as Record<string, string>
-              )[base.source] ?? base.source}
+              · {issueSourceLabels[base.source]}
             </p>
             {requirementMetadata.error && (
               <Alert
@@ -466,6 +457,26 @@ export function IssueDetailPanel({
                       'protocol-synthetic' && (
                       <p className="caption">
                         合成协议记录，非真实UI目标执行。
+                      </p>
+                    )}
+                    {verification.method === 'manual' && (
+                      <p className="caption">
+                        {verification.scopeSnapshot ? (
+                          <>
+                            当次需求版本：
+                            {verification.scopeSnapshot.requirementVersionNo
+                              ? `V${verification.scopeSnapshot.requirementVersionNo}`
+                              : '未绑定具体版本'}
+                            {verification.scopeSnapshot.requirementVersionId
+                              ? ` · ${verification.scopeSnapshot.requirementVersionId}`
+                              : ''}
+                            <br />
+                            当次范围：
+                            {verification.scopeSnapshot.scopeDescription}
+                          </>
+                        ) : (
+                          '旧记录未单独冻结范围和版本；不能用当前缺陷资料代替当次事实。'
+                        )}
                       </p>
                     )}
                     <div className="row wrap">

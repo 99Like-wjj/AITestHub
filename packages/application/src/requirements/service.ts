@@ -27,6 +27,7 @@ import { audit } from '../events.js';
 import { OperationService } from '../operations/service.js';
 import { RequirementDeletionService } from './deletion.js';
 import { prepareRequirementVersion } from './preparation.js';
+import { matchRequirementMaterials } from './material-matching.js';
 import { sanitizeSourceLinkFields } from '../../../contracts/src/source-links.js';
 import { assertSubmissionFileBudget } from '../files/submission-budget.js';
 import {
@@ -297,18 +298,48 @@ export class RequirementService {
     const input = requirementCandidatesInputSchema.parse(raw);
     return this.db.transaction(async (tx) => {
       await requireProject(tx, actor, input.projectId, 'project.read');
+      if (input.materials?.some((material) => material.fileResourceId))
+        await requireProject(tx, actor, input.projectId, 'files.transfer');
+      const exact = input.materials
+        ? await matchRequirementMaterials(tx, input.projectId, input.materials)
+        : { complete: false, matches: [] };
+      const exactIds = [
+        ...new Set(exact.matches.map((match) => match.requirementId)),
+      ];
       const rows = await tx.query<RequirementRow>(
         `SELECT r.*,r.archived_at IS NULL AND r.lifecycle='inProgress' AND (${requirementInactivityDeadlineSql})<=clock_timestamp() inactive FROM app.requirements r WHERE r.project_id=$1 AND
-         (($2::text IS NOT NULL AND business_number=$2) OR lower(title)=lower($3) OR position(lower($3) in lower(title))>0)
-         ORDER BY business_updated_at DESC,id LIMIT 50`,
-        [input.projectId, input.businessNumber || null, input.title],
+         (id=ANY($4::uuid[]) OR ($2::text IS NOT NULL AND business_number=$2) OR lower(title)=lower($3) OR position(lower($3) in lower(title))>0)
+         ORDER BY (id=ANY($4::uuid[])) DESC,business_updated_at DESC,id LIMIT 250`,
+        [input.projectId, input.businessNumber || null, input.title, exactIds],
       );
+      const latest = (
+        await tx.query<{
+          requirement_id: string;
+          id: string;
+          version_no: number;
+        }>(
+          'SELECT DISTINCT ON (requirement_id) requirement_id,id,version_no FROM app.requirement_versions WHERE project_id=$1 AND requirement_id=ANY($2::uuid[]) ORDER BY requirement_id,version_no DESC',
+          [input.projectId, rows.rows.map((row) => row.id)],
+        )
+      ).rows;
       // Auxiliary-model lookup is separate and must never turn failure into "no duplicate exists".
       return {
         candidates: rows.rows.map(requirementDto),
-        lookupIncomplete: true,
-        lookupMessage:
-          actor.entrypoint === 'web'
+        exactMaterialMatches: exact.matches,
+        latestVersions: latest.map((version) => ({
+          requirementId: version.requirement_id,
+          requirementVersionId: version.id,
+          versionNo: version.version_no,
+        })),
+        materialMatchComplete: exact.complete,
+        lookupIncomplete: !exact.complete || exact.matches.length === 0,
+        lookupMessage: input.materials
+          ? exact.complete
+            ? exact.matches.length
+              ? '已按本项目完整文件集合的用途、顺序和已验证SHA-256找到完全相同版本；请明确采用已有版本、开新版或独立新建。'
+              : '完整文件集合已核对，未找到完全相同版本；编号/名称仅提供候选。语义查找未执行，不能断言不存在相似需求。'
+            : '本次含来源链接或候选超过读取上限，完整材料比对未完成；链接相同不证明内容相同。'
+          : actor.entrypoint === 'web'
             ? '本次仅完成本地编号与名称规则匹配；网页语义查找由本人主动触发，不能据无候选断言不存在重复。'
             : '本次仅提供编号与名称，未提供本地自动语义比较所需的完整材料；可使用完整材料find流程，未完成不表示不存在重复。',
       };

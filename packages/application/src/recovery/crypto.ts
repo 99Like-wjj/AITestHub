@@ -102,10 +102,14 @@ export async function decryptFile(
     );
     decipher.setAAD(Buffer.from(context));
     decipher.setAuthTag(tag);
-    const source = createReadStream(path, {
-      start: prefix.length,
-      end: size - 17,
-    });
+    const ciphertextBytes = size - prefix.length - tag.length;
+    const source =
+      ciphertextBytes === 0
+        ? Readable.from([], { objectMode: false })
+        : createReadStream(path, {
+            start: prefix.length,
+            end: size - tag.length - 1,
+          });
     source.once('error', () => decipher.destroy(failure()));
     decipher.once('close', () => source.destroy());
     return source.pipe(decipher);

@@ -42,6 +42,7 @@ interface ModelDefaults {
   maxTokens: number;
   reasoningEffort?: string;
   onTextDelta?: (text: string) => void;
+  onSummaryDelta?: (text: string, summaryIndex: number) => void;
 }
 function text(message: BaseMessage): string {
   return typeof message.content === 'string'
@@ -253,6 +254,8 @@ export class NativeAdapterChatModel extends BaseChatModel<AdapterCallOptions> {
                 message: new AIMessageChunk({ id, content: delta.text }),
               }),
             );
+          } else if (delta.type === 'summary') {
+            this.#defaults.onSummaryDelta?.(delta.text, delta.summaryIndex);
           } else
             push(
               new ChatGenerationChunk({

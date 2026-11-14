@@ -25,6 +25,8 @@ import type {
   ModelAttemptFailure,
   ModelRetryEvent,
 } from '../../../packages/contracts/src/ai-retry.js';
+import type { RunnerEvent } from '../../../packages/application/src/conversations/tasks.js';
+import { createProgressTool, AI_PROGRESS_TOOL_NAME } from './progress-tool.js';
 import {
   emptyUsage,
   ModelAdapterError,
@@ -39,10 +41,7 @@ import type { BusinessServices } from '../../../packages/application/src/tool-re
 import { createAiExternalTools } from './external-tools.js';
 import type { ExternalMcpService } from '../../../packages/application/src/external-mcp/service.js';
 import type { ExternalMcpInvocations } from '../../../packages/application/src/external-mcp/invocations.js';
-import type {
-  OperationTarget,
-  AiToolSourceReference,
-} from '../../../packages/contracts/src/conversations.js';
+import type { OperationTarget } from '../../../packages/contracts/src/conversations.js';
 import {
   createSharedSkillRulesTool,
   getSharedSkillRuleRegistry,
@@ -53,25 +52,13 @@ import {
 } from '../../../packages/application/src/shared-skill-rules/index.js';
 
 export const AI_TOOL_ALLOWLIST = [
+  AI_PROGRESS_TOOL_NAME,
   'ath_projects_list',
   'ath_public_search',
   SHARED_SKILL_RULE_TOOL_NAME,
   ...AI_BUSINESS_TOOL_NAMES,
 ] as const;
-export type AiHostEvent =
-  | { type: 'text'; text: string; modelAttemptId?: string }
-  | { type: 'modelRetry'; retry: ModelRetryEvent }
-  | {
-      type: 'tool';
-      invocationId: string;
-      name: string;
-      state: 'started' | 'completed' | 'failed' | 'waitingConfirmation';
-      confirmationId?: string;
-      externalInvocationId?: string;
-      sourceRefs?: AiToolSourceReference[];
-      unknownEffect?: boolean;
-    }
-  | { type: 'contextReset'; reason: 'authorization-changed' };
+export type AiHostEvent = RunnerEvent;
 export interface AiHostRequest {
   conversationId: string;
   projectId?: string;
@@ -525,6 +512,13 @@ export class RestrictedAiHost {
     });
     const enabledTools = [
       projectTool,
+      createProgressTool({
+        assertActive: async () => {
+          await this.#access.assertActive(internalActor, scope);
+          await input.authorizeContext?.();
+        },
+        emit,
+      }),
       ...businessTools,
       ...externalTools,
       ruleTool,
@@ -538,6 +532,7 @@ export class RestrictedAiHost {
     const isolation = createMiddleware({
       name: 'AITestHubCapabilityBoundary',
       wrapModelCall: async (request, handler) => {
+        let completedAttemptId: string | null = null;
         const allowed = request.tools.filter(
           (candidate) =>
             'name' in candidate &&
@@ -610,6 +605,7 @@ export class RestrictedAiHost {
               attempt,
               null,
             );
+            completedAttemptId = intentId;
             return answer;
           },
         });
@@ -637,6 +633,14 @@ export class RestrictedAiHost {
             '模型提出了未开放工具，已停止此轮。',
             403,
           );
+        if (completedAttemptId)
+          emit({
+            type: 'segment',
+            segmentId: completedAttemptId,
+            phase: response.tool_calls?.length ? 'commentary' : 'final',
+            state: 'completed',
+            text: visibleText(response),
+          });
         // Drop hidden reasoning/additional provider metadata before any graph checkpoint is written.
         return new AIMessage({
           content: visibleText(response),

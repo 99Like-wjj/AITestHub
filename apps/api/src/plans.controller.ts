@@ -44,6 +44,18 @@ export class PlansController {
           key: req.query.key,
         }),
       );
+    if (path === 'ui-eligibility' && req.method === 'GET')
+      return res.json(await this.service.uiEligibility(actor, projectId));
+    const rename = /^([^/]+)\/name$/.exec(path);
+    if (rename?.[1] && req.method === 'PUT')
+      return res.json(
+        await this.service.rename(
+          actor,
+          projectId,
+          idSchema.parse(rename[1]),
+          req.body,
+        ),
+      );
     if (path === '' && req.method === 'GET')
       return res.json(
         await this.service.list(

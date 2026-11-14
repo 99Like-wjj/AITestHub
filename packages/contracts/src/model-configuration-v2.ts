@@ -15,6 +15,9 @@ import {
 modelAuthSchemeSchema,
 modelBaseUrlSchema,
 modelProtocolSchema,
+modelEndpointConfigurationIssue,
+modelOutputContextIssue,
+type ModelProtocol,
 } from './model-protocol.js';
 
 export const modelEffortSchema = z
@@ -78,10 +81,18 @@ const checkService = (
   input: {
     accessPolicy: string;
     allowedUserIds: string[];
-    models: { id: string }[];
+    models: { id: string; maxOutput: number | null; contextLimit: number | null }[];
+    protocol: ModelProtocol;
+    baseUrl: string;
   },
   ctx: z.RefinementCtx,
 ) => {
+  const endpointIssue = modelEndpointConfigurationIssue(input.baseUrl, input.protocol);
+  if (endpointIssue) ctx.addIssue({ code: 'custom', path: ['baseUrl'], message: endpointIssue });
+  input.models.forEach((model, index) => {
+    const issue = modelOutputContextIssue(model.maxOutput, model.contextLimit);
+    if (issue) ctx.addIssue({ code: 'custom', path: ['models', index, 'maxOutput'], message: issue });
+  });
   if (new Set(input.allowedUserIds).size !== input.allowedUserIds.length)
     ctx.addIssue({
       code: 'custom',

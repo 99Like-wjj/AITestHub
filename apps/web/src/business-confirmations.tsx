@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Alert, Button, Card, Collapse, Space, Tag, Typography } from 'antd';
 import {
   businessConfirmationResponseSchema,
@@ -31,12 +31,18 @@ function sameOriginLink(value: string): string | null {
 
 export function BusinessConfirmationsPanel({
   taskId,
+  conversationId,
   confirmationId,
+  pendingOnly = false,
+  hideEmpty = false,
   refreshKey = 0,
   onResolved,
 }: {
   taskId?: string;
+  conversationId?: string;
   confirmationId?: string;
+  pendingOnly?: boolean;
+  hideEmpty?: boolean;
   refreshKey?: number;
   onResolved?: () => void;
 }) {
@@ -46,15 +52,21 @@ export function BusinessConfirmationsPanel({
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [uncertainIds, setUncertainIds] = useState(new Set<string>());
   const generation = useRef(0);
-  const scopeKey = `${taskId ?? ''}:${confirmationId ?? ''}`;
+  const scopeKey = `${conversationId ?? ''}:${taskId ?? ''}:${confirmationId ?? ''}:${pendingOnly}`;
   const currentScope = useRef(scopeKey);
   currentScope.current = scopeKey;
   useEffect(() => setPendingId(null), [scopeKey]);
-  async function load(signal?: AbortSignal) {
+  const relevant = (row: BusinessConfirmation) =>
+    !pendingOnly ||
+    ['waitingConfirmation', 'executing', 'failed', 'unknown'].includes(
+      row.status,
+    );
+  async function load(signal?: AbortSignal, silent = false) {
     const epoch = ++generation.current;
-    setLoading(true);
+    if (!silent) setLoading(true);
     try {
-      if (!taskId && !confirmationId) throw new Error('缺少原提案或任务标识。');
+      if (!taskId && !confirmationId && !conversationId)
+        throw new Error('缺少原提案、任务或会话标识。');
       const confirmations = confirmationId
         ? [
             (
@@ -67,7 +79,9 @@ export function BusinessConfirmationsPanel({
           ]
         : (
             await api(
-              `/me/business-confirmations?taskId=${taskId}`,
+              conversationId
+                ? `/me/business-confirmations?conversationId=${encodeURIComponent(conversationId)}&pendingOnly=${pendingOnly}`
+                : `/me/business-confirmations?taskId=${taskId}`,
               signal ? { signal } : {},
               listBusinessConfirmationsSchema,
             )
@@ -75,11 +89,15 @@ export function BusinessConfirmationsPanel({
       if (!signal?.aborted && epoch === generation.current) {
         if (
           (taskId && confirmations.some((row) => row.taskId !== taskId)) ||
+          (conversationId &&
+            confirmations.some(
+              (row) => row.conversationId !== conversationId,
+            )) ||
           (confirmationId &&
             confirmations.some((row) => row.id !== confirmationId))
         )
           throw new Error('提案关联任务不匹配，请保留原任务 ID 核对。');
-        setRows(confirmations);
+        setRows(confirmations.filter(relevant));
         setError(undefined);
         setUncertainIds(new Set());
       }
@@ -92,13 +110,45 @@ export function BusinessConfirmationsPanel({
       if (!signal?.aborted && epoch === generation.current) setLoading(false);
     }
   }
-  useEffect(() => {
+  useLayoutEffect(() => {
     const controller = new AbortController();
     setRows([]);
     setUncertainIds(new Set());
     void load(controller.signal);
     return () => controller.abort();
-  }, [taskId, confirmationId, refreshKey]);
+  }, [taskId, conversationId, confirmationId, pendingOnly]);
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(
+      () => void load(controller.signal, true),
+      200,
+    );
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [refreshKey]);
+  const executing = rows.some((row) => row.status === 'executing');
+  useEffect(() => {
+    if (!executing) return;
+    const timer = window.setInterval(() => void load(undefined, true), 2500);
+    return () => window.clearInterval(timer);
+  }, [executing, scopeKey]);
+  useEffect(() => {
+    let timer: number | undefined;
+    const refresh = () => {
+      if (document.visibilityState === 'hidden') return;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => void load(undefined, true), 100);
+    };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [scopeKey]);
   async function resolve(
     row: BusinessConfirmation,
     decision: 'accept' | 'decline',
@@ -125,10 +175,12 @@ export function BusinessConfirmationsPanel({
       generation.current += 1;
       setLoading(false);
       setRows((previous) =>
-        previous.map((entry) =>
-          entry.id === row.id ? response.confirmation : entry,
-        ),
+        previous
+          .map((entry) => (entry.id === row.id ? response.confirmation : entry))
+          .filter(relevant),
       );
+      await load(undefined, true);
+      if (currentScope.current !== requestedScope) return;
       onResolved?.();
     } catch (failure) {
       if (currentScope.current !== requestedScope) return;
@@ -142,6 +194,7 @@ export function BusinessConfirmationsPanel({
       if (currentScope.current === requestedScope) setPendingId(null);
     }
   }
+  if (hideEmpty && !error && !rows.length) return null;
   return (
     <Card
       size="small"

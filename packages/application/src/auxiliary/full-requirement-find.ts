@@ -1,5 +1,5 @@
 import { humanConfirmationExecutionInTransaction } from '../tool-registry/human-confirmation.js';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import {
@@ -34,74 +34,16 @@ export class FullRequirementFindService {
     return { purpose: 'requirementLookup' as const, ...source };
   }
   private async local(actor: ActorContext, input: FullRequirementFindInput) {
-    const plain = await new RequirementService(this.db).candidates(actor, {
+    const local = await new RequirementService(this.db).candidates(actor, {
       projectId: input.projectId,
       title: input.title,
       businessNumber: input.businessNumber,
+      materials: input.materials,
     });
-    const exact = await this.db.transaction(async (tx) => {
-      await requireProject(tx, actor, input.projectId, 'project.read');
-      if (input.materials.some((material) => material.sourceLink)) return [];
-      await requireProject(tx, actor, input.projectId, 'files.transfer');
-      const ids = [
-          ...new Set(
-            input.materials.map((material) => material.fileResourceId!),
-          ),
-        ],
-        files = (
-          await tx.query<{ id: string; declared_sha256: string }>(
-            "SELECT id,declared_sha256 FROM app.file_resources WHERE id=ANY($1::uuid[]) AND owner_scope='project' AND project_id=$2 AND status='verified' AND deleted_at IS NULL FOR SHARE",
-            [ids, input.projectId],
-          )
-        ).rows;
-      if (files.length !== ids.length)
-        throw new DomainError(
-          'FILE_NOT_READY',
-          '完整材料查找仅接收本项目已验证文件；未读取或越权材料不冒充匹配完成。',
-          422,
-        );
-      const digest = createHash('sha256')
-        .update(
-          JSON.stringify(
-            [...input.materials]
-              .sort((a, b) => a.order - b.order)
-              .map((material) => ({
-                purpose: material.purpose,
-                sha256: files.find(
-                  (file) => file.id === material.fileResourceId,
-                )!.declared_sha256,
-                order: material.order,
-              })),
-          ),
-        )
-        .digest('hex');
-      return (
-        await tx.query<{
-          requirement_id: string;
-          id: string;
-          version_no: number;
-          latest_version_no: number;
-        }>(
-          `SELECT v.requirement_id,v.id,v.version_no,(SELECT max(n.version_no) FROM app.requirement_versions n WHERE n.requirement_id=v.requirement_id) latest_version_no FROM app.requirement_versions v WHERE v.project_id=$1 AND v.material_set_digest=$2 ORDER BY v.requirement_id,v.version_no DESC LIMIT 201`,
-          [input.projectId, digest],
-        )
-      ).rows;
-    });
-    const ids = [
-      ...new Set([
-        ...plain.candidates.map((item) => item.id),
-        ...exact.map((item) => item.requirement_id),
-      ]),
-    ];
     return {
-      ids,
-      exact: exact.slice(0, 200).map((item) => ({
-        requirementId: item.requirement_id,
-        requirementVersionId: item.id,
-        versionNo: item.version_no,
-        latestVersionNo: item.latest_version_no,
-      })),
-      exactComplete: exact.length <= 200,
+      ids: local.candidates.map((item) => item.id),
+      exact: local.exactMaterialMatches,
+      exactComplete: local.materialMatchComplete,
     };
   }
   private async row(actor: ActorContext, input: FullRequirementFindInput) {

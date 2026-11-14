@@ -19,6 +19,7 @@ import { ExternalMcpService } from '../../../packages/application/src/external-m
 import { ExternalMcpInvocations } from '../../../packages/application/src/external-mcp/invocations.js';
 import type { AiModelRetryPolicy } from '../../../packages/application/src/ai/model-retry.js';
 import type { PersonalFileReader } from '../../../packages/application/src/conversations/references.js';
+import { resolveModelOutputBudget } from '../../../packages/application/src/ai/model-output-budget.js';
 
 /** Only the worker owns this factory. Model/credentials never become tool arguments. */
 export function createConversationRunnerFactory(
@@ -31,6 +32,7 @@ export function createConversationRunnerFactory(
   } = {},
 ): ConversationRunnerFactory {
   return async (selection, actor) => {
+    const outputBudget = resolveModelOutputBudget(selection);
     const testConfiguration = new TestConfigurationService(db, broker);
     const plans = new PlanService(db, testConfiguration);
     const externalMcp = new ExternalMcpService(db, broker);
@@ -52,6 +54,14 @@ export function createConversationRunnerFactory(
         allowLocalHttp: true,
         ...(v2 ? { authScheme: selection.authScheme } : {}),
         timeoutMs: 60_000,
+        onFetchStarted: (timing) => {
+          if (activeInput && activeIntentId)
+            activeInput.onEvent({
+              type: 'modelDispatched',
+              segmentId: activeIntentId,
+              ...timing,
+            });
+        },
         onDispatch: async (attempt) => {
           await activeInput?.authorizeContext();
           if (!activeIntentId)
@@ -113,9 +123,8 @@ export function createConversationRunnerFactory(
     const effort = supportedEffort.success ? supportedEffort.data : undefined;
     // The checked selector already owns the limits; an old accepted revision may
     // legitimately survive the technical schema-upgrade binding without becoming today's row.
-    const maximum = selection.maxOutput ?? 4096;
     const model = new NativeAdapterChatModel(native, {
-      maxTokens: Math.min(4096, maximum),
+      maxTokens: outputBudget,
       ...(effort ? { reasoningEffort: effort } : {}),
       onTextDelta: (text) => {
         if (activeInput && activeIntentId)
@@ -123,6 +132,17 @@ export function createConversationRunnerFactory(
             type: 'text',
             text,
             modelAttemptId: activeIntentId,
+            receivedAt: new Date().toISOString(),
+            receivedMonotonicMs: performance.now(),
+          });
+      },
+      onSummaryDelta: (text, summaryIndex) => {
+        if (activeInput && activeIntentId)
+          activeInput.onEvent({
+            type: 'summary',
+            segmentId: activeIntentId,
+            summaryIndex,
+            text,
           });
       },
     });

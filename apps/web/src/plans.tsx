@@ -33,6 +33,8 @@ import {
   planListSchema,
   planReceiptSchema,
   revisePlanInputSchema,
+  renamePlanInputSchema,
+  uiPlanEligibilitySchema,
   uiPlanScopeSchema,
 } from '../../../packages/contracts/src/plans';
 import {
@@ -70,6 +72,122 @@ interface PlanFields {
   requirementVersionId: string;
 }
 
+function PlanNameEditor({
+  projectId,
+  plan,
+  onClose,
+  onSaved,
+}: {
+  projectId: string;
+  plan: Plan | null;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [name, setName] = useState('');
+  const [form] = Form.useForm<{ name: string }>();
+  const { modal } = App.useApp();
+  const command = usePlanningCommand(
+    projectId,
+    plan ? `${projectId}:${plan.id}:name` : null,
+  );
+  useEffect(() => {
+    setName(plan?.name ?? '');
+    form.setFieldsValue({ name: plan?.name ?? '' });
+  }, [plan, form]);
+  const close = () => {
+    if (command.pending) return;
+    if (plan && name !== plan.name && !command.uncertain)
+      modal.confirm({
+        title: '放弃尚未保存的名称修改？',
+        okText: '放弃修改',
+        cancelText: '继续编辑',
+        onOk: onClose,
+      });
+    else onClose();
+  };
+  return (
+    <Modal
+      title="修改计划名称"
+      open={plan !== null}
+      onCancel={close}
+      okText="保存名称"
+      confirmLoading={command.pending}
+      okButtonProps={{ disabled: command.uncertain }}
+      cancelButtonProps={{ disabled: command.pending }}
+      onOk={() => form.submit()}
+      destroyOnHidden
+    >
+      <Alert
+        type="info"
+        showIcon
+        className="mb"
+        title="只新增名称修订，原固定范围、环境和批准快照保持原样，历史不变。"
+      />
+      {command.error && <Alert type="error" showIcon title={command.error} />}
+      <PlanningRecovery
+        projectId={projectId}
+        operation="plans.rename"
+        command={command}
+        schema={planReceiptSchema}
+        onRecovered={() => {
+          void onSaved().then(onClose);
+        }}
+      />
+      <Form
+        form={form}
+        layout="vertical"
+        onValuesChange={(values: { name?: string }) =>
+          setName(values.name ?? '')
+        }
+        onFinish={async (values: { name: string }) => {
+          if (!plan) return;
+          const receipt = await command.run(
+            'plans.rename',
+            plan.id,
+            '修改计划名称',
+            (commandId) =>
+              api(
+                `/projects/${projectId}/plans/${plan.id}/name`,
+                {
+                  method: 'PUT',
+                  body: renamePlanInputSchema.parse({
+                    commandId,
+                    rowVersion: plan.rowVersion,
+                    basePlanRevisionId: plan.planRevisionId,
+                    name: values.name,
+                  }),
+                },
+                planReceiptSchema,
+              ),
+          );
+          if (receipt) {
+            await onSaved();
+            onClose();
+          }
+        }}
+      >
+        <Form.Item
+          name="name"
+          label="计划名称"
+          rules={[
+            {
+              required: true,
+              whitespace: true,
+              max: 200,
+              message: '请输入不超过200字的计划名称。',
+            },
+          ]}
+        >
+          <Input
+            maxLength={200}
+            disabled={command.pending || command.uncertain}
+          />
+        </Form.Item>
+      </Form>
+    </Modal>
+  );
+}
+
 function PlanEditor({
   projectId,
   kind,
@@ -92,6 +210,9 @@ function PlanEditor({
     requirementVersionId: string;
   }>();
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [eligibility, setEligibility] = useState<
+    z.infer<typeof uiPlanEligibilitySchema>['items']
+  >([]);
   const [navigation, setNavigation] = useState<Navigation>({
     requirements: [],
   });
@@ -146,12 +267,20 @@ function PlanEditor({
         { signal: controller.signal },
         testConfigurationListSchema,
       ),
+      kind === 'UI'
+        ? api(
+            `/projects/${projectId}/plans/ui-eligibility`,
+            { signal: controller.signal },
+            uiPlanEligibilitySchema,
+          )
+        : Promise.resolve({ items: [] }),
     ])
-      .then(([data, map, configs]) => {
+      .then(([data, map, configs, qualified]) => {
         if (!controller.signal.aborted) {
           setAssets(data.assets);
           setNavigation(map);
           setEnvironments(configs.configurations);
+          setEligibility(qualified.items);
         }
       })
       .catch((err: unknown) => {
@@ -216,6 +345,11 @@ function PlanEditor({
       !asset.removedAt &&
       (kind === 'API' || asset.requirementVersionId === selectedVersion),
   );
+  const invalidSelection =
+    kind === 'UI' &&
+    caseIds.some(
+      (id) => !eligibility.find((item) => item.caseId === id)?.eligible,
+    );
   return (
     <>
       <Modal
@@ -245,7 +379,12 @@ function PlanEditor({
             </Button>
             <Button
               type="primary"
-              disabled={loading || !caseIds.length || command.uncertain}
+              disabled={
+                loading ||
+                !caseIds.length ||
+                command.uncertain ||
+                invalidSelection
+              }
               loading={pending}
               onClick={() => form.submit()}
             >
@@ -270,6 +409,15 @@ function PlanEditor({
           }
           className="section-alert"
         />
+        {invalidSelection && !loading && (
+          <Alert
+            type="warning"
+            showIcon
+            className="section-alert"
+            title="所选范围当前未满足整集评审条件，不能主动更新。"
+            description="原计划固定范围仍保留；仅改名称请使用列表中的“改名”。"
+          />
+        )}
         {(error || command.error) && (
           <Alert
             type="error"
@@ -367,8 +515,11 @@ function PlanEditor({
           )}
           {cases.slice(0, caseVisible).map((asset) => {
             const selected = caseIds.includes(asset.id),
-              unavailable =
-                kind === 'UI' && asset.reviewState !== 'approved' && !selected;
+              qualification = eligibility.find(
+                (item) => item.caseId === asset.id,
+              ),
+              eligible = kind === 'API' || qualification?.eligible === true,
+              unavailable = !eligible && !selected;
             return (
               <label className="checkrow" key={asset.id}>
                 <input
@@ -392,10 +543,21 @@ function PlanEditor({
                       asset.setId}{' '}
                     · 当前编辑 r{asset.revisionNo} ·{' '}
                     {reviewLabels[asset.reviewState]}
+                    {kind === 'UI' && !eligible && (
+                      <span role="status">
+                        {' '}
+                        ·{' '}
+                        {qualification?.reasons.join('；') || '资格尚未核实。'}
+                      </span>
+                    )}
                   </small>
                 </span>
                 <span className="badge">
-                  {unavailable ? '待评审' : '可选择'}
+                  {!eligible
+                    ? selected && plan
+                      ? '原固定项 · 当前不可更新'
+                      : '不符合整集门槛'
+                    : '可选择'}
                 </span>
               </label>
             );
@@ -526,6 +688,7 @@ export function PlansPage({
   const [error, setError] = useState<string>();
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<Plan | null>(null);
+  const [renaming, setRenaming] = useState<Plan | null>(null);
   const [detail, setDetail] = useState<PlanDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [uiScope, setUiScope] = useState<UiScope | null>(null);
@@ -913,6 +1076,12 @@ export function PlansPage({
                 >
                   编辑范围
                 </Button>
+                <Button
+                  disabled={!tester || locked}
+                  onClick={() => setRenaming(plan)}
+                >
+                  改名
+                </Button>
                 {plan.kind === 'UI' ? (
                   <Button
                     type="primary"
@@ -983,6 +1152,12 @@ export function PlansPage({
         onClose={() => setEditorOpen(false)}
         onSaved={() => load()}
       />
+      <PlanNameEditor
+        projectId={project.id}
+        plan={renaming}
+        onClose={() => setRenaming(null)}
+        onSaved={() => load()}
+      />
       <Drawer
         zIndex={uiLayers.detail}
         title={detail?.plan.name ?? '计划详情'}
@@ -1009,15 +1184,47 @@ export function PlansPage({
                 },
                 {
                   key: 'environment',
-                  label: '环境 ID',
-                  children: detail.plan.environmentId,
+                  label:
+                    detail.plan.kind === 'UI' ? '固定环境' : '逻辑引用环境',
+                  children: (
+                    <>
+                      <b>
+                        {detail.display.environmentName ?? '名称当前不可读取'}
+                      </b>
+                      <div className="caption">{detail.plan.environmentId}</div>
+                    </>
+                  ),
                 },
                 {
                   key: 'scope',
                   label: '范围',
-                  children: detail.plan.items
-                    .map((item) => item.caseId)
-                    .join('、'),
+                  children: (
+                    <Space direction="vertical">
+                      <Typography.Text type="secondary">
+                        {detail.plan.kind === 'API'
+                          ? '逻辑用例引用；真正开始时解析最新有效已审修订。'
+                          : '以下名称来自原固定已审快照。'}
+                      </Typography.Text>
+                      {detail.display.cases.map((item) => (
+                        <div key={item.caseId}>
+                          <Button
+                            type="link"
+                            onClick={() => {
+                              window.location.hash = `cases?${new URLSearchParams({ projectId: project.id, kind: detail.plan.kind, assetId: item.caseId })}`;
+                            }}
+                          >
+                            {item.title ?? '历史用例（名称当前不可读取）'}
+                          </Button>
+                          <div className="caption">
+                            {item.caseId}
+                            {item.approvalSnapshotId
+                              ? ` · 固定批准 ${item.approvalSnapshotId}`
+                              : ''}
+                          </div>
+                        </div>
+                      ))}
+                    </Space>
+                  ),
                 },
               ]}
             />

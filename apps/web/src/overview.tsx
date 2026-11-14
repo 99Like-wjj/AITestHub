@@ -175,7 +175,17 @@ export function OverviewPage({ project }: { project: Project | null }) {
       )}
       <OverviewLayout
         project={project}
-        onReview={() => go('cases', { review: 'unapproved' })}
+        onReview={() =>
+          go('cases', {
+            review: 'unapproved',
+            kind:
+              data &&
+              data.stats.pendingUiCases === 0 &&
+              data.stats.pendingApiCases > 0
+                ? 'API'
+                : 'UI',
+          })
+        }
         onRequirements={() => go('requirements')}
         onExecutions={() => go('reports')}
         stats={
@@ -204,6 +214,26 @@ export function OverviewPage({ project }: { project: Project | null }) {
                   {typeof value === 'number' ? count(value) : value}
                 </strong>
                 <p>{caption}</p>
+                {label === '待评审用例' && (
+                  <div className="row wrap">
+                    <Button
+                      size="small"
+                      onClick={() =>
+                        go('cases', { review: 'unapproved', kind: 'UI' })
+                      }
+                    >
+                      UI {count(data.stats.pendingUiCases)}
+                    </Button>
+                    <Button
+                      size="small"
+                      onClick={() =>
+                        go('cases', { review: 'unapproved', kind: 'API' })
+                      }
+                    >
+                      接口 {count(data.stats.pendingApiCases)}
+                    </Button>
+                  </div>
+                )}
               </section>
             ))
           ) : loading ? (

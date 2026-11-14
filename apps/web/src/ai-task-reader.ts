@@ -10,6 +10,21 @@ import type {
 } from '../../../packages/contracts/src/conversations';
 import { api, ApiError, describeError } from './api';
 import type { AiRetryState } from './ai-retry-state';
+import { applyAiPresentationEvent } from '../../../packages/contracts/src/ai-presentation';
+
+/** Opt-in metadata only; never includes prompts, model text, tool arguments or credentials. */
+export interface AiTaskReadMetric {
+  taskId: string;
+  stage: 'snapshot' | 'event' | 'paint';
+  sequence: string | null;
+  monotonicMs: number;
+  serverCreatedAt?: string;
+  eventType?: string;
+  serverSentAt?: string;
+  providerReceivedAt?: string;
+  segmentId?: string;
+  isPublicText?: boolean;
+}
 
 export type TaskConnection =
   | 'idle'
@@ -79,6 +94,8 @@ export async function readAiTaskSession({
   onRetry,
   onError,
   recoveryBudgetMs = 300000,
+  initialTask = null,
+  onMetric,
 }: {
   taskId: string;
   cursor: TaskCursor;
@@ -90,8 +107,25 @@ export async function readAiTaskSession({
   onRetry: (state: AiRetryState | null) => void;
   onError: (message: string | undefined) => void;
   recoveryBudgetMs?: number;
+  initialTask?: AiTaskStatus['task'] | null;
+  onMetric?: (metric: AiTaskReadMetric) => void;
 }) {
   const active = () => !signal.aborted && current();
+  let currentTask = initialTask?.id === taskId ? initialTask : null;
+  let publishTimer: ReturnType<typeof setTimeout> | undefined;
+  function publish(immediate = false) {
+    if (!active() || !currentTask) return;
+    if (immediate) {
+      if (publishTimer !== undefined) clearTimeout(publishTimer);
+      publishTimer = undefined;
+      onTask(currentTask);
+    } else if (publishTimer === undefined) {
+      publishTimer = setTimeout(() => {
+        publishTimer = undefined;
+        if (active() && currentTask) onTask(currentTask);
+      }, 32);
+    }
+  }
   let retries = 0,
     firstFailureAt: number | undefined,
     refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -120,9 +154,23 @@ export async function readAiTaskSession({
       serial >= lastAppliedRefresh
     ) {
       lastAppliedRefresh = serial;
-      onTask(response.task);
+      const incoming = response.task.presentation?.snapshotSequence;
+      const applied = currentTask?.presentation?.snapshotSequence;
+      if (
+        applied === undefined ||
+        (incoming !== undefined && BigInt(incoming) >= BigInt(applied))
+      ) {
+        currentTask = response.task;
+        publish(true);
+        onMetric?.({
+          taskId,
+          stage: 'snapshot',
+          sequence: incoming ?? null,
+          monotonicMs: performance.now(),
+        });
+      }
     }
-    return response.task;
+    return currentTask ?? response.task;
   }
   function retain(event: AiTaskEvent) {
     if (
@@ -136,7 +184,58 @@ export async function readAiTaskSession({
       throw new Error('任务事件所属对象不符，已停止读取。');
     cursor.seen.add(event.sequence);
     cursor.cursor = event.sequence;
-    if (event.type !== 'ai.text') onEvent(event);
+    onMetric?.({
+      taskId,
+      stage: 'event',
+      sequence: event.sequence,
+      monotonicMs: performance.now(),
+      serverCreatedAt: event.createdAt,
+      eventType: event.type,
+      ...(event.sentAt ? { serverSentAt: event.sentAt } : {}),
+      ...(event.type === 'ai.text' && event.payload.receivedAt
+        ? { providerReceivedAt: event.payload.receivedAt }
+        : {}),
+      ...(event.type === 'ai.text' && event.payload.modelAttemptId
+        ? { segmentId: event.payload.modelAttemptId }
+        : {}),
+      ...(event.type === 'ai.text'
+        ? { isPublicText: event.payload.text.length > 0 }
+        : {}),
+    });
+    const presentation = currentTask?.presentation;
+    if (
+      currentTask &&
+      presentation &&
+      BigInt(event.sequence) > BigInt(presentation.snapshotSequence)
+    ) {
+      currentTask = {
+        ...currentTask,
+        presentation: applyAiPresentationEvent(presentation, event),
+      };
+      if (event.type === 'task.started') currentTask.status = 'running';
+      if (event.type === 'task.cancel-requested')
+        currentTask.status = event.payload.status;
+      if (event.type === 'task.finished') {
+        currentTask.status = event.payload.status;
+        currentTask.finishedAt = event.createdAt;
+      }
+      if (event.type === 'task.interrupted') currentTask.status = 'interrupted';
+      if (event.type === 'ai.modelRetry')
+        currentTask.modelRetry = event.payload.retry;
+      publish();
+    }
+    if (event.type !== 'ai.text' && event.type !== 'ai.summary') onEvent(event);
+    // New segments consume deltas directly. Old workers have no boundaries and
+    // continue the previous snapshot fallback, without guessing old phases.
+    if (
+      (event.type !== 'ai.text' &&
+        event.type !== 'ai.summary' &&
+        event.type !== 'ai.modelDispatched') ||
+      !presentation?.segments.some(
+        (segment) => segment.phase !== 'unclassified',
+      )
+    )
+      scheduleRefresh();
   }
   async function persisted() {
     while (active()) {
@@ -332,7 +431,6 @@ export async function readAiTaskSession({
                     'TASK_EVENT_CONTRACT_ERROR',
                   );
                 retain(event.data);
-                scheduleRefresh();
               }
               boundary = buffer.indexOf('\n\n');
             }
@@ -429,5 +527,6 @@ export async function readAiTaskSession({
   } finally {
     attemptController?.abort();
     stopRefresh();
+    if (publishTimer !== undefined) clearTimeout(publishTimer);
   }
 }

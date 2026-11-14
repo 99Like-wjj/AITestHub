@@ -106,6 +106,7 @@ export function RequirementComposer({
   const [target, setTarget] = useState<Requirement | null>(requirement);
   const [pending, setPending] = useState(false);
   const [lookupPending, setLookupPending] = useState(false);
+  const [adoptingVersion, setAdoptingVersion] = useState<string>();
   const [error, setError] = useState<string>();
   const [candidates, setCandidates] =
     useState<z.infer<typeof requirementCandidatesSchema>>();
@@ -174,6 +175,18 @@ export function RequirementComposer({
   const draftReady = readyScope === scope && scope.ready;
   const draftPending = draftReady && pending;
   const materials = materialRecord.key === scope ? materialRecord.items : [];
+  const materialSignature = JSON.stringify(
+    materials.map((item) => [
+      item.id,
+      item.purpose,
+      item.originalName,
+      item.sourceLink,
+      item.readability,
+    ]),
+  );
+  const currentMaterialSignature = useRef(materialSignature);
+  currentMaterialSignature.current = materialSignature;
+  useEffect(() => setCandidates(undefined), [materialSignature]);
   function setMaterials(change: SetStateAction<DraftMaterial[]>) {
     setMaterialRecord((previous) => {
       if (!current()) return previous;
@@ -361,8 +374,16 @@ export function RequirementComposer({
       return;
     }
     setLookupPending(true);
+    scope.busy = true;
     setError(undefined);
     try {
+      const finished: DraftMaterial[] = [];
+      for (const material of materials) {
+        if (material.file && !material.fileResourceId)
+          finished.push(await uploadMaterial(material));
+        else finished.push(material);
+      }
+      assertCurrent();
       const response = await api(
         `/projects/${projectId}/requirements/candidates`,
         {
@@ -374,6 +395,20 @@ export function RequirementComposer({
               typeof number === 'string' && number.trim()
                 ? number.trim()
                 : null,
+            ...(finished.length
+              ? {
+                  materials: finished.map((item, order) => ({
+                    purpose: item.purpose,
+                    originalName: item.originalName,
+                    readability: item.readability,
+                    order,
+                    ...(item.fileResourceId
+                      ? { fileResourceId: item.fileResourceId }
+                      : {}),
+                    ...(item.sourceLink ? { sourceLink: item.sourceLink } : {}),
+                  })),
+                }
+              : {}),
           },
         },
         requirementCandidatesSchema,
@@ -381,6 +416,7 @@ export function RequirementComposer({
       if (
         current() &&
         lookupId === lookupGeneration.current &&
+        materialSignature === currentMaterialSignature.current &&
         form.getFieldValue('title') === title &&
         form.getFieldValue('businessNumber') === number
       )
@@ -389,8 +425,23 @@ export function RequirementComposer({
       if (current() && lookupId === lookupGeneration.current)
         setError(describeError(err));
     } finally {
+      scope.busy = false;
       if (current() && lookupId === lookupGeneration.current)
         setLookupPending(false);
+    }
+  }
+  async function adoptVersion(candidate: Requirement, versionId: string) {
+    if (!current() || scope.busy) return;
+    scope.busy = true;
+    setAdoptingVersion(versionId);
+    try {
+      await onSaved(candidate.id, versionId);
+      if (current()) onClose();
+    } catch (failure) {
+      if (current()) setError(describeError(failure));
+    } finally {
+      scope.busy = false;
+      if (current()) setAdoptingVersion(undefined);
     }
   }
   async function uploadMaterial(material: DraftMaterial) {
@@ -534,7 +585,12 @@ export function RequirementComposer({
             <Button
               type="primary"
               loading={draftPending}
-              disabled={!draftReady || capabilities.status !== 'ready'}
+              disabled={
+                !draftReady ||
+                capabilities.status !== 'ready' ||
+                lookupPending ||
+                Boolean(adoptingVersion)
+              }
               onClick={() => form.submit()}
             >
               {draftPending
@@ -583,6 +639,7 @@ export function RequirementComposer({
             <Form
               form={form}
               layout="vertical"
+              onValuesChange={() => setCandidates(undefined)}
               onFinish={(values: {
                 title: string;
                 businessNumber: string;
@@ -700,7 +757,7 @@ export function RequirementComposer({
                     dataSource={candidates.candidates}
                     locale={{
                       emptyText:
-                        '本地编号/名称规则没有候选。材料语义查重尚未完成，不能认定需求不存在。',
+                        '本次本地规则没有候选。语义查重未执行，不能认定不存在相似需求。',
                     }}
                     columns={[
                       { title: '候选名称', dataIndex: 'title' },
@@ -710,24 +767,107 @@ export function RequirementComposer({
                         render: (value: string | null) => value ?? '—',
                       },
                       {
+                        title: '匹配版本与最新版本',
+                        render: (_, candidate) => (
+                          <Space direction="vertical">
+                            {candidates.exactMaterialMatches
+                              .filter(
+                                (match) => match.requirementId === candidate.id,
+                              )
+                              .map((match) => (
+                                <Tag key={match.requirementVersionId}>
+                                  完整材料相同 V{match.versionNo}
+                                  {match.versionNo < match.latestVersionNo
+                                    ? ` · 已有最新 V${match.latestVersionNo}`
+                                    : ' · 最新版'}
+                                </Tag>
+                              ))}
+                            <span>
+                              最新 V
+                              {candidates.latestVersions.find(
+                                (version) =>
+                                  version.requirementId === candidate.id,
+                              )?.versionNo ?? '未取得'}
+                            </span>
+                          </Space>
+                        ),
+                      },
+                      {
                         title: '归属选择',
                         render: (_, candidate) => (
-                          <Button
-                            onClick={() => {
-                              if (!current()) return;
-                              setTarget(candidate);
-                              form.setFieldsValue({
-                                title: candidate.title,
-                                businessNumber: candidate.businessNumber ?? '',
-                              });
-                            }}
-                          >
-                            作为该需求的新版本
-                          </Button>
+                          <Space direction="vertical">
+                            {candidates.exactMaterialMatches
+                              .filter(
+                                (match) => match.requirementId === candidate.id,
+                              )
+                              .map((match) => (
+                                <Button
+                                  key={match.requirementVersionId}
+                                  disabled={Boolean(adoptingVersion)}
+                                  loading={
+                                    adoptingVersion ===
+                                    match.requirementVersionId
+                                  }
+                                  onClick={() =>
+                                    void adoptVersion(
+                                      candidate,
+                                      match.requirementVersionId,
+                                    )
+                                  }
+                                >
+                                  采用已有 V{match.versionNo}（不新建版本）
+                                </Button>
+                              ))}
+                            {(() => {
+                              const latest = candidates.latestVersions.find(
+                                (version) =>
+                                  version.requirementId === candidate.id,
+                              );
+                              return latest &&
+                                !candidates.exactMaterialMatches.some(
+                                  (match) =>
+                                    match.requirementVersionId ===
+                                    latest.requirementVersionId,
+                                ) ? (
+                                <Button
+                                  disabled={Boolean(adoptingVersion)}
+                                  loading={
+                                    adoptingVersion ===
+                                    latest.requirementVersionId
+                                  }
+                                  onClick={() =>
+                                    void adoptVersion(
+                                      candidate,
+                                      latest.requirementVersionId,
+                                    )
+                                  }
+                                >
+                                  采用最新 V{latest.versionNo}（使用已有资料）
+                                </Button>
+                              ) : null;
+                            })()}
+                            <Button
+                              disabled={Boolean(adoptingVersion)}
+                              onClick={() => {
+                                if (!current()) return;
+                                setTarget(candidate);
+                                form.setFieldsValue({
+                                  title: candidate.title,
+                                  businessNumber:
+                                    candidate.businessNumber ?? '',
+                                });
+                              }}
+                            >
+                              作为该需求的新版本
+                            </Button>
+                          </Space>
                         ),
                       },
                     ]}
                   />
+                  <p className="caption">
+                    采用已有版本只打开并使用该版资料，不创建版本。要保留本次所选材料，可明确新建版本或继续独立新建；重复编号需修改或留空。
+                  </p>
                 </CardLike>
               )}
               {target && (
@@ -774,7 +914,7 @@ export function RequirementComposer({
               </Button>
             </Upload>
             <Typography.Paragraph type="secondary">
-              保存时按完整字节上传并验证
+              保存或完整材料查找前按完整字节上传并验证
               SHA-256；中断后明确再次完整重传，不自动重试。本次读取限额：每文件
               {limits ? resourceByteLabel(limits.maxFileBytes) : '待核对'}
               ，每版唯一文件总量

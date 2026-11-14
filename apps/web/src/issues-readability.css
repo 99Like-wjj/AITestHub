@@ -1,0 +1,44 @@
+.live-issue-layout .issue-query-row {
+  align-items: flex-end;
+}
+
+.live-issue-layout .issue-search-field {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.live-issue-layout
+  .issue-search-field
+  > .ant-input:not(:disabled)::placeholder {
+  color: #54645e;
+  opacity: 1;
+}
+
+:root[data-theme='dark']
+  .live-issue-layout
+  .issue-search-field
+  > .ant-input:not(:disabled)::placeholder {
+  color: #b5b5b5;
+}
+
+.live-issue-layout .issue-handling-summary {
+  margin-top: 5px;
+  font-size: 12px;
+}
+
+.live-issue-layout .issue-handling-summary > summary {
+  color: var(--text);
+  cursor: pointer;
+}
+
+.live-issue-layout .ant-table .text-link-button {
+  height: auto;
+  padding-inline: 0;
+  white-space: normal;
+  text-align: left;
+}

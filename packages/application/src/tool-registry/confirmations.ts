@@ -22,6 +22,7 @@ import { canonicalJson } from '../operations/service.js';
 import { assertFrozenTaskSources } from '../conversations/task-sources.js';
 import type { BusinessToolRegistry, PreparedBusinessCall } from './registry.js';
 import { withHumanConfirmedExecution } from './human-confirmation.js';
+import { conversationRow } from '../conversations/common.js';
 
 interface ConfirmationRow {
   id: string;
@@ -331,6 +332,35 @@ export class BusinessConfirmations {
       const rows = await tx.query<ConfirmationRow>(
         'SELECT * FROM app.business_confirmations WHERE owner_id=$1 AND task_id=$2 ORDER BY created_at,id',
         [actor.userId, taskId],
+      );
+      const confirmations = [];
+      for (const row of rows.rows) {
+        await this.authorize(tx, actor, row);
+        confirmations.push(safe(row));
+      }
+      return { confirmations };
+    });
+  }
+  async listConversation(
+    actor: ActorContext,
+    conversationId: string,
+    pendingOnly = true,
+  ) {
+    if (actor.entrypoint !== 'web')
+      throw new DomainError('FORBIDDEN', '会话提案列表仅供本人平台界面。', 403);
+    idSchema.parse(conversationId);
+    return this.db.transaction(async (tx) => {
+      await conversationRow(tx, actor, conversationId);
+      const rows = await tx.query<ConfirmationRow>(
+        `SELECT c.* FROM app.business_confirmations c WHERE c.owner_id=$1 AND c.origin='internal-ai' AND c.conversation_id=$2
+         AND EXISTS(SELECT 1 FROM app.ai_tasks t WHERE t.id=c.task_id AND t.owner_id=$1 AND t.conversation_id=$2)
+         AND (NOT $3 OR c.state=ANY($4::text[])) ORDER BY c.created_at,c.id`,
+        [
+          actor.userId,
+          conversationId,
+          pendingOnly,
+          ['waitingConfirmation', 'executing', 'failed', 'unknown'],
+        ],
       );
       const confirmations = [];
       for (const row of rows.rows) {

@@ -87,6 +87,7 @@ export const requirementCandidatesInputSchema = z.strictObject({
   projectId: idSchema,
   title: titleSchema,
   businessNumber: z.string().trim().max(100).nullable(),
+  materials: resourceMaterialInputs.optional(),
 });
 export type CreateRequirementInput = z.infer<
   typeof createRequirementInputSchema
@@ -141,6 +142,14 @@ export const requirementDetailSchema = z.strictObject({
 });
 export const requirementCandidatesSchema = z.strictObject({
   candidates: z.array(requirementSchema),
+  exactMaterialMatches: z.array(z.strictObject({
+    requirementId: idSchema, requirementVersionId: idSchema,
+    versionNo: z.number().int().positive(), latestVersionNo: z.number().int().positive(),
+  })).default([]),
+  latestVersions: z.array(z.strictObject({
+    requirementId: idSchema, requirementVersionId: idSchema, versionNo: z.number().int().positive(),
+  })).default([]),
+  materialMatchComplete: z.boolean().default(false),
   lookupIncomplete: z.boolean(),
   lookupMessage: z.string(),
 });

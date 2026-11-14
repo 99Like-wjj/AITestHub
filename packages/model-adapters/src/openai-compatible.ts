@@ -1,8 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ModelAuthScheme } from '../../contracts/src/model-protocol.js';
+import { resolveModelEndpoint } from './model-endpoint.js';
+import {
+  resolveModelSampling,
+  type ModelSamplingParameters,
+  type ModelSamplingMetadata,
+} from '../../contracts/src/model-sampling.js';
 
 export type JsonValue = z.infer<ReturnType<typeof z.json>>;
+/** Existing native wire safety ceiling, independent of a provider's configured model capacity. */
+export const maximumNativeModelOutputTokens = 393_216;
 export interface ModelMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
@@ -33,6 +41,8 @@ export interface ModelContinuation {
 }
 export type ModelDelta =
   | { type: 'text'; text: string }
+  // Only an explicit provider-designated public summary. Never raw reasoning.
+  | { type: 'summary'; summaryIndex: number; text: string }
   | {
       type: 'toolCall';
       index: number;
@@ -44,6 +54,8 @@ export interface ModelRequest {
   messages: readonly ModelMessage[];
   maxTokens: number;
   reasoningEffort?: string;
+  /** Explicit ChatCompletions values override only the matching profile defaults. */
+  sampling?: ModelSamplingParameters;
   stream?: boolean;
   tools?: readonly ModelTool[];
   toolChoice?: 'auto' | 'none' | 'required' | { name: string };
@@ -119,6 +131,12 @@ export interface AdapterOptions {
     model: string;
     stream: boolean;
   }) => void | Promise<void>;
+  /** Metadata emitted immediately after fetch is invoked; it never authorizes a request. */
+  onFetchStarted?: (timing: {
+    startedAt: string;
+    monotonicMs: number;
+    sampling?: ModelSamplingMetadata;
+  }) => void;
 }
 /** Keep only bounded timing advice; provider response bodies stay private. */
 export function parseModelRetryAfter(
@@ -259,15 +277,14 @@ export class OpenAiCompatibleAdapter {
   readonly #maxResponseBytes: number;
   readonly #fetch: typeof globalThis.fetch;
   readonly #onDispatch: AdapterOptions['onDispatch'];
+  readonly #onFetchStarted: AdapterOptions['onFetchStarted'];
   readonly #authScheme: ModelAuthScheme;
   readonly #continuations = new WeakMap<ModelContinuation, ProtectedHistory>();
 
   constructor(options: AdapterOptions) {
     let endpoint: URL;
     try {
-      endpoint = new URL(
-        `${options.baseUrl.replace(/\/+$/, '')}/chat/completions`,
-      );
+      endpoint = resolveModelEndpoint(options.baseUrl, 'chatCompletions');
     } catch {
       throw new ModelAdapterError(
         'INVALID_CONFIGURATION',
@@ -315,6 +332,7 @@ export class OpenAiCompatibleAdapter {
     }
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#onDispatch = options.onDispatch;
+    this.#onFetchStarted = options.onFetchStarted;
     this.#authScheme = options.authScheme ?? 'bearer';
   }
 
@@ -344,7 +362,7 @@ export class OpenAiCompatibleAdapter {
     if (
       !Number.isSafeInteger(request.maxTokens) ||
       request.maxTokens < 1 ||
-      request.maxTokens > 393_216
+      request.maxTokens > maximumNativeModelOutputTokens
     ) {
       throw new ModelAdapterError(
         'INVALID_REQUEST',
@@ -375,7 +393,14 @@ export class OpenAiCompatibleAdapter {
       stream: request.stream ?? false,
     };
     let serialized: string;
+    let sampling: ModelSamplingMetadata = { profileId: null, parameters: {} };
     try {
+      sampling = resolveModelSampling(
+        this.#endpoint.href,
+        this.model,
+        request.sampling,
+      );
+      Object.assign(body, sampling.parameters);
       if (request.reasoningEffort !== undefined)
         body.reasoning_effort = z
           .string()
@@ -469,7 +494,9 @@ export class OpenAiCompatibleAdapter {
           clientRequestId,
         );
       invoked = true;
-      const response = await this.#fetch(this.#endpoint, {
+      const startedAt = new Date().toISOString();
+      const monotonicMs = performance.now();
+      const pendingResponse = this.#fetch(this.#endpoint, {
         method: 'POST',
         redirect: 'error',
         signal,
@@ -483,6 +510,12 @@ export class OpenAiCompatibleAdapter {
         },
         body: serialized,
       });
+      try {
+        this.#onFetchStarted?.({ startedAt, monotonicMs, sampling });
+      } catch {
+        // A metadata observer cannot turn an already-dispatched request into a retry.
+      }
+      const response = await pendingResponse;
       requestId =
         identifier(response.headers.get('x-request-id')) ??
         identifier(response.headers.get('request-id'));

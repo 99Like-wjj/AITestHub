@@ -2,6 +2,11 @@
 *.png binary
 *.ico binary
 pnpm-lock.yaml -text
+# Preserve already-applied CRLF bytes and retain the normal whitespace checks.
+packages/persistence/migrations/0028_auxiliary_scope.sql -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+packages/persistence/migrations/0029_automatic_auxiliary.sql -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+packages/persistence/migrations/0031_requirement_archival_model.sql -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+packages/persistence/migrations/0033_ui_delivery.sql -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 skills/** -text
 contracts/** -text
 tooling/local-client/contracts/** -text

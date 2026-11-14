@@ -37,6 +37,8 @@ import {
   issueStateLabels,
   severityLabels,
   problemStateLabels,
+  issueSourceLabels,
+  problemExecutionProvenanceLabels,
 } from './issue-context';
 import type { IssueNavigation } from './issue-context';
 import {
@@ -66,6 +68,7 @@ import { PageHeading } from './page-heading';
 import { AppIcon } from './app-icon';
 import { ArchivedRequirementsToggle } from './archived-requirements-toggle';
 import { useIssueCounts, useIssueReadScope } from './issues-counts';
+import './issues-readability.css';
 
 type Scope = 'participated' | 'mine' | 'all';
 type Tab = 'formal' | 'unassigned' | 'problems';
@@ -717,15 +720,18 @@ export function IssuesPage({
                 ]}
               />
               <div className="issue-query-row row">
-                <Input
-                  aria-label="搜索问题或缺陷"
-                  value={search}
-                  maxLength={200}
-                  placeholder="搜索缺陷编号、标题或描述"
-                  onChange={(event) => setSearch(event.target.value)}
-                  onCompositionStart={() => setComposing(true)}
-                  onCompositionEnd={() => setComposing(false)}
-                />
+                <label className="issue-search-field">
+                  <span>搜索问题或缺陷</span>
+                  <Input
+                    aria-label="搜索问题或缺陷"
+                    value={search}
+                    maxLength={200}
+                    placeholder="输入编号、标题或描述"
+                    onChange={(event) => setSearch(event.target.value)}
+                    onCompositionStart={() => setComposing(true)}
+                    onCompositionEnd={() => setComposing(false)}
+                  />
+                </label>
                 <Button
                   onClick={() => {
                     setSearch('');
@@ -888,7 +894,7 @@ export function IssuesPage({
                         title: '真实来源',
                         render: (_, row) => (
                           <Space direction="vertical">
-                            <Tag>{row.source}</Tag>
+                            <Tag>{issueSourceLabels[row.source]}</Tag>
                             <Typography.Text
                               type={
                                 row.sourceExecutionProvenance ===
@@ -897,10 +903,11 @@ export function IssuesPage({
                                   : 'secondary'
                               }
                             >
-                              {row.sourceExecutionProvenance ===
-                              'protocol-synthetic'
-                                ? '合成协议来源，非真实UI执行'
-                                : row.sourceExecutionProvenance}
+                              {
+                                problemExecutionProvenanceLabels[
+                                  row.sourceExecutionProvenance
+                                ]
+                              }
                             </Typography.Text>
                           </Space>
                         ),
@@ -994,7 +1001,7 @@ export function IssuesPage({
                     loading={loading}
                     dataSource={issues}
                     pagination={{ pageSize: 15 }}
-                    scroll={{ x: 740 }}
+                    scroll={{ x: 760 }}
                     rowSelection={{
                       selectedRowKeys: selectedIssues,
                       onChange: (keys) => setSelectedIssues(keys.map(String)),
@@ -1007,6 +1014,7 @@ export function IssuesPage({
                     columns={[
                       {
                         title: '缺陷 / 需求',
+                        width: 230,
                         render: (_, row) => (
                           <div className="table-title">
                             <Button
@@ -1036,6 +1044,7 @@ export function IssuesPage({
                       },
                       {
                         title: '状态',
+                        width: 110,
                         render: (_, row) => (
                           <span
                             className={`badge ${row.state === 'pending' ? 'amber' : row.state === 'inProgress' || row.state === 'awaitingRetest' ? 'blue' : ''}`}
@@ -1046,23 +1055,31 @@ export function IssuesPage({
                       },
                       {
                         title: '负责人 / 最近来源',
+                        width: 240,
                         render: (_, row) => (
                           <div>
-                            <span>{name(row.assigneeId)}</span>
+                            <span>负责人：{name(row.assigneeId)}</span>
                             {row.assigneeId && !row.assigneeActive && (
                               <span className="badge amber">权限失效</span>
                             )}
-                            <div className="sub">
-                              {row.latestHandling
-                                ? `${name(row.latestHandling.actorId)} · ${new Date(row.latestHandling.createdAt).toLocaleString('zh-CN')}`
-                                : '尚无责任变更'}
-                            </div>
-                            <div className="sub">{row.source}</div>
+                            <details className="issue-handling-summary">
+                              <summary>来源及最近处理</summary>
+                              <div className="sub">
+                                发现来源：{issueSourceLabels[row.source]}
+                              </div>
+                              <div className="sub">
+                                {row.latestHandling
+                                  ? `最近处理人：${name(row.latestHandling.actorId)} · ${new Date(row.latestHandling.createdAt).toLocaleString('zh-CN')}`
+                                  : '尚无责任变更'}
+                              </div>
+                            </details>
                           </div>
                         ),
                       },
                       {
                         title: '操作',
+                        width: 144,
+                        fixed: 'right',
                         render: (_, row) => (
                           <Space>
                             <Button

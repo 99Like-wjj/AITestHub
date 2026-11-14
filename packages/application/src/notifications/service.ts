@@ -143,6 +143,7 @@ export class NotificationService {
         versionNo: String(asset.version_no),
         kind: asset.kind,
         title: asset.title,
+        assetId: id,
       });
       return {
         kind: 'assetReview',
@@ -342,8 +343,15 @@ export class NotificationService {
           target_path: string;
           read_at: Date | null;
           created_at: Date;
+          asset_title: string | null;
+          asset_revision_id: string | null;
+          asset_revision_no: number | null;
+          project_name: string | null;
         }>(
-          `SELECT n.* FROM app.notifications n WHERE ${canRead}
+          `SELECT n.*,ar.content->>'title' asset_title,ar.id asset_revision_id,ar.revision_no asset_revision_no,p.name project_name FROM app.notifications n
+           JOIN app.outbox e ON e.id=n.event_id
+           LEFT JOIN app.asset_revisions ar ON n.kind='assetReview' AND ar.asset_id=n.object_id AND ar.id::text=e.payload->>'revisionId'
+           LEFT JOIN app.projects p ON p.id=n.project_id WHERE ${canRead}
     AND (NOT $2 OR n.read_at IS NULL) AND ($3::timestamptz IS NULL OR (n.created_at,n.id)<($3,$4::uuid)) ORDER BY n.created_at DESC,n.id DESC LIMIT $5`,
           [
             actor.userId,
@@ -367,8 +375,22 @@ export class NotificationService {
           projectId: n.project_id,
           kind: n.kind,
           objectId: n.object_id,
-          title: n.title,
-          targetPath: n.target_path,
+          title:
+            n.kind === 'assetReview' && n.asset_title
+              ? `${n.project_name ?? '项目'} · ${n.asset_title}${n.asset_revision_no ? ` · r${n.asset_revision_no}` : ''}有待评审内容`
+              : n.title,
+          targetPath:
+            n.kind === 'assetReview' && n.target_path.startsWith('/#cases?')
+              ? (() => {
+                  const query = new URLSearchParams(
+                    n.target_path.split('?')[1],
+                  );
+                  query.set('assetId', n.object_id);
+                  if (n.asset_revision_id)
+                    query.set('assetRevisionId', n.asset_revision_id);
+                  return `/#cases?${query}`;
+                })()
+              : n.target_path,
           readAt: n.read_at?.toISOString() ?? null,
           createdAt: n.created_at.toISOString(),
         })),

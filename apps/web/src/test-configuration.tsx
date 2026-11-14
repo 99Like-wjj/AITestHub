@@ -46,6 +46,9 @@ import type { Me, Project } from './types';
 import { uiLayers } from './ui-layers';
 import { PageHeading } from './page-heading';
 import { AppIcon } from './app-icon';
+import './test-configuration.css';
+import { skillGuidanceCatalogSchema } from '../../../packages/contracts/src/skill-guidance';
+import type { SkillGuidanceCatalog } from '../../../packages/contracts/src/skill-guidance';
 
 type Configuration = z.infer<typeof testConfigurationDtoSchema>;
 interface Pair {
@@ -99,6 +102,13 @@ function record(
   >;
   for (const value of values ?? []) {
     if (!value.name?.trim()) throw new Error(`${title}名称不能为空。`);
+    if (
+      value.name.length > 100 ||
+      !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(value.name)
+    )
+      throw new Error(
+        `${title}${title === '服务地址' ? '别名' : '名称'}须以英文字母或下划线开头，只能包含英文字母、数字、下划线和连字符，最多100个字符。`,
+      );
     if (Object.hasOwn(result, value.name))
       throw new Error(`${title}名称 ${value.name} 重复，不能覆盖原值。`);
     result[value.name] = value.value ?? '';
@@ -236,9 +246,7 @@ function initialFields(
 }
 const failureText = (failure: unknown) =>
   failure instanceof z.ZodError
-    ? failure.issues
-        .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
-        .join('；')
+    ? failure.issues.map((issue) => issue.message).join('；')
     : describeError(failure);
 
 function PairFields({
@@ -258,12 +266,28 @@ function PairFields({
             <Space.Compact block key={field.key}>
               <Form.Item
                 name={[field.name, 'name']}
-                rules={[{ required: true, message: '名称必填' }]}
+                rules={[
+                  {
+                    required: true,
+                    message: `${name === 'baseUrls' ? '服务别名' : '名称'}必填`,
+                  },
+                  {
+                    pattern: /^[A-Za-z_][A-Za-z0-9_-]*$/,
+                    max: 100,
+                    message:
+                      '以英文字母或下划线开头，仅支持英文、数字、下划线和连字符，最多100个字符。',
+                  },
+                ]}
                 style={{ marginBottom: 8, flex: 1 }}
               >
                 <Input
-                  aria-label={`${title} ${field.name + 1} 名称`}
-                  placeholder="名称"
+                  aria-label={`${title} ${field.name + 1} ${name === 'baseUrls' ? '服务别名' : '名称'}`}
+                  placeholder={
+                    name === 'baseUrls'
+                      ? '服务别名，如 orders'
+                      : '名称，如 request_id'
+                  }
+                  maxLength={100}
                   disabled={disabled}
                 />
               </Form.Item>
@@ -310,26 +334,37 @@ function ConfigurationEditor({
   open,
   onClose,
   onSaved,
+  canManageEnvironment = false,
+  layer = uiLayers.dialog,
 }: {
   projectId: string;
   kind: ConfigurationKind;
   target: Configuration | null;
   open: boolean;
   onClose: () => void;
-  onSaved: () => Promise<void>;
+  onSaved: (configuration: Configuration) => Promise<void>;
+  canManageEnvironment?: boolean;
+  layer?: number;
 }) {
   const [form] = Form.useForm<ConfigurationFields>();
   const [references, setReferences] = useState<TestConfigurationView[]>([]);
   const [referenceError, setReferenceError] = useState<string>();
+  const [referencesLoading, setReferencesLoading] = useState(false);
+  const [environmentEditor, setEnvironmentEditor] = useState<{
+    target: Configuration | null;
+    epoch: number;
+  } | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const [uncertain, setUncertain] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [discard, setDiscard] = useState(false);
   const commandId = useRef(crypto.randomUUID());
+  const editorEpoch = useRef(0);
   const mode = Form.useWatch('authenticationMode', form);
   useEffect(() => {
     if (!open) return;
+    const epoch = ++editorEpoch.current;
     const controller = new AbortController();
     commandId.current = crypto.randomUUID();
     form.resetFields();
@@ -339,7 +374,9 @@ function ConfigurationEditor({
     setDirty(false);
     setDiscard(false);
     setReferences([]);
+    setReferencesLoading(true);
     setReferenceError(undefined);
+    setEnvironmentEditor(null);
     void api(
       `/projects/${projectId}/test-configuration`,
       { signal: controller.signal },
@@ -351,8 +388,14 @@ function ConfigurationEditor({
       .catch((failure: unknown) => {
         if (!controller.signal.aborted)
           setReferenceError(describeError(failure));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setReferencesLoading(false);
       });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      if (editorEpoch.current === epoch) editorEpoch.current += 1;
+    };
   }, [open, target, kind, projectId, form]);
   function options(
     referenceKind: ConfigurationKind,
@@ -383,13 +426,13 @@ function ConfigurationEditor({
         rowVersion: target?.rowVersion ?? 0,
         content: configurationFromFields(kind, values),
       });
-      await api(
+      const saved = await api(
         `/projects/${projectId}/test-configuration${target ? `/${target.id}` : ''}`,
         { method: target ? 'PUT' : 'POST', body },
         testConfigurationReceiptSchema,
       );
       setDirty(false);
-      await onSaved();
+      await onSaved(saved.configuration);
       onClose();
     } catch (failure) {
       if (
@@ -413,11 +456,35 @@ function ConfigurationEditor({
   const accountId = Form.useWatch('accountId', form) as string | undefined;
   const authProfileId = Form.useWatch('authProfileId', form) as
     string | undefined;
+  const environments = references.filter(
+    (row) => row.content.kind === 'environment',
+  );
+  const hasActiveEnvironment = environments.some(
+    (row) => 'active' in row.content && row.content.active,
+  );
+  async function refreshEnvironments() {
+    const epoch = editorEpoch.current;
+    setReferencesLoading(true);
+    setReferenceError(undefined);
+    try {
+      const result = await api(
+        `/projects/${projectId}/test-configuration`,
+        {},
+        testConfigurationListSchema,
+      );
+      if (editorEpoch.current === epoch) setReferences(result.configurations);
+    } catch (failure) {
+      if (editorEpoch.current === epoch)
+        setReferenceError(describeError(failure));
+    } finally {
+      if (editorEpoch.current === epoch) setReferencesLoading(false);
+    }
+  }
   return (
     <>
       <Modal
         open={open}
-        zIndex={uiLayers.dialog}
+        zIndex={layer}
         title={`${target ? '编辑' : '新增'}${labels[kind]}`}
         width={850}
         onCancel={close}
@@ -496,6 +563,10 @@ function ConfigurationEditor({
           {kind === 'environment' && (
             <>
               <Typography.Title level={5}>服务地址</Typography.Title>
+              <Typography.Paragraph type="secondary">
+                服务别名用于用例引用，例如
+                orders；须以英文字母或下划线开头，仅支持英文、数字、下划线和连字符，最多100个字符。
+              </Typography.Paragraph>
               <PairFields name="baseUrls" title="服务地址" disabled={pending} />
               <Typography.Title level={5}>公共变量</Typography.Title>
               <PairFields
@@ -506,18 +577,86 @@ function ConfigurationEditor({
             </>
           )}
           {(kind === 'binding' || kind === 'databaseConnection') && (
-            <Form.Item
-              name="environmentId"
-              label="所属环境"
-              rules={[{ required: true }]}
-            >
-              <Select
-                disabled={pending}
-                showSearch
-                optionFilterProp="label"
-                options={options('environment', environmentId)}
-              />
-            </Form.Item>
+            <>
+              {!referencesLoading &&
+                !referenceError &&
+                !hasActiveEnvironment && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    className="section-alert"
+                    title={
+                      environments.length
+                        ? '当前环境均已停用'
+                        : '此项目尚未创建环境'
+                    }
+                    description={
+                      <Space direction="vertical">
+                        <span>
+                          启用{labels[kind]}
+                          前需要一个启用的环境。可先创建或启用环境，当前未保存输入会保留。
+                          {!canManageEnvironment &&
+                            '请联系项目管理员或测试人员维护环境。'}
+                        </span>
+                        <Space wrap>
+                          {canManageEnvironment && (
+                            <Button
+                              size="small"
+                              onClick={() =>
+                                setEnvironmentEditor({
+                                  target: null,
+                                  epoch: editorEpoch.current,
+                                })
+                              }
+                            >
+                              新建环境并返回
+                            </Button>
+                          )}
+                          {canManageEnvironment &&
+                            environments.map((row) => {
+                              const parsed =
+                                testConfigurationDtoSchema.safeParse(row);
+                              return parsed.success ? (
+                                <Button
+                                  size="small"
+                                  key={row.id}
+                                  onClick={() =>
+                                    setEnvironmentEditor({
+                                      target: parsed.data,
+                                      epoch: editorEpoch.current,
+                                    })
+                                  }
+                                >
+                                  维护 {row.content.name}
+                                </Button>
+                              ) : null;
+                            })}
+                          <Button
+                            size="small"
+                            onClick={() => void refreshEnvironments()}
+                          >
+                            刷新环境列表
+                          </Button>
+                        </Space>
+                      </Space>
+                    }
+                  />
+                )}
+              <Form.Item
+                name="environmentId"
+                label="所属环境"
+                rules={[{ required: true, message: '请选择启用的环境' }]}
+              >
+                <Select
+                  disabled={pending}
+                  showSearch
+                  loading={referencesLoading}
+                  placeholder="选择启用的环境"
+                  optionFilterProp="label"
+                  options={options('environment', environmentId)}
+                />
+              </Form.Item>
+            </>
           )}
           {kind === 'binding' && (
             <>
@@ -737,6 +876,28 @@ function ConfigurationEditor({
           保存创建新修订，历史配置继续保留。
         </Typography.Text>
       </Modal>
+      {environmentEditor && (
+        <ConfigurationEditor
+          projectId={projectId}
+          kind="environment"
+          target={environmentEditor.target}
+          open
+          canManageEnvironment={canManageEnvironment}
+          layer={uiLayers.nestedDialog}
+          onClose={() => setEnvironmentEditor(null)}
+          onSaved={async (saved) => {
+            if (environmentEditor.epoch !== editorEpoch.current) return;
+            setReferences((current) => [
+              ...current.filter((row) => row.id !== saved.id),
+              saved,
+            ]);
+            if (saved.content.active) {
+              form.setFieldValue('environmentId', saved.id);
+              setDirty(true);
+            }
+          }}
+        />
+      )}
       <Modal
         open={discard}
         zIndex={uiLayers.confirmation}
@@ -1170,6 +1331,9 @@ export function TestConfigurationPage({
         kind={kind}
         target={editing}
         open={editor}
+        canManageEnvironment={
+          project.isAdmin || project.roles.includes('tester')
+        }
         onClose={() => setEditor(false)}
         onSaved={async () => {
           await load();
@@ -1230,6 +1394,93 @@ export function TestConfigurationPage({
         )}
       </Modal>
     </Space>
+  );
+}
+
+function SkillGuidanceSettings({ ownerId }: { ownerId: string }) {
+  const [catalog, setCatalog] = useState<SkillGuidanceCatalog | null>(null);
+  const [error, setError] = useState<string>();
+  const [loading, setLoading] = useState(true);
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setCatalog(null);
+    setError(undefined);
+    void api(
+      '/me/skill-guidance',
+      { signal: controller.signal },
+      skillGuidanceCatalogSchema,
+    )
+      .then((value) => {
+        if (!controller.signal.aborted) setCatalog(value);
+      })
+      .catch((failure: unknown) => {
+        if (!controller.signal.aborted) setError(describeError(failure));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [ownerId, refresh]);
+  const availability = {
+    available: '平台规则可选',
+    unavailable: '平台规则暂不可用',
+    localOnly: '仅本地执行',
+    deferred: '延期',
+  };
+  return (
+    <>
+      <div className="between mt">
+        <h3>当前 Skill 指引目录</h3>
+        <Button
+          size="small"
+          loading={loading}
+          onClick={() => setRefresh((value) => value + 1)}
+        >
+          刷新目录
+        </Button>
+      </div>
+      {loading && (
+        <p role="status" className="caption mt">
+          正在读取当前目录…
+        </p>
+      )}
+      {error && (
+        <Alert
+          className="section-alert"
+          type="warning"
+          showIcon
+          title={`Skill 目录未取得：${error}`}
+        />
+      )}
+      <div className="two mt">
+        {catalog?.skills.map((skill) => (
+          <div className="card pad" key={skill.skillId}>
+            <div className="between">
+              <h3>{skill.name}</h3>
+              <span
+                className={`badge ${skill.availability === 'available' ? 'green' : skill.availability === 'localOnly' ? '' : 'amber'}`}
+              >
+                {availability[skill.availability]}
+              </span>
+            </div>
+            {skill.version && (
+              <p className="caption mt">版本 {skill.version}</p>
+            )}
+            <p className="caption mt">{skill.description}</p>
+            {skill.unavailableCode && (
+              <p className="caption mt">不可用原因：{skill.unavailableCode}</p>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="notice mt">
+        平台规则可选仅表示平台可读取共享指引，不代表外部宿主已安装、自动加载或实际执行已通过验证。
+        UI 自主测试仍由本地 AI、Skill 和 Ego 执行。官方 MCP
+        不开放项目创建、成员角色管理、平台全局配置或任意数据库执行。
+      </div>
+    </>
   );
 }
 
@@ -1342,38 +1593,7 @@ export function ProjectConfigurationPage({
                   </div>
                   <code>{window.location.origin}/mcp</code>
                 </div>
-                <div className="two mt">
-                  {[
-                    [
-                      '用例生成与优化',
-                      '理解选定需求、独立维护场景和用例，优化后仍需人工评审。',
-                    ],
-                    [
-                      '项目知识管理',
-                      '比较本地与平台条目，明确选择后提交，冲突不覆盖。',
-                    ],
-                    [
-                      '本地 UI 自主测试',
-                      '本地 AI + Skill + Ego 执行固定已审范围；平台接收进度、结果与证据。',
-                    ],
-                    [
-                      '接口回归生成维护',
-                      '维护选定请求、断言、认证用途及清理。平台常规接口回归能力独立保留。',
-                    ],
-                  ].map(([title, description]) => (
-                    <div className="card pad" key={title}>
-                      <div className="between">
-                        <h3>{title}</h3>
-                        <span className="badge amber">本轮延期</span>
-                      </div>
-                      <p className="caption mt">{description}</p>
-                    </div>
-                  ))}
-                </div>
-                <div className="notice mt">
-                  四个配套 Skill 尚未开发，不表示已接入执行。官方 MCP
-                  不开放项目创建、成员角色管理、平台全局配置或任意数据库执行。
-                </div>
+                <SkillGuidanceSettings ownerId={me.user.id} />
                 <Button
                   className="mt"
                   type="primary"

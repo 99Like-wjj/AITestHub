@@ -20,7 +20,14 @@ import {
   type ModelServiceV2,
   type AvailableModelV2,
 } from '../../../packages/contracts/src/model-configuration-v2';
-import { defaultModelAuthScheme } from '../../../packages/contracts/src/model-protocol';
+import {
+  defaultModelAuthScheme,
+  modelEndpointConfigurationIssue,
+} from '../../../packages/contracts/src/model-protocol';
+import {
+  officialSensenovaSamplingProfile,
+  resolveModelSampling,
+} from '../../../packages/contracts/src/model-sampling';
 import { userSummarySchema } from '../../../packages/contracts/src/identity';
 import { api, describeError } from './api';
 import {
@@ -42,7 +49,6 @@ import {
   type ModelCommandReceipt,
 } from './model-configuration-command';
 import {
-  credentialBindingChanged,
   auxiliaryBindingUnavailable,
   emptyModelEntry,
   emptyServiceDraft,
@@ -79,6 +85,34 @@ const scopesText = (scopes: string[]) =>
         : '已授权的相关内部测试资料',
     )
     .join('、');
+function SamplingDefaults({
+  baseUrl,
+  modelId,
+  protocol,
+}: {
+  baseUrl: string;
+  modelId: string;
+  protocol: string;
+}) {
+  if (protocol !== 'chatCompletions') return null;
+  const sampling = resolveModelSampling(baseUrl, modelId);
+  if (!sampling.profileId) return null;
+  return (
+    <details className="caption mt">
+      <summary>官方推荐默认采样</summary>
+      <p>{officialSensenovaSamplingProfile.label}</p>
+      <code>
+        {Object.entries(sampling.parameters)
+          .map(([name, value]) => `${name}=${value}`)
+          .join(' · ')}
+      </code>
+      <p>
+        对当前官方地址与此模型生效；明确传入的采样值优先。此默认不切换思考模式，
+        不改变最大输出或资料范围。
+      </p>
+    </details>
+  );
+}
 function Verification({
   model,
 }: {
@@ -223,6 +257,11 @@ export function AvailableModelList() {
                   <dd>{model.effortValues.join('、') || '未配置'}</dd>
                 </div>
               </dl>
+              <SamplingDefaults
+                baseUrl={model.baseUrl}
+                modelId={model.modelId}
+                protocol={model.protocol}
+              />
               <Verification model={model} />
             </article>
           ))}
@@ -471,11 +510,7 @@ function ServiceEditor({
   const [savedDraft, setSavedDraft] = useState(() =>
     JSON.stringify(initial ? serviceDraft(initial) : draft),
   );
-  const dirty = JSON.stringify(draft) !== savedDraft,
-    bindingChanged = baseline
-      ? credentialBindingChanged(baseline, draft)
-      : false,
-    bindingBlocked = !!baseline?.hasCredential && bindingChanged;
+  const dirty = JSON.stringify(draft) !== savedDraft;
   const alive = useRef(true),
     epoch = useRef(identityContextEpoch());
   useEffect(() => {
@@ -553,27 +588,6 @@ function ServiceEditor({
       setError(errorText(failure));
     }
   }
-  async function revoke() {
-    if (!baseline) return;
-    const result = await commands.run(
-      'configuration.model-credential-revoke',
-      baseline.id,
-      `/admin/model-services/${baseline.id}/credential`,
-      'DELETE',
-      (commandId) =>
-        modelServiceCasV2Schema.parse({
-          commandId,
-          rowVersion: baseline.rowVersion,
-        }),
-    );
-    if (
-      result &&
-      'modelService' in result &&
-      alive.current &&
-      epoch.current === identityContextEpoch()
-    )
-      setBaseline(result.modelService);
-  }
   async function discover() {
     if (!baseline || dirty || discovering || commands.blocked) return;
     const revision = baseline.serviceRevision;
@@ -639,9 +653,7 @@ function ServiceEditor({
           </button>
           <button
             className="btn primary"
-            disabled={
-              commands.blocked || discovering || bindingBlocked || !dirty
-            }
+            disabled={commands.blocked || discovering || !dirty}
             onClick={() => void save()}
           >
             {commands.pending ? '正在提交…' : '保存服务与模型'}
@@ -699,7 +711,7 @@ function ServiceEditor({
               />
             </label>
             <label className="field-label model-span">
-              API 基础地址
+              API 地址（基础地址或当前协议完整终点）
               <input
                 className="field"
                 type="url"
@@ -708,6 +720,23 @@ function ServiceEditor({
                 maxLength={2048}
                 onChange={(event) => patch('baseUrl', event.target.value)}
               />
+              <span className="caption">
+                可填写 https://example.invalid/v1 或所选协议的
+                /chat/completions、/responses、/messages
+                完整地址。保留部署前缀；模型发现读取同基础地址的
+                /models，不会重复追加终点。
+              </span>
+              {modelEndpointConfigurationIssue(
+                draft.baseUrl,
+                draft.protocol,
+              ) && (
+                <span role="alert" className="caption">
+                  {modelEndpointConfigurationIssue(
+                    draft.baseUrl,
+                    draft.protocol,
+                  )}
+                </span>
+              )}
             </label>
             <label className="field-label model-span">
               备注
@@ -756,38 +785,11 @@ function ServiceEditor({
               </button>
             )}
           </div>
-          {bindingBlocked && (
-            <Alert
-              className="section-alert"
-              type="warning"
-              showIcon
-              title="连接目标已变化，不能沿用原 Key"
-              description={
-                <>
-                  <p>
-                    请先明确撤销旧
-                    Key，再保存协议、地址或鉴权方式，最后为新目标安全重填。此处保留当前表单。
-                  </p>
-                  <button
-                    className="btn danger small"
-                    type="button"
-                    onClick={() =>
-                      modal.confirm({
-                        title: '撤销原目标的 API Key？',
-                        content:
-                          '后续请求将因缺少凭据被拒绝，历史配置与用量保留。撤销成功后仍需明确保存当前表单。',
-                        okText: '撤销旧 Key',
-                        cancelText: '取消',
-                        zIndex: uiLayers.confirmation,
-                        onOk: revoke,
-                      })
-                    }
-                  >
-                    撤销旧 Key
-                  </button>
-                </>
-              }
-            />
+          {baseline?.hasCredential && (
+            <p className="caption mt">
+              修改地址、协议或鉴权方式会保留当前
+              Key；如需替换或撤销，请使用独立的 Key 操作。
+            </p>
           )}
           <div className="between mt">
             <h2>模型列表</h2>
@@ -979,6 +981,11 @@ function ServiceEditor({
                     />
                   </label>
                 </div>
+                <SamplingDefaults
+                  baseUrl={draft.baseUrl}
+                  modelId={row.modelId}
+                  protocol={draft.protocol}
+                />
                 <details className="model-entry-metadata">
                   <summary>模型行标识</summary>
                   <code>{row.id}</code>
@@ -1674,6 +1681,11 @@ export function PlatformModelSettings() {
                                           {row.effortValues.join(' / ') ||
                                             '未配置'}
                                         </span>
+                                        <SamplingDefaults
+                                          baseUrl={service.baseUrl}
+                                          modelId={row.modelId}
+                                          protocol={service.protocol}
+                                        />
                                       </td>
                                       <td>
                                         <Verification model={row} />

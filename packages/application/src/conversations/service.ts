@@ -12,6 +12,7 @@ import {
   historySearchInputSchema,
   taskAcceptedSchema,
   conversationCreatedSchema,
+  type TaskState,
 } from '../../../contracts/src/conversations.js';
 import type {
   Database,
@@ -259,6 +260,7 @@ export class ConversationsService {
       const messages = await tx.query<{
         id: string;
         task_id: string | null;
+        task_state: TaskState | null;
         execution_origin: 'fixture' | 'liveProvider' | 'legacyUnknown' | null;
         role: string;
         content: string;
@@ -271,9 +273,10 @@ export class ConversationsService {
         operation_target: unknown;
         created_at: Date;
       }>(
-        `SELECT m.*,(SELECT t.id FROM app.ai_tasks t WHERE t.owner_id=$5 AND t.conversation_id=m.conversation_id AND (t.user_message_id=m.id OR t.assistant_message_id=m.id)) task_id,
-          (SELECT to_jsonb(t)->>'execution_origin' FROM app.ai_tasks t WHERE t.owner_id=$5 AND t.conversation_id=m.conversation_id AND (t.user_message_id=m.id OR t.assistant_message_id=m.id)) execution_origin
-          FROM app.ai_messages m WHERE conversation_id=$1 AND deleted_at IS NULL AND ($2::timestamptz IS NULL OR (created_at,id)<($2,$3::uuid)) ORDER BY created_at DESC,id DESC LIMIT $4`,
+        `SELECT m.*,t.id task_id,t.state task_state,to_jsonb(t)->>'execution_origin' execution_origin
+          FROM app.ai_messages m LEFT JOIN app.ai_tasks t ON t.owner_id=$5 AND t.conversation_id=m.conversation_id
+          AND ((m.role='user' AND t.user_message_id=m.id) OR (m.role='assistant' AND t.assistant_message_id=m.id))
+          WHERE m.conversation_id=$1 AND m.deleted_at IS NULL AND ($2::timestamptz IS NULL OR (m.created_at,m.id)<($2,$3::uuid)) ORDER BY m.created_at DESC,m.id DESC LIMIT $4`,
         [
           id,
           before?.created_at ?? null,
@@ -282,33 +285,86 @@ export class ConversationsService {
           actor.userId,
         ],
       );
+      const visibleMessages = messages.rows.slice(0, limit);
+      const pageTaskIds = [
+        ...new Set(
+          visibleMessages.flatMap((message) =>
+            message.role === 'assistant' && message.task_id
+              ? [message.task_id]
+              : [],
+          ),
+        ),
+      ];
+      const notices = pageTaskIds.length
+        ? (
+            await tx.query<{
+              task_id: string;
+              has_failed_tools: boolean;
+              has_unknown_tool_effects: boolean;
+              has_context_reset: boolean;
+            }>(
+              `WITH relevant AS (
+                SELECT e.task_id,e.event_type,e.payload,e.sequence FROM app.ai_task_events e
+                JOIN app.ai_tasks t ON t.id=e.task_id AND t.owner_id=$2 AND t.conversation_id=$3
+                WHERE e.task_id=ANY($1::uuid[]) AND e.event_type IN ('ai.tool','ai.contextReset')
+              ), latest_tools AS (
+                SELECT DISTINCT ON (task_id,payload->>'invocationId') task_id,payload FROM relevant
+                WHERE event_type='ai.tool' ORDER BY task_id,payload->>'invocationId',sequence DESC
+              ), flags AS (
+                SELECT task_id,bool_or(payload->>'state'='failed') has_failed_tools,
+                  bool_or(COALESCE(payload->>'unknownEffect','false')='true') has_unknown_tool_effects,
+                  false has_context_reset FROM latest_tools GROUP BY task_id
+                UNION ALL
+                SELECT task_id,false,false,true FROM relevant WHERE event_type='ai.contextReset' GROUP BY task_id
+              ) SELECT task_id,bool_or(has_failed_tools) has_failed_tools,
+                bool_or(has_unknown_tool_effects) has_unknown_tool_effects,bool_or(has_context_reset) has_context_reset
+                FROM flags GROUP BY task_id`,
+              [pageTaskIds, actor.userId, id],
+            )
+          ).rows
+        : [];
+      const noticesByTask = new Map(
+        notices.map((item) => [item.task_id, item]),
+      );
       return {
         conversation: conversationDto(row),
-        messages: messages.rows
-          .slice(0, limit)
-          .reverse()
-          .map((message) => ({
-            id: message.id,
-            taskId: message.task_id,
-            executionOrigin: message.execution_origin ?? 'legacyUnknown',
-            role: message.role,
-            content: message.content,
-            status: message.status,
-            modelServiceId: message.model_service_id,
-            configRevision: message.model_config_revision,
-            modelSnapshot: (() => {
-              try {
-                return readMessageModelSnapshot(message.model_snapshot)
-                  .snapshot;
-              } catch {
-                return null;
+        messages: visibleMessages.reverse().map((message) => ({
+          id: message.id,
+          taskId: message.task_id,
+          taskStatus: message.task_state,
+          ...(message.role === 'assistant' && message.task_id
+            ? {
+                taskNotices: {
+                  hasFailedTools:
+                    noticesByTask.get(message.task_id)?.has_failed_tools ??
+                    false,
+                  hasUnknownToolEffects:
+                    noticesByTask.get(message.task_id)
+                      ?.has_unknown_tool_effects ?? false,
+                  hasContextReset:
+                    noticesByTask.get(message.task_id)?.has_context_reset ??
+                    false,
+                },
               }
-            })(),
-            effort: message.effort,
-            references: message.explicit_refs,
-            operationTarget: message.operation_target,
-            createdAt: message.created_at.toISOString(),
-          })),
+            : {}),
+          executionOrigin: message.execution_origin ?? 'legacyUnknown',
+          role: message.role,
+          content: message.content,
+          status: message.status,
+          modelServiceId: message.model_service_id,
+          configRevision: message.model_config_revision,
+          modelSnapshot: (() => {
+            try {
+              return readMessageModelSnapshot(message.model_snapshot).snapshot;
+            } catch {
+              return null;
+            }
+          })(),
+          effort: message.effort,
+          references: message.explicit_refs,
+          operationTarget: message.operation_target,
+          createdAt: message.created_at.toISOString(),
+        })),
         nextMessageCursor:
           messages.rows.length > limit
             ? (messages.rows[limit - 1]?.id ?? null)
@@ -333,11 +389,51 @@ export class ConversationsService {
       input.commandId,
       { id, input },
       async (tx) => {
+        if (input.archived === false) {
+          // Follow group-update lock order before locking a member chat.
+          const target = (
+            await tx.query<{
+              project_id: string | null;
+              requirement_id: string | null;
+            }>(
+              'SELECT project_id,requirement_id FROM app.ai_conversations WHERE id=$1 AND owner_id=$2 AND deleted_at IS NULL',
+              [id, actor.userId],
+            )
+          ).rows[0];
+          if (target?.project_id && target.requirement_id) {
+            await requirementTarget(
+              tx,
+              actor,
+              target.project_id,
+              target.requirement_id,
+              true,
+            );
+            await tx.query(
+              'SELECT requirement_id FROM app.ai_requirement_groups WHERE owner_id=$1 AND requirement_id=$2 FOR UPDATE',
+              [actor.userId, target.requirement_id],
+            );
+          }
+        }
         await conversationRow(tx, actor, id, true);
       },
       async (tx) => {
         const row = await conversationRow(tx, actor, id, true);
         if (row.row_version !== input.rowVersion) stale();
+        if (input.archived === false && row.project_id && row.requirement_id) {
+          await requirementTarget(
+            tx,
+            actor,
+            row.project_id,
+            row.requirement_id,
+            true,
+          );
+          // Restoring one chat makes its parent reachable without unarchiving any other chat.
+          await tx.query(
+            `UPDATE app.ai_requirement_groups SET hidden=false,archived_at=NULL,expanded=true,row_version=row_version+1
+            WHERE owner_id=$1 AND project_id=$2 AND requirement_id=$3 AND (hidden OR archived_at IS NOT NULL OR NOT expanded)`,
+            [actor.userId, row.project_id, row.requirement_id],
+          );
+        }
         const updated = (
           await tx.query<ConversationRow>(
             `UPDATE app.ai_conversations SET alias=CASE WHEN $2 THEN $3 ELSE alias END,
@@ -630,39 +726,72 @@ export class ConversationsService {
       return { conversations: rows.rows.map(conversationDto) };
     });
   }
-  async groupCandidates(actor: ActorContext, projectId: string) {
+  async archivedGroups(actor: ActorContext) {
     return this.db.transaction(async (tx) => {
       await personalActor(tx, actor);
-      await requireProject(tx, actor, projectId, 'project.read');
-      const rows = await tx.query<GroupRow & { group_exists: boolean }>(
-        `SELECT r.project_id,r.id requirement_id,r.title,g.alias,to_jsonb(g)->>'generated_name' generated_name,to_jsonb(g)->>'generated_name_source_hash' generated_name_source_hash,g.pinned_at,
+      const projects = (
+        await tx.query<{ project_id: string }>(
+          `SELECT DISTINCT g.project_id FROM app.ai_requirement_groups g
+         JOIN app.project_members m ON m.project_id=g.project_id AND m.user_id=g.owner_id AND m.active
+         JOIN app.projects p ON p.id=g.project_id AND p.active
+         WHERE g.owner_id=$1 AND g.archived_at IS NOT NULL`,
+          [actor.userId],
+        )
+      ).rows;
+      const groups = [];
+      for (const project of projects) {
+        const candidates = await this.groupCandidatesInTransaction(
+          tx,
+          actor,
+          project.project_id,
+        );
+        groups.push(
+          ...candidates.groups.filter((group) => group.archivedAt !== null),
+        );
+      }
+      return { groups };
+    });
+  }
+  async groupCandidates(actor: ActorContext, projectId: string) {
+    return this.db.transaction(async (tx) => {
+      return this.groupCandidatesInTransaction(tx, actor, projectId);
+    });
+  }
+  private async groupCandidatesInTransaction(
+    tx: SqlExecutor,
+    actor: ActorContext,
+    projectId: string,
+  ) {
+    await personalActor(tx, actor);
+    await requireProject(tx, actor, projectId, 'project.read');
+    const rows = await tx.query<GroupRow & { group_exists: boolean }>(
+      `SELECT r.project_id,r.id requirement_id,r.title,g.alias,to_jsonb(g)->>'generated_name' generated_name,to_jsonb(g)->>'generated_name_source_hash' generated_name_source_hash,g.pinned_at,
         COALESCE(g.sort_order,0) sort_order,COALESCE(g.expanded,true) expanded,COALESCE(g.hidden,false) hidden,g.archived_at,
         COALESCE(g.row_version,0) row_version,(g.requirement_id IS NOT NULL) group_exists
         FROM app.requirements r JOIN app.requirement_participants rp ON rp.requirement_id=r.id AND rp.user_id=$1 AND rp.active
         LEFT JOIN app.ai_requirement_groups g ON g.requirement_id=r.id AND g.owner_id=$1 WHERE r.project_id=$2 ORDER BY r.business_updated_at DESC,r.id`,
-        [actor.userId, projectId],
-      );
-      return {
-        groups: rows.rows.map((group) => ({
-          projectId: group.project_id,
-          requirementId: group.requirement_id,
-          formalTitle: group.title,
-          generatedName:
-            group.generated_name_source_hash ===
-            createHash('sha256').update(group.title, 'utf8').digest('hex')
-              ? (group.generated_name ?? null)
-              : null,
-          alias: group.alias,
-          pinnedAt: group.pinned_at?.toISOString() ?? null,
-          sortOrder: group.sort_order,
-          expanded: group.expanded,
-          hidden: group.hidden,
-          archivedAt: group.archived_at?.toISOString() ?? null,
-          rowVersion: group.row_version,
-          groupExists: group.group_exists,
-        })),
-      };
-    });
+      [actor.userId, projectId],
+    );
+    return {
+      groups: rows.rows.map((group) => ({
+        projectId: group.project_id,
+        requirementId: group.requirement_id,
+        formalTitle: group.title,
+        generatedName:
+          group.generated_name_source_hash ===
+          createHash('sha256').update(group.title, 'utf8').digest('hex')
+            ? (group.generated_name ?? null)
+            : null,
+        alias: group.alias,
+        pinnedAt: group.pinned_at?.toISOString() ?? null,
+        sortOrder: group.sort_order,
+        expanded: group.expanded,
+        hidden: group.hidden,
+        archivedAt: group.archived_at?.toISOString() ?? null,
+        rowVersion: group.row_version,
+        groupExists: group.group_exists,
+      })),
+    };
   }
   async resources(
     actor: ActorContext,

@@ -16,6 +16,7 @@ import {
   apiStartPreviewSchema,
   createPlanInputSchema,
   revisePlanInputSchema,
+  renamePlanInputSchema,
   uiPlanTemplateSchema,
   planOperationLookupSchema,
   planningOperationStatusSchema,
@@ -176,6 +177,33 @@ export class PlanService {
     return this.db.transaction(async (transaction) => {
       await requireProject(transaction, actor, projectId, 'project.read');
       const row = await this.row(transaction, projectId, id);
+      const fixed =
+        row.kind === 'UI' ? uiPlanTemplateSchema.parse(row.ui_snapshot) : null;
+      const environment = fixed
+        ? null
+        : (
+            await transaction.query<{ name: string }>(
+              "SELECT name FROM app.test_configurations WHERE project_id=$1 AND id=$2 AND kind='environment'",
+              [projectId, row.environment_id],
+            )
+          ).rows[0];
+      const currentCases = fixed
+        ? []
+        : (
+            await transaction.query<{
+              id: string;
+              title: string;
+              requirement_version_id: string;
+            }>(
+              `SELECT a.id,r.content->>'title' title,a.requirement_version_id FROM app.test_assets a
+         JOIN app.asset_revisions r ON r.id=a.current_revision_id
+         WHERE a.project_id=$1 AND a.kind='API' AND a.target_type='case' AND a.id=ANY($2::uuid[])`,
+              [
+                projectId,
+                logicalItemsSchema.parse(row.items).map((item) => item.caseId),
+              ],
+            )
+          ).rows;
       const revisions = await transaction.query<{
         id: string;
         revision_no: number;
@@ -186,6 +214,28 @@ export class PlanService {
       );
       return {
         plan: this.dto(row),
+        display: {
+          environmentName:
+            fixed?.environment.content.name ?? environment?.name ?? null,
+          cases: fixed
+            ? fixed.items.map((item) => ({
+                caseId: item.caseId,
+                title: item.content.title,
+                requirementVersionId: item.requirementVersionId,
+                approvalSnapshotId: item.approvalSnapshotId,
+              }))
+            : logicalItemsSchema.parse(row.items).map((item) => {
+                const current = currentCases.find(
+                  (entry) => entry.id === item.caseId,
+                );
+                return {
+                  caseId: item.caseId,
+                  title: current?.title ?? null,
+                  requirementVersionId: current?.requirement_version_id ?? null,
+                  approvalSnapshotId: null,
+                };
+              }),
+        },
         revisions: revisions.rows.map((revision) => ({
           id: revision.id,
           revisionNo: revision.revision_no,
@@ -193,6 +243,94 @@ export class PlanService {
         })),
       };
     });
+  }
+  async uiEligibility(actor: ActorContext, projectId: string) {
+    return this.db.transaction(async (transaction) => {
+      await requireProject(transaction, actor, projectId, 'plans.write');
+      const cases = (
+        await transaction.query<{ id: string; set_id: string }>(
+          "SELECT id,set_id FROM app.test_assets WHERE project_id=$1 AND kind='UI' AND target_type='case' AND removed_at IS NULL ORDER BY id LIMIT 10000",
+          [projectId],
+        )
+      ).rows;
+      const reasons = new Map<string, string[]>();
+      for (const setId of new Set(cases.map((item) => item.set_id))) {
+        try {
+          await this.reviews.assertUiSetApprovedInTransaction(
+            transaction,
+            projectId,
+            setId,
+          );
+          reasons.set(setId, []);
+        } catch (error) {
+          if (!(error instanceof DomainError)) throw error;
+          reasons.set(setId, [error.message]);
+        }
+      }
+      return {
+        items: cases.map((item) => ({
+          caseId: item.id,
+          setId: item.set_id,
+          eligible: reasons.get(item.set_id)?.length === 0,
+          reasons: reasons.get(item.set_id) ?? ['资格未能核实。'],
+        })),
+      };
+    });
+  }
+  async rename(
+    actor: ActorContext,
+    projectId: string,
+    id: string,
+    raw: unknown,
+  ) {
+    const input = renamePlanInputSchema.parse(raw);
+    return this.operations.execute(
+      actor,
+      'plans.rename',
+      input.commandId,
+      { projectId, id, ...input },
+      (transaction) =>
+        requireProject(transaction, actor, projectId, 'plans.write').then(
+          () => undefined,
+        ),
+      async (transaction) => {
+        await transaction.query(
+          'SELECT id FROM app.test_plans WHERE project_id=$1 AND id=$2 FOR UPDATE',
+          [projectId, id],
+        );
+        const current = await this.row(transaction, projectId, id);
+        if (
+          current.row_version !== input.rowVersion ||
+          current.plan_revision_id !== input.basePlanRevisionId
+        )
+          stale();
+        const revisionId = randomUUID();
+        // Copy exact frozen bytes in SQL. A name change never rebuilds or upgrades the scope.
+        await transaction.query(
+          `INSERT INTO app.plan_revisions(id,plan_id,project_id,kind,revision_no,name,environment_id,product_build,requirement_version_id,items,ui_snapshot,created_by)
+          SELECT $1,plan_id,project_id,kind,revision_no+1,$2,environment_id,product_build,requirement_version_id,items,ui_snapshot,$3
+          FROM app.plan_revisions WHERE id=$4 AND plan_id=$5 AND project_id=$6`,
+          [
+            revisionId,
+            input.name,
+            actor.userId,
+            current.plan_revision_id,
+            id,
+            projectId,
+          ],
+        );
+        await transaction.query(
+          'UPDATE app.test_plans SET current_revision_id=$2,row_version=row_version+1,updated_at=clock_timestamp() WHERE id=$1',
+          [id, revisionId],
+        );
+        await audit(transaction, actor, 'plans.renamed', id, projectId, {
+          sourceRevisionId: current.plan_revision_id,
+          planRevisionId: revisionId,
+        });
+        return { plan: this.dto(await this.row(transaction, projectId, id)) };
+      },
+      projectId,
+    );
   }
   private async build(
     transaction: SqlExecutor,

@@ -138,6 +138,9 @@ export type Asset = z.infer<typeof assetSchema>;
 
 export const assetListSchema = z.strictObject({ assets: z.array(assetSchema) });
 export const assetReceiptSchema = z.strictObject({ asset: assetSchema });
+export const optimizationNotesReceiptSchema = assetReceiptSchema.extend({
+  approvalCreated: z.literal(false),
+});
 export const assetReceiptOperationSchema = z.enum([
   'assets.create-set',
   'assets.create-scenario',

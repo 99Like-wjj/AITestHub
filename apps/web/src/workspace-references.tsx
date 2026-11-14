@@ -36,6 +36,7 @@ export interface PreparedReference {
   label: string;
   reference: ConversationReferenceInput;
   note: string;
+  insertions?: import('./workspace-drafts').ComposerInsertion[];
 }
 export type ReferenceTab =
   'history' | 'resources' | 'requirements' | 'knowledge' | 'external';

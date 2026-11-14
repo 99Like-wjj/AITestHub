@@ -68,6 +68,12 @@ function reviewFromUrl() {
     ? value
     : 'all';
 }
+function kindFromUrl(): 'UI' | 'API' {
+  return new URLSearchParams(window.location.hash.split('?')[1]).get('kind') ===
+    'API'
+    ? 'API'
+    : 'UI';
+}
 
 function ContentView({ content }: { content: AssetContent }) {
   return (
@@ -362,7 +368,11 @@ export function AssetsPage({
   onScopeChange: (scope: CaseScope | null) => void;
 }) {
   const { modal, message } = App.useApp();
-  const [localKind, setLocalKind] = useState<'UI' | 'API'>('UI');
+  const [localKind, setLocalKind] = useState<'UI' | 'API'>(kindFromUrl);
+  const [reviewCounts, setReviewCounts] = useState<{
+    UI: number;
+    API: number;
+  } | null>(null);
   const kind = scope?.kind ?? localKind;
   const [navigation, setNavigation] = useState<Navigation>({
     requirements: [],
@@ -487,9 +497,19 @@ export function AssetsPage({
       if (!signal?.aborted && epoch === detailEpoch.current) {
         setDetail(response);
         setRevisionId((current) =>
-          response.revisions.some((item) => item.id === current)
-            ? current
-            : response.asset.revisionId,
+          response.revisions.some(
+            (item) =>
+              item.id ===
+              new URLSearchParams(window.location.hash.split('?')[1]).get(
+                'assetRevisionId',
+              ),
+          )
+            ? (new URLSearchParams(window.location.hash.split('?')[1]).get(
+                'assetRevisionId',
+              ) ?? response.asset.revisionId)
+            : response.revisions.some((item) => item.id === current)
+              ? current
+              : response.asset.revisionId,
         );
       }
     } catch (err) {
@@ -527,10 +547,73 @@ export function AssetsPage({
     includeArchivedRequirements,
   ]);
   useEffect(() => {
-    const update = () => setReviewFilter(reviewFromUrl());
+    const update = () => {
+      setReviewFilter(reviewFromUrl());
+      setLocalKind(kindFromUrl());
+    };
     window.addEventListener('hashchange', update);
     return () => window.removeEventListener('hashchange', update);
   }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    setReviewCounts(null);
+    if (!project || reviewFilter === 'all') return;
+    void Promise.all(
+      (['UI', 'API'] as const).map(async (assetKind) => {
+        const query = new URLSearchParams({
+          kind: assetKind,
+          includeRemoved: String(includeRemoved),
+          includeArchivedRequirements: String(includeArchivedRequirements),
+        });
+        if (scope)
+          query.set('requirementVersionId', scope.requirementVersionId);
+        const data = await api(
+          `/projects/${project.id}/assets?${query}`,
+          { signal: controller.signal },
+          assetListSchema,
+        );
+        return [
+          assetKind,
+          data.assets.filter(
+            (asset) =>
+              asset.targetType === 'case' &&
+              (reviewFilter === 'unapproved'
+                ? asset.reviewState !== 'approved'
+                : asset.reviewState === reviewFilter),
+          ).length,
+        ] as const;
+      }),
+    )
+      .then((counts) => {
+        if (!controller.signal.aborted)
+          setReviewCounts({
+            UI: counts.find(([key]) => key === 'UI')?.[1] ?? 0,
+            API: counts.find(([key]) => key === 'API')?.[1] ?? 0,
+          });
+      })
+      .catch(() => {
+        /* The current list retains its own read errors; unavailable cross-type counts remain unknown. */
+      });
+    return () => controller.abort();
+  }, [
+    project?.id,
+    scope?.requirementVersionId,
+    reviewFilter,
+    includeRemoved,
+    includeArchivedRequirements,
+    assets,
+  ]);
+  useEffect(() => {
+    const parsed = z
+      .uuid()
+      .safeParse(
+        new URLSearchParams(window.location.hash.split('?')[1]).get('assetId'),
+      );
+    if (!parsed.success || loading) return;
+    const asset = assets.find((item) => item.id === parsed.data);
+    if (asset) selectAsset(asset);
+    else setSelectedId(parsed.data);
+  }, [project?.id, kind, loading, assets]);
   useEffect(() => {
     if (!selectedId) {
       detailEpoch.current += 1;
@@ -565,7 +648,7 @@ export function AssetsPage({
   function selectRequirement(id: string) {
     if (!project) return;
     if (id === 'all') {
-      onScopeChange(null);
+      changeScope(null);
       return;
     }
     const requirement = navigation.requirements.find((item) => item.id === id);
@@ -573,7 +656,7 @@ export function AssetsPage({
       ? [...requirement.versions].sort((a, b) => b.versionNo - a.versionNo)[0]
       : undefined;
     if (requirement && version)
-      onScopeChange({
+      changeScope({
         projectId: project.id,
         requirementId: requirement.id,
         title: requirement.title,
@@ -586,16 +669,32 @@ export function AssetsPage({
     if (!scope || !selectedRequirement) return;
     const version = selectedRequirement.versions.find((item) => item.id === id);
     if (version)
-      onScopeChange({
+      changeScope({
         ...scope,
         requirementVersionId: id,
         versionNo: version.versionNo,
       });
   }
+  function changeScope(next: CaseScope | null) {
+    onScopeChange(next);
+    const query = new URLSearchParams(window.location.hash.split('?')[1]);
+    query.set('kind', next?.kind ?? kind);
+    if (reviewFilter !== 'all') query.set('review', reviewFilter);
+    else query.delete('review');
+    query.delete('assetId');
+    query.delete('assetRevisionId');
+    window.location.hash = `cases?${query}`;
+  }
   function selectAsset(asset: Asset) {
     if (asset.setId !== batchId) setSelectedKeys([]);
     setSelectedId(asset.id);
     setBatchId(asset.setId);
+    const query = new URLSearchParams(window.location.hash.split('?')[1]);
+    if (query.has('assetId') && query.get('assetId') !== asset.id) {
+      query.set('assetId', asset.id);
+      query.delete('assetRevisionId');
+      window.location.hash = `cases?${query}`;
+    }
   }
   async function changed() {
     await load();
@@ -843,10 +942,21 @@ export function AssetsPage({
               aria-pressed={kind === value}
               onClick={() => {
                 setLocalKind(value);
-                if (scope) onScopeChange({ ...scope, kind: value });
+                if (scope) changeScope({ ...scope, kind: value });
+                else {
+                  const query = new URLSearchParams(
+                    window.location.hash.split('?')[1],
+                  );
+                  query.set('kind', value);
+                  query.delete('assetId');
+                  window.location.hash = `cases?${query}`;
+                }
               }}
             >
               {value === 'UI' ? 'UI 自主测试' : '接口回归'}
+              {reviewFilter !== 'all'
+                ? ` (${reviewCounts?.[value] ?? '…'})`
+                : ''}
             </button>
           ))}
         </div>
@@ -868,6 +978,25 @@ export function AssetsPage({
           </span>
         </div>
       </div>
+      {reviewFilter === 'unapproved' && (
+        <p className="caption" role="status">
+          待评审包含 UI
+          与接口两类独立资产，请按上方类型查看；切换类型会保留评审筛选。
+        </p>
+      )}
+      {tester && scope && !batch && (
+        <Alert
+          type="info"
+          showIcon
+          className="mb"
+          title="新增场景前，请先创建或选择生成批次。"
+          action={
+            <Button size="small" onClick={() => openEditor('set')}>
+              新建批次
+            </Button>
+          }
+        />
+      )}
       {error && (
         <Alert
           type="error"

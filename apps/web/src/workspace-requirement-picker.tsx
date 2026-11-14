@@ -3,6 +3,7 @@ import type { InputRef } from 'antd';
 import { FolderOpenOutlined, UndoOutlined } from '@ant-design/icons';
 import type { ReactElement } from 'react';
 import { useEffect, useRef, useState } from 'react';
+import { useWorkspaceEscapeFocus } from './workspace-escape-focus';
 import type { RequirementGroupCandidates } from '../../../packages/contracts/src/conversations';
 
 export type RequirementRestoreCandidate =
@@ -34,6 +35,7 @@ export function RequirementRestorePicker({
   const [filterQuery, setFilterQuery] = useState('');
   const composing = useRef(false);
   const search = useRef<InputRef>(null);
+  useWorkspaceEscapeFocus(open, () => onOpenChange(false));
   useEffect(() => {
     if (!open) return;
     setQuery('');

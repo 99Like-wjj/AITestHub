@@ -23,6 +23,14 @@ import { api, describeError } from './api';
 type Notification = z.infer<
   typeof notificationListSchema
 >['notifications'][number];
+const notificationLabels: Record<Notification['kind'], string> = {
+  requirementReview: '需求资料',
+  assetReview: '用例评审',
+  reportReady: '执行报告',
+  scheduleCompleted: '定时运行完成',
+  issueNotDefect: '非缺陷决定',
+  uploadInterrupted: '文件上传中断',
+};
 export function NotificationBell({
   unreadCount,
   onClick,
@@ -222,7 +230,7 @@ export function NotificationPanel({
                   <Typography.Text type="secondary">
                     {row.createdAt}
                   </Typography.Text>
-                  <Tag>{row.kind}</Tag>
+                  <Tag>{notificationLabels[row.kind]}</Tag>
                 </Space>
               ),
             },

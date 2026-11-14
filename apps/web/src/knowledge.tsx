@@ -163,6 +163,7 @@ function EditDialog({
   wide = false,
   saveLabel = '确认保存知识',
   allowSave = true,
+  submitting = command.pending,
   zIndex = uiLayers.dialog,
 }: {
   title: string;
@@ -174,6 +175,7 @@ function EditDialog({
   wide?: boolean;
   saveLabel?: string;
   allowSave?: boolean;
+  submitting?: boolean;
   zIndex?: number;
 }) {
   const [discard, setDiscard] = useState(false);
@@ -201,7 +203,7 @@ function EditDialog({
               disabled={command.pending || command.uncertain || !allowSave}
               onClick={onSave}
             >
-              {command.pending ? '正在提交…' : saveLabel}
+              {submitting ? '正在提交…' : saveLabel}
             </Button>
           </>
         }
@@ -676,11 +678,13 @@ function HistoryDialog({
   entryId,
   onChanged,
   onClose,
+  restoreMode = false,
 }: {
   target: Target;
   entryId: string;
   onChanged: () => void;
   onClose: () => void;
+  restoreMode?: boolean;
 }) {
   const [history, setHistory] = useState<History>();
   const [selected, setSelected] = useState<EntryReply>();
@@ -733,7 +737,7 @@ function HistoryDialog({
     <>
       <Dialog
         open
-        title="知识版本历史"
+        title={restoreMode ? '恢复知识条目：选择历史版本' : '知识版本历史'}
         wide
         onClose={onClose}
         zIndex={uiLayers.detail}
@@ -741,6 +745,8 @@ function HistoryDialog({
         <p className="caption mb">
           {target.project.name} ·
           历史正文固定保存，恢复生成新当前修订，不抹去后来历史。
+          {restoreMode &&
+            '请选择需要恢复的正文版本，再核对恢复影响；删除标记不可作为恢复正文。'}
         </p>
         {error && <Notice error>{error}</Notice>}
         {loading && <p className="caption">正在读取…</p>}
@@ -1159,6 +1165,7 @@ function CompareDialog({
     <EditDialog
       title="导入并比较项目知识"
       command={activeCommand}
+      submitting={commitCommand.pending}
       dirty={
         receipt
           ? receipt.results.some((item) => item.status === 'conflict')
@@ -1710,7 +1717,11 @@ export function KnowledgePage({ project }: { project: Project | null }) {
     target: Target;
     existing?: KSpace;
   }>();
-  const [history, setHistory] = useState<{ target: Target; entryId: string }>();
+  const [history, setHistory] = useState<{
+    target: Target;
+    entryId: string;
+    restoreMode?: boolean;
+  }>();
   const [remove, setRemove] = useState<{
     target: Target;
     entry: KnowledgeIndexItem;
@@ -2050,6 +2061,20 @@ export function KnowledgePage({ project }: { project: Project | null }) {
               {!entry.deleted && (
                 <Button kind="small" onClick={() => edit(entry)}>
                   查看 / 编辑
+                </Button>
+              )}
+              {entry.deleted && (
+                <Button
+                  kind="small"
+                  onClick={() =>
+                    setHistory({
+                      target: { project, session: crypto.randomUUID() },
+                      entryId: entry.id,
+                      restoreMode: true,
+                    })
+                  }
+                >
+                  恢复条目
                 </Button>
               )}
               <Button

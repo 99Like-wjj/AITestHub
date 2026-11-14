@@ -1,0 +1,14 @@
+.configuration-kinds {
+  --configuration-selected-text: #ffffff;
+}
+
+:root[data-theme='dark'] .configuration-kinds {
+  --configuration-selected-text: #111111;
+}
+
+.configuration-kinds
+  button[aria-pressed='true']:not(:disabled):is(:hover, :focus-visible) {
+  color: var(--configuration-selected-text);
+  background: var(--accent);
+  border-color: var(--accent);
+}

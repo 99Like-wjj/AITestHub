@@ -38,6 +38,9 @@ const count = (value: string | null | undefined) =>
     : BigInt(value).toLocaleString('zh-CN');
 
 function Heatmap({ days }: { days: PersonalUsage['heatmap'] }) {
+  const calendar = useRef<HTMLDivElement>(null);
+  const [focusedDate, setFocusedDate] = useState<string | null>(null);
+  const afterCalendar = useRef<HTMLParagraphElement>(null);
   const first = days[0];
   const padding = first
     ? (new Date(`${first.date}T00:00:00Z`).getUTCDay() + 6) % 7
@@ -52,10 +55,18 @@ function Heatmap({ days }: { days: PersonalUsage['heatmap'] }) {
   );
   return (
     <div className="usage-calendar-scroll">
+      <Button
+        size="small"
+        type="link"
+        onClick={() => afterCalendar.current?.focus()}
+      >
+        跳过日期区，查看用量表
+      </Button>
       <div
+        ref={calendar}
         className="usage-calendar"
-        role="img"
-        aria-label="最近365天Token年度热力图，七行按周排列，日期与数值可逐格查看"
+        role="group"
+        aria-label="最近365天Token年度热力图；上下键前后一天，左右键前后一周，Home/End到首末日期，Tab离开日期区"
       >
         <div className="usage-day-labels">
           <span />
@@ -104,7 +115,49 @@ function Heatmap({ days }: { days: PersonalUsage['heatmap'] }) {
                 <Tooltip key={day.date} title={text}>
                   <span
                     className={`usage-cell level-${level}${unknown ? ' unknown' : ''}`}
-                    tabIndex={0}
+                    tabIndex={
+                      day.date ===
+                      (focusedDate &&
+                      days.some((item) => item.date === focusedDate)
+                        ? focusedDate
+                        : first?.date)
+                        ? 0
+                        : -1
+                    }
+                    onFocus={() => setFocusedDate(day.date)}
+                    onKeyDown={(event) => {
+                      const at = days.findIndex(
+                        (item) => item.date === day.date,
+                      );
+                      const offset = {
+                        ArrowUp: -1,
+                        ArrowDown: 1,
+                        ArrowLeft: -7,
+                        ArrowRight: 7,
+                      }[event.key];
+                      const target =
+                        event.key === 'Home'
+                          ? 0
+                          : event.key === 'End'
+                            ? days.length - 1
+                            : offset === undefined
+                              ? null
+                              : Math.max(
+                                  0,
+                                  Math.min(days.length - 1, at + offset),
+                                );
+                      if (target === null) return;
+                      event.preventDefault();
+                      const date = days[target]?.date;
+                      if (date) {
+                        setFocusedDate(date);
+                        calendar.current
+                          ?.querySelector<HTMLElement>(
+                            `[data-usage-date="${date}"]`,
+                          )
+                          ?.focus();
+                      }
+                    }}
                     aria-label={text}
                     data-usage-date={day.date}
                   />
@@ -127,6 +180,9 @@ function Heatmap({ days }: { days: PersonalUsage['heatmap'] }) {
           灰格为零/无已记录Token；描边表示总量或发送意图未知。范围外留白不计日期。
         </Typography.Text>
       </Space>
+      <p ref={afterCalendar} tabIndex={-1} className="caption">
+        日期区结束。Tab 继续查看下方用量表。
+      </p>
     </div>
   );
 }

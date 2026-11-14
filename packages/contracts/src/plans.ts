@@ -48,6 +48,20 @@ export const revisePlanInputSchema = createPlanInputSchema.safeExtend({
   rowVersion: persistedRowVersionSchema,
   basePlanRevisionId: idSchema,
 });
+export const renamePlanInputSchema = z.strictObject({
+  commandId: commandIdSchema,
+  rowVersion: persistedRowVersionSchema,
+  basePlanRevisionId: idSchema,
+  name: titleSchema,
+});
+export const uiPlanEligibilitySchema = z.strictObject({
+  items: z.array(z.strictObject({
+    caseId: idSchema,
+    setId: idSchema,
+    eligible: z.boolean(),
+    reasons: z.array(z.string()),
+  })),
+});
 export const apiStartPreviewInputSchema = z.strictObject({
   commandId: commandIdSchema,
   planRevisionId: idSchema,
@@ -87,6 +101,15 @@ export const planListSchema = z.strictObject({ plans: z.array(planSchema) });
 export const planReceiptSchema = z.strictObject({ plan: planSchema });
 export const planDetailSchema = z.strictObject({
   plan: planSchema,
+  display: z.strictObject({
+    environmentName: z.string().nullable(),
+    cases: z.array(z.strictObject({
+      caseId: idSchema,
+      title: z.string().nullable(),
+      requirementVersionId: idSchema.nullable(),
+      approvalSnapshotId: idSchema.nullable(),
+    })),
+  }),
   revisions: z.array(
     z.strictObject({
       id: idSchema,
@@ -99,6 +122,7 @@ export const planOperationLookupSchema = z.strictObject({
   operation: z.enum([
     'plans.create',
     'plans.revise',
+    'plans.rename',
     'api-runs.start-preview',
     'api-runs.queue',
   ]),

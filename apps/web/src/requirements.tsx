@@ -187,6 +187,10 @@ export function RequirementsPage({
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string>();
   const [versionId, setVersionId] = useState<string>();
+  const requestedVersion = useRef<{
+    requirementId: string;
+    versionId: string;
+  } | null>(null);
   const [preview, setPreview] = useState<Material | null>(null);
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerRequirement, setComposerRequirement] =
@@ -330,6 +334,7 @@ export function RequirementsPage({
   }
   useEffect(() => {
     setSelectedId(null);
+    requestedVersion.current = null;
     setDetail(null);
     setPreview(null);
     setComposerOpen(false);
@@ -368,8 +373,13 @@ export function RequirementsPage({
     }
     const controller = new AbortController();
     setDetail(null);
-    setVersionId(undefined);
-    void loadDetail(selectedId, undefined, controller.signal);
+    const requested =
+      requestedVersion.current?.requirementId === selectedId
+        ? requestedVersion.current.versionId
+        : undefined;
+    requestedVersion.current = null;
+    setVersionId(requested);
+    void loadDetail(selectedId, requested, controller.signal);
     return () => controller.abort();
   }, [selectedId, project?.id]);
   useEffect(() => {
@@ -387,6 +397,10 @@ export function RequirementsPage({
   async function saved(id: string, savedVersionId: string) {
     await load();
     if (selectedId !== id) {
+      requestedVersion.current = {
+        requirementId: id,
+        versionId: savedVersionId,
+      };
       setSelectedId(id);
       setVersionId(savedVersionId);
     } else await loadDetail(id, savedVersionId);
@@ -683,7 +697,7 @@ export function RequirementsPage({
                       <b>{item.title}</b>
                       <div className="sub">
                         {item.businessNumber ?? `ID ${item.id.slice(0, 8)}`} · V
-                        {item.latestVersionNo} · 主需求 / 原型 / 补充资料
+                        {item.latestVersionNo}
                       </div>
                     </td>
                     <td>
@@ -758,15 +772,51 @@ export function RequirementsPage({
                       <h2>
                         {error
                           ? '尚未取得需求列表'
-                          : archived
-                            ? '没有匹配的已归档需求'
-                            : '没有匹配的需求'}
+                          : appliedSearch ||
+                              participation === 'mine' ||
+                              status !== 'all'
+                            ? archived
+                              ? '没有匹配的已归档需求'
+                              : '当前筛选没有匹配的需求'
+                            : '此项目暂无当前需求'}
                       </h2>
                       <p>
                         {error
                           ? '处理上方错误后重新加载。'
-                          : '调整关键词或筛选条件后再试。'}
+                          : appliedSearch ||
+                              participation === 'mine' ||
+                              status !== 'all'
+                            ? '可清空搜索并切回全部当前需求；历史需求可通过状态筛选查看。'
+                            : tester
+                              ? '新增一条需求后即可维护版本和设计用例；已归档需求仍可通过状态筛选查看。'
+                              : '当前范围尚无需求。测试角色可新增需求，其他成员可查看有权限的需求及历史。'}
                       </p>
+                      {!error &&
+                        (appliedSearch ||
+                        participation === 'mine' ||
+                        status !== 'all' ? (
+                          <Button
+                            onClick={() => {
+                              setSearch('');
+                              setAppliedSearch('');
+                              setParticipation('all');
+                              setStatus('all');
+                              setPage(1);
+                            }}
+                          >
+                            查看全部当前需求
+                          </Button>
+                        ) : tester ? (
+                          <Button
+                            type="primary"
+                            onClick={() => {
+                              setComposerRequirement(null);
+                              setComposerOpen(true);
+                            }}
+                          >
+                            新增需求
+                          </Button>
+                        ) : null)}
                     </div>
                   </td>
                 </tr>

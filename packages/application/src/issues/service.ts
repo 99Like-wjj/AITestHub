@@ -7,6 +7,7 @@ import {
   issueListQuerySchema,
   manualVerificationInputSchema,
   issueDetailSchema,
+  manualVerificationScopeSchema,
   type Issue,
 } from '../../../contracts/src/issues.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
@@ -228,6 +229,28 @@ export class IssueService {
           actorId: verification.actor_id,
           createdAt: verification.created_at.toISOString(),
           executionProvenance: verification.execution_provenance,
+          scopeSnapshot:
+            verification.method === 'manual'
+              ? (() => {
+                  const recorded = events.rows.find(
+                    (event) =>
+                      event.action === 'manual-verification' &&
+                      typeof event.payload === 'object' &&
+                      event.payload !== null &&
+                      'verificationId' in event.payload &&
+                      event.payload.verificationId === verification.id,
+                  );
+                  const payload = recorded?.payload;
+                  const parsed = manualVerificationScopeSchema.safeParse(
+                    payload &&
+                      typeof payload === 'object' &&
+                      'scopeSnapshot' in payload
+                      ? payload.scopeSnapshot
+                      : null,
+                  );
+                  return parsed.success ? parsed.data : null;
+                })()
+              : null,
         })),
         resultLinks: sources.rows.map((source) => ({
           resultId: source.result_id,
@@ -501,6 +524,24 @@ export class IssueService {
             409,
           );
         const verificationId = randomUUID();
+        const version = row.requirement_version_id
+          ? (
+              await tx.query<{ version_no: number }>(
+                'SELECT version_no FROM app.requirement_versions WHERE project_id=$1 AND requirement_id=$2 AND id=$3',
+                [projectId, row.requirement_id, row.requirement_version_id],
+              )
+            ).rows[0]
+          : null;
+        const scopeSnapshot = manualVerificationScopeSchema.parse({
+          issueId: row.id,
+          issueRowVersion: row.row_version,
+          requirementId: row.requirement_id,
+          requirementVersionId: row.requirement_version_id,
+          requirementVersionNo: version?.version_no ?? null,
+          scopeDescription:
+            input.scopeDescription ||
+            '沿用记录时缺陷的关联需求版本；未额外声明用例范围。',
+        });
         for (const fileId of input.attachmentFileIds) {
           if (
             !(
@@ -552,7 +593,7 @@ export class IssueService {
           'manual-verification',
           row.assignee_id,
           row.assignee_id,
-          { verificationId, outcome: input.outcome, state },
+          { verificationId, outcome: input.outcome, state, scopeSnapshot },
         );
         await recordRequirementActivity(tx, projectId, row.requirement_id);
         return {

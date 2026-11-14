@@ -934,14 +934,35 @@ export class ExternalMcpInvocations {
     });
     return this.get(actor, id);
   }
-  async list(actor: ActorContext, taskId?: string) {
+  async list(
+    actor: ActorContext,
+    taskId?: string,
+    options: { conversationId?: string; pendingOnly?: boolean } = {},
+  ) {
     if (actor.entrypoint === 'official-mcp') forbidden();
-    await this.expire(actor);
+    const conversationId = options.conversationId;
+    if (conversationId) {
+      if (actor.entrypoint !== 'web') forbidden();
+      z.uuid().parse(conversationId);
+      await this.db.transaction((tx) =>
+        conversationRow(tx, actor, conversationId),
+      );
+    }
+    await this.expire(actor, undefined, options.conversationId);
     return this.db.transaction(async (tx) => {
       await currentUser(tx, actor);
+      if (conversationId) await conversationRow(tx, actor, conversationId);
       const rows = await tx.query<InvocationRow>(
-        'SELECT * FROM app.external_mcp_invocations WHERE actor_id=$1 AND ($2::uuid IS NULL OR task_id=$2) ORDER BY created_at DESC,id DESC LIMIT 100',
-        [actor.userId, taskId ?? null],
+        `SELECT v.* FROM app.external_mcp_invocations v WHERE v.actor_id=$1 AND ($2::uuid IS NULL OR v.task_id=$2)
+         AND ($3::uuid IS NULL OR (v.conversation_id=$3 AND EXISTS(SELECT 1 FROM app.ai_tasks t WHERE t.id=v.task_id AND t.owner_id=$1 AND t.conversation_id=$3)))
+         AND (NOT $4 OR v.state=ANY($5::text[])) ORDER BY v.created_at DESC,v.id DESC${options.conversationId ? '' : ' LIMIT 100'}`,
+        [
+          actor.userId,
+          taskId ?? null,
+          options.conversationId ?? null,
+          options.pendingOnly ?? false,
+          ['waitingConsent', 'dispatching', 'failed', 'unknown'],
+        ],
       );
       const invocations = [];
       for (const row of rows.rows)
@@ -966,12 +987,16 @@ export class ExternalMcpInvocations {
     this.active.get(id)?.abort();
     return this.get(actor, id);
   }
-  private async expire(actor: ActorContext, id?: string) {
+  private async expire(
+    actor: ActorContext,
+    id?: string,
+    conversationId?: string,
+  ) {
     const expired = await this.db.transaction(async (tx) => {
       await currentUser(tx, actor);
       const rows = await tx.query<InvocationRow>(
-        "UPDATE app.external_mcp_invocations SET state='unknown',error_code='DISPATCH_EXPIRED',updated_at=clock_timestamp() WHERE actor_id=$1 AND ($2::uuid IS NULL OR id=$2) AND state='dispatching' AND dispatch_deadline<clock_timestamp() RETURNING *",
-        [actor.userId, id ?? null],
+        "UPDATE app.external_mcp_invocations SET state='unknown',error_code='DISPATCH_EXPIRED',updated_at=clock_timestamp() WHERE actor_id=$1 AND ($2::uuid IS NULL OR id=$2) AND ($3::uuid IS NULL OR conversation_id=$3) AND state='dispatching' AND dispatch_deadline<clock_timestamp() RETURNING *",
+        [actor.userId, id ?? null, conversationId ?? null],
       );
       for (const row of rows.rows)
         await this.event(tx, actor, row, 'DISPATCH_EXPIRED');

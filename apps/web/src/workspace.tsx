@@ -4,7 +4,6 @@ import {
   Alert,
   App,
   Button,
-  Card,
   Dropdown,
   Drawer,
   Form,
@@ -62,12 +61,9 @@ import { AppIcon } from './app-icon';
 import { BusinessConfirmationsPanel } from './business-confirmations';
 import { ExternalMcpInvocationsPanel } from './external-mcp-settings';
 import { AiRetryStatus } from './ai-retry-status';
-import { taskGuidanceLabel } from './task-guidance';
 import {
   ModelAttemptFragments,
   ModelRetryStatus,
-  modelMessagePresentation,
-  interruptedModelAttempts,
 } from './workspace-model-retry';
 import { onPersonalContentChanged } from './personal-content-events';
 import { uploadPersonalFile } from './file-channel';
@@ -99,6 +95,20 @@ import './workspace-composer.css';
 import { WorkspaceContextPicker } from './workspace-context-picker';
 import type { PreparedReference, ReferenceTab } from './workspace-references';
 import { taskStateLabels, useAiTask } from './workspace-tasks';
+import {
+  workspaceDrafts,
+  pendingWorkspaceSends,
+  pendingCreationDrafts,
+  clearSubmittedDraft,
+  newDraftKey,
+  moveInsertion,
+  removeInsertions,
+} from './workspace-drafts';
+import type { ComposerInsertion, WorkspaceDraft } from './workspace-drafts';
+import { WorkspaceMarkdown } from './workspace-markdown';
+import { WorkspaceTurn } from './workspace-turn';
+import { useWorkspaceScroll } from './workspace-scroll';
+import './workspace-stream.css';
 import type { Me, Project } from './types';
 
 const modelsSchema = availableModelV2ListSchema;
@@ -106,29 +116,18 @@ const cancelReceiptSchema = z.strictObject({
   taskId: z.uuid(),
   status: taskStateSchema,
 });
-const messageStatusLabels: Record<ConversationMessage['status'], string> = {
-  queued: '排队中',
-  streaming: '生成中',
-  completed: '已完成',
-  failed: '生成失败',
-  cancelled: '已停止',
-  interrupted: '已中断',
-  deleted: '已删除',
-};
 type GroupCandidate = z.infer<
   typeof requirementGroupCandidatesSchema
 >['groups'][number];
 type AliasTarget =
   | { type: 'conversation'; conversation: Conversation }
   | { type: 'group'; group: RequirementGroup };
-interface Draft {
-  content: string;
-  references: PreparedReference[];
-}
+type Draft = WorkspaceDraft;
 interface UncertainSend {
   conversationId: string;
   commandId: string;
   input: SendMessageInput;
+  draft: Draft;
 }
 
 function conversationFromUrl() {
@@ -137,21 +136,7 @@ function conversationFromUrl() {
   return result.success ? result.data : null;
 }
 function MessageText({ text }: { text: string }) {
-  return (
-    <>
-      {text.split('```').map((part, index) =>
-        index % 2 ? (
-          <pre className="message-code" key={index}>
-            {part}
-          </pre>
-        ) : (
-          <div className="message-prose" key={index}>
-            {part}
-          </div>
-        ),
-      )}
-    </>
-  );
+  return <WorkspaceMarkdown text={text} />;
 }
 function ModelCaption({ message }: { message: ConversationMessage }) {
   return (
@@ -221,6 +206,11 @@ export function Workspace({
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [sending, setSending] = useState(false);
+  const [sendPreview, setSendPreview] = useState<{
+    conversationId: string;
+    content: string;
+    userMessageId: string | null;
+  } | null>(null);
   const [creating, setCreating] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [createAttempts, setCreateAttempts] = useState<
@@ -265,8 +255,11 @@ export function Workspace({
   const [aliasForm] = Form.useForm<{ alias: string }>();
   const [associateOpen, setAssociateOpen] = useState(false);
   const [associationError, setAssociationError] = useState<string>();
-  const drafts = useRef(new Map<string, Draft>());
-  const creationDrafts = useRef(new Map<string, Draft>());
+  const drafts = useRef(workspaceDrafts(me.user.id));
+  drafts.current = workspaceDrafts(me.user.id);
+  const creationDrafts = useRef(pendingCreationDrafts(me.user.id));
+  creationDrafts.current = pendingCreationDrafts(me.user.id);
+  const candidateInsertion = useRef<ComposerInsertion | null>(null);
   const creatingRef = useRef(false);
   const sendDispatchInProgress = useRef(false);
   const mounted = useRef(true);
@@ -278,7 +271,8 @@ export function Workspace({
       conversationNavigation.current += 1;
     };
   }, []);
-  const uncertainSends = useRef(new Map<string, UncertainSend>());
+  const uncertainSends = useRef(pendingWorkspaceSends(me.user.id));
+  uncertainSends.current = pendingWorkspaceSends(me.user.id);
   const conversationEpoch = useRef(0);
   const sidebarEpoch = useRef(0);
   const groupEpoch = useRef(0);
@@ -291,13 +285,37 @@ export function Workspace({
   );
   const codeReads = useRef(new Set<string>());
   const stream = useAiTask(taskId);
+  const sendTimings = useRef(
+    new Map<string, { submittedAt: number; acceptedAt: number }>(),
+  );
+  const currentSendTiming = taskId
+    ? sendTimings.current.get(taskId)
+    : undefined;
+  const pendingRefreshCount = stream.events.filter(
+    (event) =>
+      event.type === 'ai.tool' &&
+      (event.payload.confirmationId || event.payload.externalInvocationId),
+  ).length;
   const model = models.find((entry) => entry.modelEntryId === selectedModelId);
   const active = detail?.conversation ?? null;
+  const scroll = useWorkspaceScroll(activeId);
   const mention = composing ? null : composerTrigger(content, caret);
   const mentionKey = mention
     ? `${mention.symbol}:${mention.start}:${mention.end}:${mention.query}`
     : null;
-  const candidateOpen = Boolean(mention && dismissedCandidate !== mentionKey);
+  const codedReference =
+    mention?.symbol === '@' ? decodeConversationReference(mention.query) : null;
+  const codePrepared = Boolean(
+    codedReference &&
+    references.some(
+      (entry) =>
+        entry.reference.kind === 'conversation' &&
+        entry.reference.conversationId === codedReference.conversationId,
+    ),
+  );
+  const candidateOpen = Boolean(
+    mention && dismissedCandidate !== mentionKey && !codePrepared,
+  );
   const currentGroup = sidebar?.groups.find(
     (group) => group.requirementId === active?.requirementId,
   );
@@ -502,7 +520,7 @@ export function Workspace({
         } else if (change.type === 'conversationRestored') {
           if (activeRef.current === change.conversationId)
             void loadConversation(change.conversationId);
-        } else {
+        } else if (change.type === 'resourceDeleted') {
           const mark = (items: PreparedReference[]) =>
             items.map((reference) =>
               reference.reference.kind === 'resource' &&
@@ -527,6 +545,9 @@ export function Workspace({
   );
   useEffect(() => {
     activeRef.current = activeId;
+    candidateInsertion.current = null;
+    setDismissedCandidate(null);
+    setReferenceOpen(false);
     setUncertain(
       activeId ? (uncertainSends.current.get(activeId) ?? null) : null,
     );
@@ -535,6 +556,9 @@ export function Workspace({
       setDetail(null);
       setTaskId(null);
       setConversationError(undefined);
+      const draft = drafts.current.get(newDraftKey(browseRef.current));
+      setContent(draft?.content ?? '');
+      setReferences(draft?.references ?? []);
       return;
     }
     const controller = new AbortController();
@@ -558,29 +582,53 @@ export function Workspace({
     return () => window.removeEventListener('hashchange', changed);
   }, [content, references]);
   useEffect(() => {
+    if (currentIdentityOwner() !== me.user.id) return;
     if (
       activeId &&
       detail?.conversation.id === activeId &&
       !conversationLoading
     )
       drafts.current.set(activeId, { content, references });
+    else if (!activeId) {
+      const timer = window.setTimeout(() => {
+        if (!activeRef.current && browseRef.current === targetProjectId)
+          drafts.current.set(newDraftKey(targetProjectId), {
+            content,
+            references,
+          });
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
   }, [
     activeId,
     content,
     references,
     detail?.conversation.id,
     conversationLoading,
+    targetProjectId,
   ]);
 
   function saveDraft() {
-    drafts.current.set(activeRef.current ?? 'new', {
+    if (currentIdentityOwner() !== me.user.id) return;
+    drafts.current.set(activeRef.current ?? newDraftKey(browseRef.current), {
       content,
       references,
     });
   }
+  function changeProject(id: string | null) {
+    if (!activeRef.current) {
+      saveDraft();
+      const next = drafts.current.get(newDraftKey(id));
+      setContent(next?.content ?? '');
+      setReferences(next?.references ?? []);
+      candidateInsertion.current = null;
+    }
+    onProjectChange(id);
+  }
   function openConversation(id: string) {
     conversationNavigation.current += 1;
     saveDraft();
+    candidateInsertion.current = null;
     activeRef.current = id;
     setActiveId(id);
     window.location.hash = `workspace?conversationId=${id}`;
@@ -597,7 +645,13 @@ export function Workspace({
     const prefix = before && !/\s$/.test(before) ? ' ' : '';
     const value = `${before}${prefix}${symbol}${after}`,
       cursor = before.length + prefix.length + 1;
-    setContent(value);
+    updateComposerContent(value);
+    candidateInsertion.current = {
+      start,
+      end: cursor,
+      text: `${prefix}${symbol}`,
+      restoreText: content.slice(start, input.current?.selectionEnd ?? start),
+    };
     setCaret(cursor);
     setDismissedCandidate(null);
     window.requestAnimationFrame(() => {
@@ -609,53 +663,110 @@ export function Workspace({
     setReferenceOpen(false);
     insertCandidateSymbol('/');
   }
-  function closeCandidates() {
+  function closeCandidates(selected = false) {
+    const insertion = candidateInsertion.current;
+    candidateInsertion.current = null;
+    if (
+      !selected &&
+      insertion &&
+      content.slice(insertion.start, insertion.end) === insertion.text
+    ) {
+      const value =
+        content.slice(0, insertion.start) +
+        (insertion.restoreText ?? '') +
+        content.slice(insertion.end);
+      updateComposerContent(value);
+      setCaret(insertion.start);
+    }
     setDismissedCandidate(mentionKey);
     setReferenceOpen(false);
     setActiveCandidateId(undefined);
   }
   function selectReference(reference: PreparedReference) {
     if (references.length >= 30) return;
-    setReferences((previous) =>
-      previous.some(
-        (item) =>
-          JSON.stringify(item.reference) ===
-          JSON.stringify(reference.reference),
-      )
-        ? previous
-        : [...previous, reference],
-    );
+    let prepared = reference;
     if (mention) {
       const inserted = insertComposerReference(
         content,
         mention,
         reference.label,
       );
-      setContent(inserted.text);
+      updateComposerContent(inserted.text);
+      prepared = {
+        ...reference,
+        insertions: [
+          {
+            start: mention.start,
+            end: inserted.caret,
+            text: inserted.text.slice(mention.start, inserted.caret),
+          },
+        ],
+      };
       setCaret(inserted.caret);
       window.requestAnimationFrame(() => {
         input.current?.focus();
         input.current?.setSelectionRange(inserted.caret, inserted.caret);
       });
     }
-    closeCandidates();
+    setReferences((previous) => {
+      const old = previous.find(
+        (item) =>
+          JSON.stringify(item.reference) === JSON.stringify(prepared.reference),
+      );
+      return old
+        ? previous.map((item) =>
+            item.id === old.id
+              ? {
+                  ...item,
+                  insertions: [
+                    ...(item.insertions ?? []),
+                    ...(prepared.insertions ?? []),
+                  ],
+                }
+              : item,
+          )
+        : [...previous, prepared];
+    });
+    closeCandidates(true);
   }
   function selectSkill(skillId: PlatformGuidanceSkillId) {
     if (!mention || mention.symbol !== '/') return;
     const inserted = insertComposerSkill(content, mention, skillId);
-    setContent(inserted.text);
+    updateComposerContent(inserted.text);
     setCaret(inserted.caret);
     window.requestAnimationFrame(() => {
       input.current?.focus();
       input.current?.setSelectionRange(inserted.caret, inserted.caret);
     });
-    closeCandidates();
+    closeCandidates(true);
+  }
+  function updateComposerContent(value: string) {
+    candidateInsertion.current = candidateInsertion.current
+      ? moveInsertion(content, value, candidateInsertion.current)
+      : null;
+    setReferences((previous) =>
+      previous.map((reference) => ({
+        ...reference,
+        insertions: (reference.insertions ?? []).flatMap((insertion) => {
+          const updated = moveInsertion(content, value, insertion);
+          return updated ? [updated] : [];
+        }),
+      })),
+    );
+    setContent(value);
+  }
+  function removeReference(reference: PreparedReference) {
+    const removed = removeInsertions(content, reference.insertions ?? []);
+    updateComposerContent(removed.text);
+    setReferences((previous) =>
+      previous.filter((entry) => entry.id !== reference.id),
+    );
   }
   async function prepareReferenceCode(text: string) {
     const codes = [
       ...new Set(text.match(/\bATHC1-[a-f0-9]{32}\b/gi) ?? []),
     ].slice(0, 30 - references.length);
-    const draftId = activeRef.current ?? 'new',
+    const draftId = activeRef.current ?? newDraftKey(browseRef.current),
       epoch = identityContextEpoch();
     for (const code of codes) {
       const decoded = decodeConversationReference(code);
@@ -676,7 +787,10 @@ export function Workspace({
           reference: { ...decoded, dataScope },
           note: '已准备完整会话引用；发送时按当前权限读取，编码不授予访问权限。',
         };
-        if ((activeRef.current ?? 'new') === draftId)
+        if (
+          mounted.current &&
+          (activeRef.current ?? newDraftKey(browseRef.current)) === draftId
+        ) {
           setReferences((previous) =>
             previous.some(
               (item) =>
@@ -686,7 +800,18 @@ export function Workspace({
               ? previous
               : [...previous, prepared],
           );
-        else {
+          const trigger = composerTrigger(text, text.length);
+          if (
+            trigger?.symbol === '@' &&
+            trigger.query.toLowerCase() === code.toLowerCase()
+          ) {
+            setDismissedCandidate(
+              `@:${trigger.start}:${trigger.end}:${trigger.query}`,
+            );
+            setReferenceOpen(false);
+            setActiveCandidateId(undefined);
+          }
+        } else {
           const old = drafts.current.get(draftId) ?? {
             content: '',
             references: [],
@@ -1142,7 +1267,8 @@ export function Workspace({
     }
   }
   async function attach(file: File) {
-    const draftId = activeRef.current ?? 'new';
+    const draftId = activeRef.current ?? newDraftKey(browseRef.current);
+    const attachmentEpoch = identityContextEpoch();
     const id = crypto.randomUUID();
     setUploading((previous) => [
       ...previous,
@@ -1150,6 +1276,11 @@ export function Workspace({
     ]);
     try {
       const resource = await uploadPersonalFile(file, id);
+      if (
+        attachmentEpoch !== identityContextEpoch() ||
+        currentIdentityOwner() !== me.user.id
+      )
+        return;
       const prepared: PreparedReference = {
         id,
         label: resource.originalName,
@@ -1160,7 +1291,10 @@ export function Workspace({
         },
         note: '字节已验证；正文尚未读取，解析以平台回执为准',
       };
-      if ((activeRef.current ?? 'new') === draftId)
+      if (
+        mounted.current &&
+        (activeRef.current ?? newDraftKey(browseRef.current)) === draftId
+      )
         setReferences((previous) => [...previous, prepared]);
       else {
         const previous = drafts.current.get(draftId) ?? {
@@ -1172,7 +1306,8 @@ export function Workspace({
           ...previous,
           references: [...previous.references, prepared],
         });
-        void message.info('附件已上传，引用保留在原草稿。');
+        if (mounted.current)
+          void message.info('附件已上传，引用保留在原草稿。');
       }
       setUploading((previous) => previous.filter((entry) => entry.id !== id));
     } catch (error) {
@@ -1308,7 +1443,10 @@ export function Workspace({
     sendDispatchInProgress.current = true;
     setSending(true);
     setSendError(undefined);
+    setSendPreview({ conversationId: active.id, content, userMessageId: null });
     const commandId = crypto.randomUUID();
+    const submittedDraft = { content, references };
+    drafts.current.set(active.id, submittedDraft);
     try {
       const payload = sendMessageInputSchema.parse({
         commandId,
@@ -1337,19 +1475,36 @@ export function Workspace({
         conversationId: active.id,
         commandId,
         input: payload,
+        draft: submittedDraft,
       };
       try {
+        const submittedAt = performance.now();
         const result = await api(
           `/me/conversations/${active.id}/messages`,
           { method: 'POST', body: payload },
           taskAcceptedSchema,
         );
-        drafts.current.delete(active.id);
+        sendTimings.current.set(result.taskId, {
+          submittedAt,
+          acceptedAt: performance.now(),
+        });
+        const clearComposer = clearSubmittedDraft(
+          drafts.current,
+          active.id,
+          submittedDraft,
+        );
         uncertainSends.current.delete(active.id);
-        if (activeRef.current === active.id) {
-          setContent('');
-          setReferences([]);
+        if (mounted.current && activeRef.current === active.id) {
+          if (clearComposer) {
+            setContent('');
+            setReferences([]);
+          }
           setTaskId(result.taskId);
+          setSendPreview({
+            conversationId: active.id,
+            content: payload.content,
+            userMessageId: result.userMessageId,
+          });
         }
         try {
           const response = await api(
@@ -1360,6 +1515,7 @@ export function Workspace({
           if (activeRef.current === active.id) {
             setDetail(response);
             setUncertain(null);
+            setSendPreview(null);
           }
         } catch (error) {
           if (activeRef.current === active.id)
@@ -1372,7 +1528,7 @@ export function Workspace({
         if (isUncertainMutationError(error)) {
           uncertainSends.current.set(active.id, unresolved);
           if (activeRef.current === active.id) setUncertain(unresolved);
-        }
+        } else if (activeRef.current === active.id) setSendPreview(null);
         throw error;
       }
     } catch (error) {
@@ -1396,12 +1552,18 @@ export function Workspace({
         {},
         sendReceiptSchema,
       );
-      drafts.current.delete(uncertain.conversationId);
+      const clearComposer = clearSubmittedDraft(
+        drafts.current,
+        uncertain.conversationId,
+        uncertain.draft,
+      );
       uncertainSends.current.delete(uncertain.conversationId);
       if (activeRef.current === uncertain.conversationId) {
         setTaskId(receipt.receipt.taskId);
-        setContent('');
-        setReferences([]);
+        if (clearComposer) {
+          setContent('');
+          setReferences([]);
+        }
         setUncertain(null);
         const result = await api(
           `/me/conversations/${uncertain.conversationId}`,
@@ -1484,11 +1646,27 @@ export function Workspace({
       setPending(false);
     }
   }
+  function prepareContinuation() {
+    const request =
+      '请继续上次未完成的回答，不要重复执行已经完成或结果未知的业务操作。';
+    const value = content.trim() ? `${content}\n${request}` : request;
+    updateComposerContent(value);
+    window.requestAnimationFrame(() => {
+      input.current?.focus();
+      input.current?.setSelectionRange(value.length, value.length);
+    });
+  }
   function prepareScenes() {
-    setContent(
-      '请根据我明确引用的资料梳理测试场景，区分 UI 与接口范围，并说明证据缺口。',
-    );
-    input.current?.focus();
+    const template =
+      '请根据我明确引用的资料梳理测试场景，区分 UI 与接口范围，并说明证据缺口。';
+    const value = content.trim()
+      ? `${content}${content.endsWith('\n') ? '' : '\n'}${template}`
+      : template;
+    updateComposerContent(value);
+    window.requestAnimationFrame(() => {
+      input.current?.focus();
+      input.current?.setSelectionRange(value.length, value.length);
+    });
   }
   function keyboardCard(
     event: { key: string; preventDefault: () => void },
@@ -1584,13 +1762,6 @@ export function Workspace({
               <h2>{active ? (active.alias ?? active.title) : '新对话'}</h2>
               {active?.archivedAt && <Tag>已归档，新增消息需先恢复</Tag>}
             </div>
-            <p>
-              {active
-                ? active.projectId
-                  ? `${me.projects.find((item) => item.id === active.projectId)?.name ?? '原项目（当前不可用）'}${active.requirementId ? ' · 需求会话' : ''}`
-                  : '个人对话'
-                : '选择或新建本人对话'}
-            </p>
           </div>
           <Space className="chat-head-actions">
             <Button
@@ -1651,263 +1822,210 @@ export function Workspace({
             )}
           </Space>
         </header>
-        <div className="conversation-scroll" aria-live="polite">
-          {conversationLoading && <Skeleton active paragraph={{ rows: 5 }} />}
-          {conversationError && (
-            <Alert type="error" title={conversationError} showIcon />
-          )}
-          {(!active || detail?.messages.length === 0) &&
-            !conversationLoading &&
-            !conversationError && (
-              <div className="welcome-content welcome">
-                <img
-                  src="/brand-f-mono.png"
-                  className="welcome-brand brand-mono"
-                  alt="AITestHub F 标志"
-                />
-                <h1>
-                  {welcomeRequirement ? (
-                    <>
-                      你想让我们在{' '}
-                      <span className="welcome-requirement-name">
-                        {welcomeRequirement}
-                      </span>{' '}
-                      中构建什么？
-                    </>
-                  ) : (
-                    '我们要构建什么？'
-                  )}
-                </h1>
-                <p>从一个问题开始，让测试的下一步更清晰。</p>
-                <div className="welcome-cards">
-                  <button
-                    type="button"
-                    className="welcome-card"
-                    aria-label="梳理测试场景，准备任务"
-                    onKeyDown={(event) => keyboardCard(event, prepareScenes)}
-                    onClick={prepareScenes}
-                  >
-                    <AppIcon name="check" />
-                    <span>梳理测试场景</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="welcome-card"
-                    aria-label="用Skill开始任务，查看候选"
-                    onKeyDown={(event) => keyboardCard(event, openSkills)}
-                    onClick={openSkills}
-                  >
-                    <AppIcon name="spark" />
-                    <span>用 Skill 开始任务</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="welcome-card"
-                    aria-label="引用已有知识，选择候选"
-                    onKeyDown={(event) =>
-                      keyboardCard(event, () => openReferences('knowledge'))
-                    }
-                    onClick={() => openReferences('knowledge')}
-                  >
-                    <AppIcon name="book" />
-                    <span>引用已有知识</span>
-                  </button>
+        <div
+          className="conversation-scroll"
+          ref={scroll.viewport}
+          onScroll={scroll.onScroll}
+        >
+          <div ref={scroll.content} className="conversation-content">
+            {conversationLoading && <Skeleton active paragraph={{ rows: 5 }} />}
+            {conversationError && (
+              <Alert type="error" title={conversationError} showIcon />
+            )}
+            {(!active || detail?.messages.length === 0) &&
+              !conversationLoading &&
+              !conversationError && (
+                <div className="welcome-content welcome">
+                  <img
+                    src="/brand-f-mono.png"
+                    className="welcome-brand brand-mono"
+                    alt="AITestHub F 标志"
+                  />
+                  <h1>
+                    {welcomeRequirement ? (
+                      <>
+                        你想让我们在{' '}
+                        <span className="welcome-requirement-name">
+                          {welcomeRequirement}
+                        </span>{' '}
+                        中构建什么？
+                      </>
+                    ) : (
+                      '我们要构建什么？'
+                    )}
+                  </h1>
+                  <p>从一个问题开始，让测试的下一步更清晰。</p>
+                  <div className="welcome-cards">
+                    <button
+                      type="button"
+                      className="welcome-card"
+                      aria-label="梳理测试场景，准备任务"
+                      onKeyDown={(event) => keyboardCard(event, prepareScenes)}
+                      onClick={prepareScenes}
+                    >
+                      <AppIcon name="check" />
+                      <span>梳理测试场景</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="welcome-card"
+                      aria-label="用Skill开始任务，查看候选"
+                      onKeyDown={(event) => keyboardCard(event, openSkills)}
+                      onClick={openSkills}
+                    >
+                      <AppIcon name="spark" />
+                      <span>用 Skill 开始任务</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="welcome-card"
+                      aria-label="引用已有知识，选择候选"
+                      onKeyDown={(event) =>
+                        keyboardCard(event, () => openReferences('knowledge'))
+                      }
+                      onClick={() => openReferences('knowledge')}
+                    >
+                      <AppIcon name="book" />
+                      <span>引用已有知识</span>
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
+            {detail?.nextMessageCursor && (
+              <Button onClick={() => void loadOlder()}>
+                加载更早的本人消息
+              </Button>
             )}
-          {detail?.nextMessageCursor && (
-            <Button onClick={() => void loadOlder()}>加载更早的本人消息</Button>
-          )}
-          {detail?.messages.map((entry) => {
-            const currentTask =
-              entry.role === 'assistant' &&
-              entry.taskId === taskId &&
-              stream.task?.id === entry.taskId
-                ? stream.task
-                : null;
-            const text = currentTask
-              ? modelMessagePresentation(currentTask).content
-              : entry.content;
-            return (
-              <article className={`chat-message ${entry.role}`} key={entry.id}>
-                <Typography.Text strong>
-                  {entry.role === 'user' ? me.user.displayName : 'AI 回复'}
-                </Typography.Text>
-                <ModelCaption message={entry} />
-                {currentTask && <ModelAttemptFragments task={currentTask} />}
-                {text ? (
-                  <MessageText text={text} />
-                ) : !currentTask ||
-                  !interruptedModelAttempts(currentTask.modelAttempts)
-                    .length ? (
-                  <Typography.Text type="secondary">
-                    尚未取得模型内容；当前消息状态：
-                    {
-                      messageStatusLabels[
-                        currentTask?.messageStatus ?? entry.status
-                      ]
-                    }
+            {detail?.messages.map((entry) => {
+              const sendTiming = entry.taskId
+                ? sendTimings.current.get(entry.taskId)
+                : undefined;
+              if (entry.role === 'assistant' && entry.taskId)
+                return (
+                  <WorkspaceTurn
+                    key={entry.id}
+                    taskId={entry.taskId}
+                    current={entry.taskId === taskId}
+                    stream={stream}
+                    fallbackText={entry.content}
+                    messageStatus={entry.status}
+                    {...(entry.taskStatus !== undefined
+                      ? { taskStatus: entry.taskStatus }
+                      : {})}
+                    {...(entry.taskNotices
+                      ? { taskNotices: entry.taskNotices }
+                      : {})}
+                    caption={<ModelCaption message={entry} />}
+                    {...(sendTiming ? { sendTiming } : {})}
+                    onProposals={() => setProposalTaskId(entry.taskId)}
+                    {...(entry.taskId === taskId && inFlight
+                      ? { onStop: () => void stopReply() }
+                      : {})}
+                    {...(entry.taskId === taskId
+                      ? { onContinue: prepareContinuation }
+                      : {})}
+                  />
+                );
+              return (
+                <article
+                  className={`chat-message ${entry.role}`}
+                  key={entry.id}
+                >
+                  <Typography.Text strong>
+                    {entry.role === 'user' ? me.user.displayName : 'AI 回复'}
                   </Typography.Text>
-                ) : null}
-                {!!entry.references.length && (
-                  <Space wrap>
-                    {entry.references.map((reference, index) => (
-                      <Tag key={index}>
-                        {reference.reference.kind === 'projectAccess'
-                          ? '工具来源项目（只读元数据）'
-                          : `发送时引用：${reference.reference.kind}`}
-                      </Tag>
-                    ))}
-                  </Space>
-                )}
-                {entry.role === 'assistant' && entry.taskId && (
-                  <Button
-                    size="small"
-                    onClick={() => setProposalTaskId(entry.taskId)}
-                  >
-                    查看此消息工具提案与回执
-                  </Button>
-                )}
-              </article>
-            );
-          })}
-          {stream.task && (
-            <Card
-              size="small"
-              title={`平台任务状态：${taskStateLabels[stream.task.status]}`}
-              className="task-process-card"
-            >
-              <Space direction="vertical" style={{ width: '100%' }}>
-                <Typography.Text type="secondary">
-                  任务 {stream.task.id} · {stream.task.createdAt}
-                </Typography.Text>
-                {stream.task.errorCode && (
-                  <Alert
-                    type="warning"
-                    showIcon
-                    title={`任务未完成：${stream.task.errorCode}`}
-                    description={
-                      stream.task.errorDetails
-                        ? `供应商通道状态 ${stream.task.errorDetails.httpStatus ?? '未知'}；${stream.task.errorDetails.providerCode ?? '未提供错误细分'}。未知用量不会记为零。`
-                        : '请保留任务 ID 查询原记录。'
-                    }
-                  />
-                )}
-                <ModelRetryStatus
-                  task={stream.task}
-                  {...(inFlight && !sending
-                    ? { onCancel: () => void stopReply() }
+                  <MessageText text={entry.content} />
+                  {!!entry.references.length && (
+                    <details className="message-metadata">
+                      <summary>发送时引用</summary>
+                      <Space wrap>
+                        {entry.references.map((reference, index) => (
+                          <Tag key={index}>
+                            {reference.reference.kind === 'projectAccess'
+                              ? '工具来源项目'
+                              : reference.reference.kind}
+                          </Tag>
+                        ))}
+                      </Space>
+                    </details>
+                  )}
+                </article>
+              );
+            })}
+            {sendPreview &&
+              sendPreview.conversationId === activeId &&
+              !detail?.messages.some(
+                (entry) => entry.id === sendPreview.userMessageId,
+              ) && (
+                <article className="chat-message user pending-user-message">
+                  <Typography.Text strong>
+                    {me.user.displayName}
+                  </Typography.Text>
+                  <MessageText text={sendPreview.content} />
+                  <p className="caption" role="status">
+                    {sendPreview.userMessageId
+                      ? '消息已受理，正在读取记录'
+                      : uncertain
+                        ? '发送回执待核对'
+                        : '正在发送'}
+                  </p>
+                </article>
+              )}
+            {taskId &&
+              !detail?.messages.some((entry) => entry.taskId === taskId) && (
+                <WorkspaceTurn
+                  taskId={taskId}
+                  current
+                  stream={stream}
+                  fallbackText=""
+                  messageStatus={stream.task?.messageStatus ?? 'queued'}
+                  {...(currentSendTiming
+                    ? { sendTiming: currentSendTiming }
                     : {})}
+                  onProposals={() => setProposalTaskId(taskId)}
+                  {...(inFlight ? { onStop: () => void stopReply() } : {})}
+                  onContinue={prepareContinuation}
                 />
-                {stream.events
-                  .filter(
-                    (event) =>
-                      event.type === 'ai.tool' ||
-                      event.type === 'ai.guidance.bound' ||
-                      event.type === 'ai.guidance.loaded',
-                  )
-                  .map((event) => {
-                    const guidance = taskGuidanceLabel(event);
-                    return guidance ? (
-                      <Tag
-                        key={event.sequence}
-                        style={{ whiteSpace: 'normal', maxWidth: '100%' }}
-                      >
-                        {guidance} · {event.createdAt}
-                      </Tag>
-                    ) : event.type === 'ai.tool' ? (
-                      <Tag key={event.sequence}>
-                        {event.payload.name} ·{' '}
-                        {'unknownEffect' in event.payload &&
-                        event.payload.unknownEffect === true
-                          ? '结果未知，查原回执'
-                          : event.payload.state === 'started'
-                            ? '已开始'
-                            : event.payload.state === 'completed'
-                              ? '已返回'
-                              : event.payload.state === 'waitingConfirmation'
-                                ? '待本人决定'
-                                : '未完成'}{' '}
-                        · {event.createdAt}
-                      </Tag>
-                    ) : null;
-                  })}
-                {stream.events.some(
-                  (event) => event.type === 'ai.contextReset',
-                ) && (
-                  <Alert
-                    type="info"
-                    title="模型上下文已按当前授权重新整理。已保存的本人文字与可再次读取的来源权限分别判断。"
-                  />
-                )}
-                {stream.error && !stream.retry && (
-                  <Alert type="warning" title={stream.error} showIcon />
-                )}
-                <Button onClick={stream.reconnect}>
-                  只读查询/恢复原任务事件
-                </Button>
-              </Space>
-            </Card>
-          )}
-          {taskId && (stream.retry || stream.connection === 'connecting') && (
-            <AiRetryStatus
-              state={
-                stream.retry ?? {
-                  layer: 'events',
-                  phase: 'connecting',
-                  attempt: 0,
-                  maxAttempts: 5,
-                  nextAttemptAt: null,
-                  reason: null,
-                }
-              }
-              onCancel={stream.pause}
-              onReconnect={stream.reconnect}
-            />
-          )}
-          {taskId && !stream.task && stream.error && !stream.retry && (
-            <Alert
-              type="warning"
-              title={stream.error}
-              showIcon
-              action={
-                <Button onClick={stream.reconnect}>手工查询原任务</Button>
-              }
-            />
-          )}
-          {taskId &&
-            stream.events.some(
-              (event) =>
-                event.type === 'ai.tool' &&
-                event.payload.state === 'waitingConfirmation' &&
-                Boolean(event.payload.confirmationId),
-            ) && (
+              )}
+            {activeId && (
               <BusinessConfirmationsPanel
-                taskId={taskId}
-                refreshKey={stream.events.length}
+                key={`business-pending:${activeId}`}
+                conversationId={activeId}
+                pendingOnly
+                hideEmpty
+                refreshKey={pendingRefreshCount}
                 onResolved={stream.reconnect}
               />
             )}
-          {taskId &&
-            stream.events.some(
-              (event) =>
-                event.type === 'ai.tool' &&
-                Boolean(event.payload.externalInvocationId),
-            ) && (
+            {activeId && (
               <ExternalMcpInvocationsPanel
-                taskId={taskId}
-                refreshKey={stream.events.length}
+                key={`external-pending:${activeId}`}
+                conversationId={activeId}
+                pendingOnly
+                hideEmpty
+                refreshKey={`${taskId ?? ''}:${pendingRefreshCount}`}
                 onResolved={stream.reconnect}
               />
             )}
-          <AutomaticAuxiliaryPanel
-            projectId={project?.id ?? null}
-            refreshKey={
-              sidebar?.groups.map((group) => group.requirementId).join('|') ??
-              ''
-            }
-            onNamesChanged={() => void loadSidebar(undefined, true)}
-          />
+            <AutomaticAuxiliaryPanel
+              projectId={project?.id ?? null}
+              refreshKey={
+                sidebar?.groups.map((group) => group.requirementId).join('|') ??
+                ''
+              }
+              onNamesChanged={() => void loadSidebar(undefined, true)}
+            />
+          </div>
+          {scroll.away && (
+            <button
+              className="jump-latest"
+              type="button"
+              onClick={scroll.jump}
+              aria-label="回到最新回复"
+            >
+              ↓ 最新回复
+            </button>
+          )}
         </div>
         <div
           className="workspace-composer composer-wrap user-composer"
@@ -2019,7 +2137,7 @@ export function Workspace({
                 })),
               ]}
               onChoose={(id) => {
-                onProjectChange(id || null);
+                changeProject(id || null);
                 setProjectPickerOpen(false);
               }}
             >
@@ -2113,17 +2231,18 @@ export function Workspace({
             {(references.length > 0 || uploading.length > 0) && (
               <Space wrap className="prepared-references">
                 {references.map((reference) => (
-                  <Tag
-                    key={reference.id}
-                    closable={!creating && !sending}
-                    onClose={() =>
-                      setReferences((previous) =>
-                        previous.filter((entry) => entry.id !== reference.id),
-                      )
-                    }
-                    title={reference.note}
-                  >
+                  <Tag key={reference.id} title={reference.note}>
                     {reference.label} · 待解析/权限校验
+                    <button
+                      type="button"
+                      className="reference-remove"
+                      aria-label={`移除引用：${reference.label}`}
+                      title={`移除引用：${reference.label}`}
+                      disabled={creating || sending}
+                      onClick={() => removeReference(reference)}
+                    >
+                      ×
+                    </button>
                   </Tag>
                 ))}
                 {uploading.map((upload) => (
@@ -2154,7 +2273,7 @@ export function Workspace({
               value={content}
               onChange={(event) => {
                 const value = event.target.value;
-                setContent(value);
+                updateComposerContent(value);
                 setCaret(event.target.selectionStart);
                 void prepareReferenceCode(value);
               }}
@@ -2487,6 +2606,9 @@ export function Workspace({
                         (unresolvedCreates.length || createRecoveryError),
                       ) ||
                       uploading.some((entry) => !entry.error) ||
+                      !model ||
+                      !selectionCurrent ||
+                      !model.allowedDataScopes.includes(dataScope) ||
                       Boolean(
                         model && effort && !model.effortValues.includes(effort),
                       )

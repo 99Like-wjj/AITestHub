@@ -36,6 +36,7 @@ interface IssueFields {
   target: 'new' | 'existing';
   existingIssueId: string;
   note: string;
+  scopeDescription: string;
   outcome: 'passed' | 'failed';
   attachmentFileIds: string[];
   returnToInProgress: boolean;
@@ -554,6 +555,7 @@ export function IssueActionEditor({
               outcome: values.outcome,
               note: values.note ?? '',
               attachmentFileIds: values.attachmentFileIds ?? [],
+              scopeDescription: values.scopeDescription ?? '',
               returnToInProgress:
                 values.outcome === 'failed' && values.returnToInProgress,
             }),
@@ -648,6 +650,29 @@ export function IssueActionEditor({
           <>
             {target?.kind === 'verification' && (
               <>
+                <Alert
+                  type="info"
+                  showIcon
+                  className="section-alert"
+                  title={
+                    target.issue.requirementVersionId
+                      ? `本次沿用该缺陷的需求版本 ${target.issue.requirementVersionId}`
+                      : '该缺陷未绑定具体需求版本，本次不会虚构版本。'
+                  }
+                  description="保存时冻结当前关联版本及下方本次复测范围；记录不会自动关闭缺陷。"
+                />
+                <Form.Item
+                  name="scopeDescription"
+                  label="本次实际复测范围（可补充具体场景、用例或被测构建）"
+                  rules={[{ max: 10000 }]}
+                >
+                  <Input.TextArea
+                    rows={2}
+                    maxLength={10000}
+                    disabled={command.pending}
+                    placeholder="留空表示沿用缺陷关联需求版本，未额外声明用例范围"
+                  />
+                </Form.Item>
                 <Form.Item
                   name="outcome"
                   label="人工复测结论"

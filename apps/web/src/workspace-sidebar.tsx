@@ -23,6 +23,7 @@ import {
 import type { MenuProps } from 'antd';
 import type { ReactNode } from 'react';
 import { useRef, useState } from 'react';
+import { useWorkspaceEscapeFocus } from './workspace-escape-focus';
 import { AppIcon } from './app-icon';
 import { RequirementRestorePicker } from './workspace-requirement-picker';
 import type { RequirementRestorePickerProps } from './workspace-requirement-picker';
@@ -129,6 +130,14 @@ export function ConversationMenu({
 }) {
   const trigger = useRef<HTMLButtonElement | null>(null);
   const [open, setOpen] = useState(false);
+  useWorkspaceEscapeFocus(
+    open,
+    () => {
+      setOpen(false);
+      onMenuOpenChange?.(false);
+    },
+    trigger,
+  );
   return (
     <Dropdown
       trigger={['click']}
@@ -272,6 +281,7 @@ function RequirementMenu({
 }) {
   const trigger = useRef<HTMLButtonElement | null>(null),
     [open, setOpen] = useState(false);
+  useWorkspaceEscapeFocus(open, () => setOpen(false), trigger);
   return (
     <Dropdown
       trigger={['click']}

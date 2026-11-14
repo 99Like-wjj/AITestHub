@@ -7,6 +7,7 @@ import {
 } from '../../contracts/src/model-protocol.js';
 import { modelDiscoveryV2ReceiptSchema } from '../../contracts/src/model-configuration-v2.js';
 import { parseStrictJsonText } from '../../contracts/src/safe-json.js';
+import { resolveModelEndpoint } from './model-endpoint.js';
 
 export type ModelDiscoveryErrorCode =
   | 'INVALID_CONFIGURATION'
@@ -136,7 +137,7 @@ export class NativeModelDiscovery {
       throw new ModelDiscoveryError('INVALID_CONFIGURATION');
     let endpoint: URL;
     try {
-      endpoint = new URL(`${base.data.replace(/\/+$/, '')}/models`);
+      endpoint = resolveModelEndpoint(base.data, protocol.data, 'models');
     } catch {
       throw new ModelDiscoveryError('INVALID_CONFIGURATION');
     }

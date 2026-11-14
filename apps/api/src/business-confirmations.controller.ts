@@ -5,6 +5,7 @@ import { BusinessConfirmations } from '../../../packages/application/src/tool-re
 import { IdentityService } from '../../../packages/application/src/identity/service.js';
 import { DomainError } from '../../../packages/application/src/errors.js';
 import { resolveBusinessConfirmationInputSchema } from '../../../packages/contracts/src/business-tools.js';
+import { booleanQueryValue } from './query-values.js';
 
 @Controller('api/v1/me/business-confirmations')
 export class BusinessConfirmationsController {
@@ -40,6 +41,25 @@ export class BusinessConfirmationsController {
     const path = req.path
       .replace(/^\/api\/v1\/me\/business-confirmations\/?/, '')
       .replace(/\/$/, '');
+    if (
+      !path &&
+      req.method === 'GET' &&
+      req.query.conversationId !== undefined
+    ) {
+      if (req.query.taskId !== undefined)
+        throw new DomainError(
+          'VALIDATION_ERROR',
+          '请明确按会话或原任务读取提案，不同时指定两个范围。',
+          400,
+        );
+      return res.json(
+        await this.confirmations.listConversation(
+          actor,
+          idSchema.parse(req.query.conversationId),
+          booleanQueryValue(true).parse(req.query.pendingOnly),
+        ),
+      );
+    }
     if (!path && req.method === 'GET')
       return res.json(
         await this.confirmations.list(actor, idSchema.parse(req.query.taskId)),

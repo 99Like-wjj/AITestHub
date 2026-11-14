@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Modal } from 'antd';
 import { z } from 'zod';
@@ -1029,12 +1029,18 @@ export function ExternalMcpReferenceCandidates({
 
 export function ExternalMcpInvocationsPanel({
   taskId,
+  conversationId,
   invocationId,
+  pendingOnly = false,
+  hideEmpty = false,
   refreshKey,
   onResolved,
 }: {
   taskId?: string;
+  conversationId?: string;
   invocationId?: string;
+  pendingOnly?: boolean;
+  hideEmpty?: boolean;
   refreshKey?: unknown;
   onResolved?: () => void;
 }) {
@@ -1052,6 +1058,7 @@ export function ExternalMcpInvocationsPanel({
   async function load(signal?: AbortSignal, generation = epoch.current) {
     if (
       (invocationId && !z.uuid().safeParse(invocationId).success) ||
+      (conversationId && !z.uuid().safeParse(conversationId).success) ||
       (taskId && !z.uuid().safeParse(taskId).success)
     ) {
       if (generation === epoch.current) {
@@ -1073,13 +1080,30 @@ export function ExternalMcpInvocationsPanel({
           ]
         : (
             await api(
-              `${base}/invocations${taskId ? `?taskId=${encodeURIComponent(taskId)}` : ''}`,
+              `${base}/invocations?${new URLSearchParams({ ...(taskId ? { taskId } : {}), ...(conversationId ? { conversationId } : {}), pendingOnly: String(pendingOnly) })}`,
               signal ? { signal } : {},
               externalInvocationListSchema,
             )
           ).invocations;
       if (!signal?.aborted && generation === epoch.current) {
-        setItems(values);
+        if (
+          (conversationId &&
+            values.some((row) => row.conversationId !== conversationId)) ||
+          (taskId && values.some((row) => row.taskId !== taskId)) ||
+          (invocationId && values.some((row) => row.id !== invocationId))
+        )
+          throw new Error(
+            '外部调用所属会话、任务或原调用标识不匹配，未显示内容。',
+          );
+        setItems(
+          pendingOnly
+            ? values.filter((row) =>
+                ['waitingConsent', 'dispatching', 'failed', 'unknown'].includes(
+                  row.state,
+                ),
+              )
+            : values,
+        );
         setError('');
         setUnconfirmed((current) =>
           Object.fromEntries(
@@ -1096,13 +1120,16 @@ export function ExternalMcpInvocationsPanel({
         );
       }
     } catch (error) {
-      if (!signal?.aborted && generation === epoch.current)
+      if (!signal?.aborted && generation === epoch.current) {
+        if (error instanceof ApiError && [401, 403, 404].includes(error.status))
+          setItems([]);
         setError(describeError(error));
+      }
     } finally {
       if (!signal?.aborted && generation === epoch.current) setLoading(false);
     }
   }
-  useEffect(() => {
+  useLayoutEffect(() => {
     const abort = new AbortController();
     epoch.current++;
     setBusy(undefined);
@@ -1112,7 +1139,7 @@ export function ExternalMcpInvocationsPanel({
     setItems([]);
     void load(abort.signal);
     return () => abort.abort();
-  }, [taskId, invocationId]);
+  }, [taskId, conversationId, invocationId, pendingOnly]);
   useEffect(() => {
     if (refreshKey === undefined) return;
     const abort = new AbortController(),
@@ -1124,13 +1151,30 @@ export function ExternalMcpInvocationsPanel({
     };
   }, [refreshKey]);
   useEffect(() => {
+    let timer: number | undefined;
+    const refresh = () => {
+      if (document.visibilityState === 'hidden') return;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => void load(undefined, epoch.current), 100);
+    };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [conversationId, taskId, invocationId, pendingOnly]);
+  useEffect(() => {
     if (!items.some((item) => item.state === 'dispatching')) return;
     const timer = window.setInterval(() => void load(), 2500);
     return () => window.clearInterval(timer);
   }, [
     items.some((item) => item.state === 'dispatching'),
     taskId,
+    conversationId,
     invocationId,
+    pendingOnly,
   ]);
   async function decide(row: Invocation, decision: 'accept' | 'decline') {
     const generation = epoch.current;
@@ -1185,9 +1229,21 @@ export function ExternalMcpInvocationsPanel({
       if (generation === epoch.current) setBusy(undefined);
     }
   }
+  if (hideEmpty && !error && !items.length) return null;
   return (
     <div className="external-mcp-page">
-      {error && <Notice error>{error}</Notice>}
+      {error && (
+        <Notice error>
+          {error}
+          <button
+            className="btn small mt"
+            disabled={busy !== undefined}
+            onClick={() => void load()}
+          >
+            只读刷新本会话原调用
+          </button>
+        </Notice>
+      )}
       {loading && <p className="caption mt">读取本人外部调用…</p>}
       {!loading && !error && !items.length && (
         <p className="caption mt">没有当前可显示的外部调用提案。</p>

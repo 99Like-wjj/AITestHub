@@ -70,6 +70,7 @@ export function ApiWorkbenchPage({
   const [versionId, setVersionId] = useState<string>();
   const [batchId, setBatchId] = useState<string>();
   const [sceneId, setSceneId] = useState<string>();
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [includeArchivedRequirements, setIncludeArchivedRequirements] =
@@ -148,7 +149,7 @@ export function ApiWorkbenchPage({
     } else action();
   }
   async function load(signal?: AbortSignal, initialize = false) {
-    if (!project) return;
+    if (!project) return false;
     const generation = ++epoch.current;
     setLoading(true);
     try {
@@ -164,9 +165,13 @@ export function ApiWorkbenchPage({
           assetListSchema,
         ),
       ]);
-      if (signal?.aborted || generation !== epoch.current) return;
+      if (signal?.aborted || generation !== epoch.current) return false;
       setNavigation(map);
       setAssets(list.assets);
+      if (initialize)
+        setExpandedKeys(
+          map.requirements.map((item) => `requirement:${item.id}`),
+        );
       setError(undefined);
       if (initialize) {
         const selected = idSchema.safeParse(
@@ -184,7 +189,7 @@ export function ApiWorkbenchPage({
             signal ? { signal } : {},
             assetDetailSchema,
           );
-          if (signal?.aborted || generation !== epoch.current) return;
+          if (signal?.aborted || generation !== epoch.current) return false;
           if (
             historical.asset.kind !== 'API' ||
             historical.asset.targetType !== 'case'
@@ -195,9 +200,11 @@ export function ApiWorkbenchPage({
         activate(selectedAsset);
         loadedProject.current = project.id;
       }
+      return true;
     } catch (failure) {
       if (!signal?.aborted && generation === epoch.current)
         setError(describeError(failure));
+      return false;
     } finally {
       if (!signal?.aborted && generation === epoch.current) setLoading(false);
     }
@@ -264,8 +271,39 @@ export function ApiWorkbenchPage({
     return () => window.removeEventListener('hashchange', update);
   }, []);
   async function saved(asset: Asset) {
-    await load();
-    activate(asset);
+    const generation = epoch.current + 1;
+    const refreshed = await load();
+    if (generation !== epoch.current) return;
+    if (!refreshed) {
+      setAssets((current) => [
+        ...current.filter((item) => item.id !== asset.id),
+        asset,
+      ]);
+      setError(
+        '内容已保存，但目录未能更新。请刷新目录核对；无需再次创建或保存。',
+      );
+    }
+    if (asset.targetType === 'case') activate(asset);
+    else {
+      activate(null);
+      setVersionId(asset.requirementVersionId);
+      setBatchId(asset.targetType === 'set' ? asset.id : asset.setId);
+      setSceneId(asset.targetType === 'scenario' ? asset.id : undefined);
+    }
+    const requirement = navigation.requirements.find((item) =>
+      item.versions.some(
+        (version) => version.id === asset.requirementVersionId,
+      ),
+    );
+    const keys = [
+      requirement ? `requirement:${requirement.id}` : null,
+      asset.targetType === 'scenario'
+        ? `scenario:${asset.id}`
+        : asset.parentId
+          ? `scenario:${asset.parentId}`
+          : null,
+    ].filter((key): key is string => key !== null);
+    setExpandedKeys((current) => [...new Set([...current, ...keys])]);
     setEditor(null);
   }
   async function save() {
@@ -484,7 +522,8 @@ export function ApiWorkbenchPage({
           ) : (
             <Tree
               blockNode
-              defaultExpandAll
+              expandedKeys={expandedKeys}
+              onExpand={(keys) => setExpandedKeys(keys.map(String))}
               selectedKeys={
                 active
                   ? [`case:${active.id}`]
@@ -577,6 +616,11 @@ export function ApiWorkbenchPage({
             />
           )}
           <div className="api-scope-tools mt">
+            {tester && visibleVersion && !batchId && (
+              <p className="caption" role="status">
+                新增场景前，请先创建或选择批次。下方“新建批次”可直接创建。
+              </p>
+            )}
             <div className="context-controls api-scope-controls">
               <Select
                 aria-label="接口需求版本"
@@ -830,11 +874,27 @@ export function ApiWorkbenchPage({
             <div className="card pad">
               <Empty
                 description={
-                  loading
-                    ? '正在读取接口用例…'
-                    : scene
-                      ? `已选择场景「${scene.title}」，可新建接口用例。`
-                      : '选择接口用例进行维护，或先选择需求版本、批次和场景。'
+                  loading ? (
+                    '正在读取接口用例…'
+                  ) : scene ? (
+                    <Space direction="vertical">
+                      <span>{`已选择场景「${scene.title}」，可新建接口用例。`}</span>
+                      <Button
+                        onClick={() => {
+                          const query = new URLSearchParams({
+                            projectId: project.id,
+                            kind: 'API',
+                            assetId: scene.id,
+                          });
+                          window.location.hash = `cases?${query}`;
+                        }}
+                      >
+                        在用例中心维护此场景
+                      </Button>
+                    </Space>
+                  ) : (
+                    '选择接口用例进行维护，或先选择需求版本、批次和场景。'
+                  )
                 }
               />
             </div>

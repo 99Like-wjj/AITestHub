@@ -117,6 +117,8 @@ export class ConversationsController {
       );
     if (path === 'conversations/history-search' && req.method === 'POST')
       return res.json(await this.conversations.searchHistory(actor, req.body));
+    if (path === 'requirement-groups/archived' && req.method === 'GET')
+      return res.json(await this.conversations.archivedGroups(actor));
     if (
       (path === 'requirement-groups/candidates' ||
         path === 'requirement-groups') &&
@@ -272,10 +274,12 @@ export class ConversationsController {
         if (req.query.format === 'json')
           return res.json(await this.tasks.events(actor, id, after));
         res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Cache-Control', 'no-store, no-transform');
+        res.setHeader('X-Accel-Buffering', 'no');
         res.setHeader('Connection', 'keep-alive');
         res.flushHeaders();
         let closed = false;
+        let lastHeartbeatAt = 0;
         res.once('close', () => {
           closed = true;
         });
@@ -284,16 +288,31 @@ export class ConversationsController {
             const page = await this.tasks.events(actor, id, after);
             if (closed || res.destroyed || res.writableEnded) break;
             for (const event of page.events) {
-              res.write(
-                `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+              const ready = res.write(
+                `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify({ ...event, sentAt: new Date().toISOString() })}\n\n`,
               );
+              if (!ready && !closed)
+                await new Promise<void>((resolve) => {
+                  const done = () => {
+                    res.off('drain', done);
+                    res.off('close', done);
+                    resolve();
+                  };
+                  res.once('drain', done);
+                  res.once('close', done);
+                });
+              if (closed || res.destroyed || res.writableEnded) break;
               after = event.sequence;
             }
-            if (page.terminal) {
+            if (page.terminal && page.events.length < 200) {
               res.end();
               break;
             }
-            if (!page.events.length) res.write(': waiting\n\n');
+            if (page.events.length) continue;
+            if (Date.now() - lastHeartbeatAt >= 10000) {
+              res.write(': waiting\n\n');
+              lastHeartbeatAt = Date.now();
+            }
           } catch (error: unknown) {
             if (closed || res.destroyed || res.writableEnded) break;
             const failure = taskEventStreamFailure(error);
@@ -303,7 +322,9 @@ export class ConversationsController {
             res.end();
             break;
           }
-          await new Promise<void>((resolve) => setTimeout(resolve, 500));
+          // Drain durable pages immediately; a bounded idle poll keeps real text
+          // responsive across separate Worker/API processes without a new broker.
+          await new Promise<void>((resolve) => setTimeout(resolve, 100));
         }
         return;
       }

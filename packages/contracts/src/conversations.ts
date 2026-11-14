@@ -16,6 +16,10 @@ messageModelSnapshotV2Schema,
 } from './model-configuration-v2.js';
 import { modelAttemptViewSchema,modelRetryEventSchema } from './ai-retry.js';
 import {
+  aiTaskPresentationSchema,
+  aiPresentationEventSchemas,
+} from './ai-presentation.js';
+import {
 sharedSkillRuleSnapshotSchema,
 sharedSkillRuleReadMetadataSchema,
 } from './skill-guidance.js';
@@ -236,9 +240,17 @@ export const messageModelSnapshotSchema = z.union([
   legacyMessageModelSnapshotSchema,
   messageModelSnapshotV2Schema,
 ]);
+export const conversationTaskNoticesSchema = z.strictObject({
+  hasFailedTools: z.boolean(),
+  hasUnknownToolEffects: z.boolean(),
+  hasContextReset: z.boolean(),
+});
 export const conversationMessageSchema = z.strictObject({
   id: idSchema,
   taskId: idSchema.nullable(),
+  // Read-only task metadata. Legacy servers may omit it; message status keeps its original meaning.
+  taskStatus: taskStateSchema.nullable().optional(),
+  taskNotices: conversationTaskNoticesSchema.optional(),
   executionOrigin: executionOriginSchema,
   role: z.enum(['user', 'assistant']),
   content: z.string(),
@@ -351,6 +363,7 @@ export const aiTaskStatusSchema = z.strictObject({
     errorDetails: aiErrorDetailsSchema.nullable(),
     modelAttempts: z.array(modelAttemptViewSchema).default([]),
     modelRetry: modelRetryEventSchema.nullable().default(null),
+    presentation: aiTaskPresentationSchema.optional(),
     content: z.string(),
     messageStatus: messageStateSchema,
     createdAt: timestampSchema,
@@ -358,7 +371,11 @@ export const aiTaskStatusSchema = z.strictObject({
     finishedAt: timestampSchema.nullable(),
   }),
 });
-const eventBase = { sequence: decimalCountSchema, createdAt: timestampSchema };
+const eventBase = {
+  sequence: decimalCountSchema,
+  createdAt: timestampSchema,
+  sentAt: timestampSchema.optional(),
+};
 export const aiToolSourceReferenceSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('projectAccess'), projectId: idSchema }),
   z.strictObject({
@@ -382,6 +399,7 @@ const referenceAvailabilitySchema = z.enum([
   'notIntegrated',
 ]);
 export const aiTaskEventSchema = z.discriminatedUnion('type', [
+  ...aiPresentationEventSchemas,
   z.strictObject({
     ...eventBase,
     type: z.literal('task.accepted'),
@@ -439,6 +457,8 @@ export const aiTaskEventSchema = z.discriminatedUnion('type', [
       type: z.literal('text'),
       text: z.string(),
       modelAttemptId: idSchema.optional(),
+      receivedAt: timestampSchema.optional(),
+      receivedMonotonicMs: z.number().nonnegative().optional(),
     }),
   }),
   z.strictObject({

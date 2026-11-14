@@ -103,6 +103,15 @@ export const manualVerificationInputSchema = z.strictObject({
   note: z.string().max(10_000).default(''),
   attachmentFileIds: uniqueIds.default([]),
   returnToInProgress: z.boolean().default(false),
+  scopeDescription: z.string().trim().max(10_000).optional(),
+});
+export const manualVerificationScopeSchema = z.strictObject({
+  issueId: idSchema,
+  issueRowVersion: persistedRowVersionSchema,
+  requirementId: idSchema,
+  requirementVersionId: idSchema.nullable(),
+  requirementVersionNo: z.number().int().positive().nullable(),
+  scopeDescription: z.string(),
 });
 export const lifecyclePreviewInputSchema = z.strictObject({
   commandId: commandIdSchema,
@@ -365,6 +374,7 @@ export const issueVerificationSchema = z.strictObject({
   executionProvenance: z
     .enum(['local-ai', 'protocol-synthetic', 'unknown', 'platform-api'])
     .nullable(),
+  scopeSnapshot: manualVerificationScopeSchema.nullable().default(null),
 });
 export const issueMergeSchema = z.strictObject({
   id: idSchema,

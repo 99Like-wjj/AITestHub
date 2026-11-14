@@ -5,6 +5,7 @@ import {
   SearchOutlined,
 } from '@ant-design/icons';
 import { Input, Popover, Spin } from 'antd';
+import { useWorkspaceEscapeFocus } from './workspace-escape-focus';
 export interface ContextOption {
   id: string;
   label: string;
@@ -40,6 +41,7 @@ export function WorkspaceContextPicker({
     [composing, setComposing] = useState(false),
     [filter, setFilter] = useState('');
   const search = useRef<import('antd').InputRef>(null);
+  useWorkspaceEscapeFocus(open, () => onOpenChange(false));
   useEffect(() => {
     if (!open) return;
     setQuery('');
