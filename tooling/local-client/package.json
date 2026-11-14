@@ -1,0 +1,38 @@
+{
+  "name": "@aitesthub/local-client",
+  "version": "0.1.4",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "packageManager": "pnpm@11.28.11",
+  "engines": {
+    "node": "24.19.0",
+    "pnpm": "11.28.11"
+  },
+  "exports": {
+    ".": "./dist/src/index.js"
+  },
+  "files": [
+    "dist/src",
+    "dist/contracts/8869d4dc-bb5c-45fe-a8d1-98913be7bb01",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "verification.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc && node scripts/build.mjs",
+    "package": "pnpm build && node scripts/package.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
+    "@cfworker/json-schema": "4.1.6",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "@types/node": "24.10.0",
+    "typescript": "6.0.3"
+  }
+}

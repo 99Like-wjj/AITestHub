@@ -1,0 +1,68 @@
+# Local workers share application code but receive only their own credentials.
+services:
+  api-worker:
+    image: ${AITESTHUB_API_WORKER_IMAGE:-aitesthub-app:0.1.0-local}
+    profiles: [workers]
+    restart: unless-stopped
+    command: [node, dist/apps/api-worker/src/main.js]
+    depends_on: { api: { condition: service_healthy } }
+    environment:
+      AITESTHUB_CONTROL_URL: http://api:5300
+      AITESTHUB_API_WORKER_BOOTSTRAP_FILE: /run/secrets/api_worker_bootstrap
+    secrets: [api_worker_bootstrap]
+    networks: [api-control, execution-targets]
+    read_only: true
+    tmpfs: ['/tmp:size=32m,noexec,nosuid']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1
+    stop_grace_period: 15s
+    logging: { driver: json-file, options: { max-size: '5m', max-file: '3' } }
+  ai-worker:
+    image: aitesthub-app:0.1.0-local
+    profiles: [workers]
+    restart: unless-stopped
+    command: [node, dist/apps/ai-worker/src/main.js]
+    depends_on: { api: { condition: service_healthy } }
+    environment:
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      AITESTHUB_DB_PASSWORD_FILE: /run/secrets/postgres_app_password
+      AITESTHUB_S3_ENDPOINT: http://seaweedfs:8333
+      AITESTHUB_S3_ACCESS_KEY_FILE: /run/secrets/s3_app_access
+      AITESTHUB_S3_SECRET_KEY_FILE: /run/secrets/s3_app_secret
+      AITESTHUB_MASTER_KEY_FILE: /run/secrets/platform_master_key
+      AITESTHUB_RECOVERY_CONTROL_DIRECTORY: /var/lib/aitesthub-control/security-controls
+      AITESTHUB_RECOVERY_CONTROL_ANCHOR_FILE: /var/lib/aitesthub-anchors/security-control-anchor.json
+      AITESTHUB_RECOVERY_CONTROL_KEY_FILE: /run/secrets/recovery_control_key
+      AITESTHUB_BACKUP_DIRECTORY: /var/lib/aitesthub-backups/product
+      LANGSMITH_TRACING: 'false'
+      LANGCHAIN_TRACING_V2: 'false'
+    secrets:
+      [
+        postgres_app_password,
+        s3_app_access,
+        s3_app_secret,
+        platform_master_key,
+        recovery_control_key,
+      ]
+    volumes:
+      - ${AITESTHUB_LOCAL_ROOT}/control/security-controls:/var/lib/aitesthub-control/security-controls
+      - ${AITESTHUB_LOCAL_ROOT}/recovery/controls:/var/lib/aitesthub-anchors
+      - ${AITESTHUB_LOCAL_ROOT}/recovery/controls/resource-policy:/var/lib/aitesthub-anchors/resource-policy:ro
+    networks: [default]
+    read_only: true
+    tmpfs: ['/tmp:size=32m,noexec,nosuid']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 64
+    mem_limit: 1g
+    cpus: 1
+    stop_grace_period: 20s
+    logging: { driver: json-file, options: { max-size: '5m', max-file: '3' } }
+networks:
+  execution-targets:
+    external: true
+    name: ${AITESTHUB_EXECUTION_NETWORK:-aitesthub-local_test-targets}

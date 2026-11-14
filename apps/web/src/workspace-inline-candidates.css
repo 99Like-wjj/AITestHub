@@ -1,0 +1,252 @@
+.workspace-inline-candidates {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  max-height: min(410px, calc(100dvh - 140px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 12px 36px #0002;
+  font-size: 12px;
+  text-align: left;
+  padding-top: 4px;
+}
+.workspace-inline-candidates button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+}
+.workspace-inline-candidates button:hover {
+  background: var(--accent-soft);
+}
+.workspace-inline-candidates button:focus-visible,
+.workspace-inline-project-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.workspace-inline-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 8px 5px;
+  min-height: 30px;
+  flex: none;
+}
+.workspace-inline-candidates nav {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  min-width: 0;
+  flex: 1;
+  scrollbar-width: thin;
+}
+.workspace-inline-candidates nav button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+  min-height: 24px;
+}
+.workspace-inline-candidates nav button.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.workspace-inline-project-select {
+  flex: 0 1 180px;
+  width: 180px;
+  max-width: 32%;
+  min-width: 95px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--surface);
+  color: var(--muted);
+  padding: 3px 5px;
+  font: inherit;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+  height: 25px;
+}
+.workspace-inline-list {
+  min-height: 40px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 2px 5px 5px;
+  max-height: 270px;
+  scroll-padding: 4px;
+}
+.workspace-inline-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 7px;
+  padding: 6px 8px;
+  min-height: 37px;
+  cursor: pointer;
+}
+.workspace-inline-option.selected {
+  background: var(--accent-soft);
+}
+.workspace-inline-option.disabled {
+  cursor: default;
+  color: var(--muted);
+  opacity: 0.75;
+}
+.workspace-inline-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 21px;
+  height: 21px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.workspace-inline-text {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: 9px;
+  flex: 1;
+}
+.workspace-inline-text b {
+  font-size: 12px;
+  font-weight: 500;
+  max-width: 62%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 1 auto;
+}
+.workspace-inline-text small {
+  color: var(--muted);
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.workspace-inline-source {
+  flex: 0 1 128px;
+  max-width: 22%;
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
+.workspace-inline-empty,
+.workspace-inline-error {
+  padding: 10px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.workspace-inline-empty {
+  color: var(--muted);
+}
+.workspace-inline-error {
+  color: var(--danger, #cf3d3d);
+  overflow-wrap: anywhere;
+}
+.workspace-inline-candidates footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 12px;
+  min-height: 26px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  flex: none;
+}
+.workspace-inline-hint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.workspace-inline-history-mode {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--muted);
+  min-height: 24px;
+  white-space: nowrap;
+  flex: none;
+}
+.workspace-inline-history-mode input {
+  margin: 0;
+}
+.workspace-inline-candidates footer button {
+  white-space: nowrap;
+  color: var(--accent);
+  font-size: 11px;
+  min-height: 24px;
+}
+.workspace-inline-candidates button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+@media (max-width: 600px) {
+  .workspace-inline-candidates {
+    max-height: calc(100dvh - 170px);
+  }
+  .workspace-inline-list {
+    max-height: 220px;
+  }
+  .workspace-inline-toolbar {
+    flex-wrap: wrap;
+    gap: 3px;
+  }
+  .workspace-inline-candidates nav {
+    flex-basis: 100%;
+  }
+  .workspace-inline-project-select {
+    max-width: 100%;
+    flex-basis: 100%;
+    width: 100%;
+    border-left: 0;
+    height: 24px;
+    padding-left: 5px;
+  }
+  .workspace-inline-text {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+  }
+  .workspace-inline-text b {
+    max-width: 100%;
+  }
+  .workspace-inline-source {
+    flex-basis: 85px;
+    max-width: 25%;
+  }
+  .workspace-inline-option {
+    min-height: 43px;
+  }
+  .workspace-inline-candidates footer {
+    gap: 7px;
+    padding-inline: 9px;
+  }
+}

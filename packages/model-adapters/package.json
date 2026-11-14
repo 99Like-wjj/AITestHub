@@ -1,0 +1,8 @@
+{
+  "name": "@aitesthub/model-adapters",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Restricted native-fetch model adapters without tracing or automatic retries"
+}

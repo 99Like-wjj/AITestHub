@@ -1,0 +1,175 @@
+.model-settings-v2 {
+  min-width: 0;
+}
+.model-settings-v2 h2 {
+  overflow-wrap: anywhere;
+}
+.model-settings-v2 .between > div {
+  min-width: 0;
+}
+.model-settings-v2 .model-service-list,
+.model-settings-v2 .model-row-list {
+  display: grid;
+  gap: 20px;
+}
+.model-settings-v2 .model-row-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.model-settings-v2 .model-formgrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 20px;
+}
+.model-settings-v2 .model-span {
+  grid-column: 1/-1;
+}
+.model-settings-v2 .field-label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.model-settings-v2 .field-label .field {
+  color: var(--text);
+}
+.model-settings-v2 .model-fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.model-settings-v2 .model-entry-list {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+.model-settings-v2 .model-entry-card {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.model-settings-v2 .model-entry-metadata {
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.model-settings-v2 .model-key-summary {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.model-settings-v2 .model-key-summary .caption {
+  flex: 1;
+}
+.model-settings-v2 .model-facts {
+  display: grid;
+  gap: 10px;
+  margin: 20px 0;
+  font-size: 12px;
+}
+.model-settings-v2 .model-facts > div {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  gap: 10px;
+}
+.model-settings-v2 dt {
+  color: var(--muted);
+}
+.model-settings-v2 dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.model-settings-v2 .model-verification {
+  font-size: 12px;
+  max-width: 420px;
+}
+.model-settings-v2 .model-verification summary {
+  cursor: pointer;
+  list-style: none;
+}
+.model-settings-v2 .model-verification summary::-webkit-details-marker {
+  display: none;
+}
+.model-settings-v2 .model-verification p {
+  margin-top: 12px;
+}
+.model-settings-v2 .model-endpoint {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.model-settings-v2 .model-table-scroll {
+  overflow-x: auto;
+}
+.model-settings-v2 .table {
+  min-width: 580px;
+  width: 100%;
+}
+.model-settings-v2 .table th {
+  text-align: left;
+}
+.model-settings-v2 .model-discovery-list {
+  max-height: 220px;
+  overflow: auto;
+  margin-top: 12px;
+}
+.model-settings-v2 .model-discovery-list > .between {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.model-settings-v2 .model-recovery-row {
+  padding: 8px 0;
+  gap: 16px;
+}
+.model-settings-v2 .model-recovery-row code {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.model-dialog-actions {
+  justify-content: flex-end;
+}
+.model-settings-v2 .model-error {
+  font-size: 12px;
+  color: var(--danger);
+}
+.model-config-modal .ant-modal-body {
+  max-height: calc(90dvh - 130px);
+  overflow: auto;
+}
+.model-config-modal .ant-modal-title {
+  font-size: 17px;
+}
+.model-config-modal .ant-modal-container {
+  padding: 22px 24px;
+}
+.model-settings-v2 :disabled {
+  cursor: not-allowed;
+}
+.model-settings-v2 .model-entry-card:has(:focus-visible) {
+  border-color: var(--accent);
+}
+@media (max-width: 760px) {
+  .model-settings-v2 .model-formgrid,
+  .model-settings-v2 .model-row-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .model-settings-v2 .model-facts > div {
+    grid-template-columns: 96px minmax(0, 1fr);
+  }
+  .model-settings-v2 .between {
+    flex-wrap: wrap;
+  }
+  .model-settings-v2 .model-span {
+    grid-column: auto;
+  }
+  .model-config-modal .ant-modal-container {
+    padding: 18px;
+  }
+  .model-settings-v2 .model-entry-card {
+    padding: 14px;
+  }
+}

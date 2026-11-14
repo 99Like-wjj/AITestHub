@@ -1,0 +1,4 @@
+AITestHub original implementation is licensed under the root MIT LICENSE.
+Third-party libraries retain their own licenses; exact versions are pinned in pnpm-lock.yaml.
+See THIRD_PARTY_DEPENDENCIES.json for the sanitized dependency inventory.
+Private design, handoff and runtime-evidence material is not included.

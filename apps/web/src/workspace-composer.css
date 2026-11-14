@@ -1,0 +1,237 @@
+.workspace-composer.user-composer {
+  padding: 14px 30px 20px;
+}
+.user-composer .composer-context-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: calc(100% - 32px);
+  max-width: 788px;
+  margin: 0 auto -17px;
+  padding: 4px 10px 21px;
+  border: 1px solid var(--line);
+  border-radius: 20px 20px 0 0;
+  background: var(--hover);
+}
+.user-composer .composer-context-bar .ant-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 25px;
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.user-composer .composer-requirement-context {
+  min-width: 0;
+  max-width: min(380px, calc(100% - 135px));
+}
+.user-composer .composer-requirement-context > span:not(.ant-btn-icon) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-composer .composer-requirement-context:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.user-composer .composer-context-bar .ico,
+.user-composer .composer-context-bar .anticon {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+}
+.user-composer .composer-context-bar .ico:last-child:not(:first-child) {
+  width: 12px;
+  height: 12px;
+}
+.user-composer > .composer.user-composer-anchor {
+  position: relative;
+  border-radius: 23px;
+  padding: 16px 17px 12px;
+}
+.user-composer .composer-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.user-composer .composer-toolbar .composer-model-trigger.ant-btn {
+  width: auto;
+  min-width: 0;
+  max-width: min(270px, 48vw);
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+.user-composer .composer-model-trigger > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.user-composer .composer-model-trigger .ico {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+.user-composer .prepared-references {
+  margin-bottom: 8px;
+}
+.ai-transmission-confirm .ant-modal-confirm-content,
+.workspace-code-copy .ant-modal-confirm-content {
+  padding: 22px 24px;
+}
+.ai-transmission-confirm .ant-modal-confirm-btns,
+.workspace-code-copy .ant-modal-confirm-btns {
+  padding: 15px 23px;
+  margin: 0;
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.workspace-code-copy .ant-modal-confirm-title {
+  display: none;
+}
+.user-composer-add-menu .ico,
+.user-composer-add-menu .anticon {
+  width: 14px;
+  height: 14px;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.workspace-context-picker .ant-popover-inner {
+  padding: 5px;
+}
+.workspace-context-list {
+  width: 260px;
+  max-width: calc(100vw - 36px);
+  color: var(--text);
+}
+.workspace-context-list .ant-input-affix-wrapper {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+}
+.workspace-context-options {
+  max-height: 264px;
+  overflow: auto;
+  padding-block: 4px;
+}
+.workspace-context-options button {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 9px;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.workspace-context-options button:hover,
+.workspace-context-options button[aria-selected='true'] {
+  background: var(--hover);
+}
+.workspace-context-options button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.workspace-context-options button > span:not(.anticon) {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-context-options button .anticon {
+  width: 14px;
+  height: 14px;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.workspace-context-empty,
+.workspace-context-caption,
+.workspace-context-error {
+  margin: 0;
+  padding: 7px 9px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.workspace-context-caption {
+  border-top: 1px solid var(--line);
+}
+.workspace-context-error {
+  color: var(--danger);
+}
+@media (max-width: 700px) {
+  .workspace-composer.user-composer {
+    padding: 10px 14px 14px;
+  }
+  .user-composer .composer-context-bar {
+    width: calc(100% - 22px);
+    gap: 7px;
+    padding-inline: 8px;
+  }
+  .user-composer .composer-context-bar .ant-btn {
+    font-size: 11px;
+  }
+  .user-composer .composer-model-trigger.ant-btn {
+    max-width: 43vw;
+  }
+}
+.welcome-requirement-name {
+  border-bottom: 1px dotted var(--muted);
+  overflow-wrap: anywhere;
+}
+.user-composer .composer-project-context {
+  min-width: 0;
+  max-width: min(360px, 48%);
+}
+.user-composer .composer-project-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-composer .composer-stop-square {
+  display: block;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  border-radius: 1px;
+  background: #fff;
+}
+.user-composer .stop-message-button.ant-btn-primary,
+.user-composer .stop-message-button.ant-btn-primary:not(:disabled):hover {
+  /* The filled F green keeps the required white stop glyph readable in dark mode. */
+  background: #287864;
+  border-color: #287864;
+}
+.user-composer .stop-message-button[aria-disabled='true'] {
+  cursor: default;
+}
+.composer-model-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.composer-model-option small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.workspace-model-picker-menu {
+  max-width: min(380px, calc(100vw - 32px));
+}
+.composer-model-option > span,
+.composer-model-option > small {
+  display: block;
+  max-width: min(340px, calc(100vw - 70px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

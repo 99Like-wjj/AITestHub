@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.server.json",
+  "compilerOptions": {
+    "outDir": ".local-build/tools",
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": [
+    "apps/api/src/**/*.ts",
+    "apps/ai-worker/src/**/*.ts",
+    "apps/api-worker/src/**/*.ts",
+    "packages/**/*.ts",
+    "scripts/**/*.ts"
+  ],
+  "exclude": ["node_modules", "dist", ".local-build", "packages/ui"]
+}
