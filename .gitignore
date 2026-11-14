@@ -89,3 +89,12 @@ __tests__/
 /deploy/local/check-foundation.py
 
 /tooling/local-client/scripts/export-candidate.mjs
+
+# Public instruction entry; private operational appendix stays local.
+!/AGENTS.md
+/AGENTS.local.md
+
+# Dedicated local synthetic targets and test-only profile data.
+/apps/api-worker/targets/
+/deploy/local/compose.targets.yaml
+/deploy/personal-cloud/deployment-profile.fixture.mjs

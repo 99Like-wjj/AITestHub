@@ -3,6 +3,7 @@
 Test-management platform with Web, HTTP/MCP services, local UI-test integration, API execution and a reusable client.
 
 ## Layout
+
 - apps/: Web, API and workers.
 - packages/: contracts, application services, persistence, storage and model adapters.
 - tooling/local-client/: reusable MCP client and reviewed schemas.
@@ -10,6 +11,7 @@ Test-management platform with Web, HTTP/MCP services, local UI-test integration,
 - Related repositories: AITestHub-CaseDesign-Skill, AITestHub-Knowledge-Skill and AITestHub-EgoTest-Skill.
 
 ## Development
+
 Use the exact Node/pnpm versions in package.json and committed lockfiles.
 
     pnpm install --frozen-lockfile
@@ -32,3 +34,11 @@ See SECURITY.md and SOURCE_PUBLICATION.md.
 ## Deployment profiles
 
 Instance identity and archive paths are external reviewed JSON configurations. See [configuration boundary](deploy/personal-cloud/CONFIGURATION.md) and [tool categories](scripts/README.md). No real profile or credential is committed. Source maintenance does not update an already deployed image.
+
+## Development standards
+
+Read [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md) and the [current development standards](docs/development/README.md) before changing code, configuration or packaging.
+
+Run pnpm quality:check for source/document formatting and strict type checks. Architecture, privacy and behavior still require the [review checklist](docs/development/review-checklist.md); this command does not establish deployment or live acceptance.
+
+Private operational history remains in the ignored AGENTS.local.md when present. Generic engineering standards may be versioned; private product design, tests, instances and real evidence remain excluded.

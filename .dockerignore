@@ -23,3 +23,11 @@ scripts/verify-live-mcp.ts
 scripts/verify-live-s02*.mjs
 scripts/read-main*.mjs
 scripts/serve-v3-reference.mjs
+
+# Private operational context is not source/build input.
+/AGENTS.local.md
+
+# Dedicated local test resources are not product build inputs.
+/apps/api-worker/targets/
+/deploy/local/compose.targets.yaml
+/deploy/personal-cloud/deployment-profile.fixture.mjs

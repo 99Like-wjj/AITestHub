@@ -40,3 +40,11 @@ deploy/local/record-worker-runtime.mjs
 deploy/local/export-main-mcp-contracts.mjs
 
 !/scripts/probe-sensenova-tools.ts
+
+# Private operational context is not source/build input.
+/AGENTS.local.md
+
+# Dedicated local test resources are not product build inputs.
+/apps/api-worker/targets/
+/deploy/local/compose.targets.yaml
+/deploy/personal-cloud/deployment-profile.fixture.mjs
