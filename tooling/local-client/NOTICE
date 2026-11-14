@@ -1,0 +1,16 @@
+AITestHub local client is original MIT-licensed project code.
+
+Runtime dependencies (fixed by pnpm-lock.yaml):
+- @modelcontextprotocol/client 2.4.0 and its core packages: Apache-2.0.
+- @cfworker/json-schema 4.1.6: MIT.
+- Zod 4.6.7: MIT.
+Development only:
+- @modelcontextprotocol/server 2.4.0: Apache-2.0 (isolated protocol fixtures).
+- TypeScript 6.0.3: Apache-2.0.
+- @types/node 24.10.0: MIT.
+
+The SDK also contains optional transports/authentication capabilities; this
+package does not enable stdio, arbitrary shell, OAuth refresh, shared Keys,
+model calls or an independent observation platform. The SDK is a code library,
+not a new deployed service. Dependencies retain their own LICENSE/NOTICE files
+when installed. The ZIP contains an npm distribution, not a host installer.

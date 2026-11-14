@@ -1,0 +1,121 @@
+# Isolated synthetic targets only. No existing platform volume, account or database is reused.
+services:
+  target-postgres:
+    image: postgres:18.6-bookworm@sha256:f1ea2a1a4fb7b68d4836be1fdcb8a6466a89b072158bf9d97663600538c294c5
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aitesthub_target
+      POSTGRES_USER: target_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/target_postgres_admin_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    command:
+      ['postgres', '-c', 'shared_buffers=32MB', '-c', 'max_connections=30']
+    secrets:
+      [
+        target_postgres_admin_password,
+        target_postgres_app_password,
+        target_postgres_cleanup_password,
+      ]
+    ports: ['127.0.0.1:55434:5432']
+    volumes:
+      - target_postgres_data:/var/lib/postgresql
+      - ../../apps/api-worker/targets/postgres-init.sh:/docker-entrypoint-initdb.d/010-target.sh:ro
+    networks: [test-targets, test-admin]
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -h 127.0.0.1 -U target_admin -d aitesthub_target',
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    mem_limit: 256m
+    cpus: 1
+    logging: { driver: json-file, options: { max-size: '5m', max-file: '2' } }
+  target-mysql:
+    image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: aitesthub_target
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/target_mysql_root_password
+    command:
+      [
+        '--innodb-buffer-pool-size=64M',
+        '--innodb-redo-log-capacity=64M',
+        '--max-connections=30',
+        '--table-open-cache=200',
+        '--performance-schema=OFF',
+        '--mysqlx=0',
+        '--skip-name-resolve',
+      ]
+    secrets:
+      [
+        target_mysql_root_password,
+        target_mysql_app_password,
+        target_mysql_cleanup_password,
+      ]
+    ports: ['127.0.0.1:53306:3306']
+    volumes:
+      - target_mysql_data:/var/lib/mysql
+      - ../../apps/api-worker/targets/mysql-init.sh:/docker-entrypoint-initdb.d/010-target.sh:ro
+    networks: [test-targets, test-admin]
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'MYSQL_PWD="$$(cat /run/secrets/target_mysql_root_password)" mysqladmin -uroot -h127.0.0.1 --protocol=TCP ping --silent',
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 50
+    mem_limit: 512m
+    cpus: 1
+    logging: { driver: json-file, options: { max-size: '5m', max-file: '2' } }
+  synthetic-api:
+    image: aitesthub-app:0.1.0-local
+    restart: unless-stopped
+    command: ['node', '/app/targets/server.mjs']
+    depends_on:
+      target-postgres: { condition: service_healthy }
+      target-mysql: { condition: service_healthy }
+    secrets:
+      [
+        target_postgres_app_password,
+        target_mysql_app_password,
+        target_api_auth_password,
+      ]
+    volumes:
+      ['../../apps/api-worker/targets/server.mjs:/app/targets/server.mjs:ro']
+    ports: ['127.0.0.1:59995:8080']
+    networks: [test-targets, test-admin]
+    read_only: true
+    tmpfs: ['/tmp:size=16m,noexec,nosuid']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 192m
+    cpus: 1
+    logging: { driver: json-file, options: { max-size: '5m', max-file: '2' } }
+secrets:
+  api_worker_bootstrap:
+    { file: '${AITESTHUB_LOCAL_ROOT}/secrets/api-worker-bootstrap' }
+  target_postgres_admin_password:
+    { file: '${AITESTHUB_LOCAL_ROOT}/secrets/target-postgres-admin-password' }
+  target_postgres_app_password:
+    { file: '${AITESTHUB_LOCAL_ROOT}/secrets/target-postgres-app-password' }
+  target_postgres_cleanup_password:
+    { file: '${AITESTHUB_LOCAL_ROOT}/secrets/target-postgres-cleanup-password' }
+  target_mysql_root_password:
+    { file: '${AITESTHUB_LOCAL_ROOT}/secrets/target-mysql-root-password' }
+  target_mysql_app_password:
+    { file: '${AITESTHUB_LOCAL_ROOT}/secrets/target-mysql-app-password' }
+  target_mysql_cleanup_password:
+    { file: '${AITESTHUB_LOCAL_ROOT}/secrets/target-mysql-cleanup-password' }
+  target_api_auth_password:
+    { file: '${AITESTHUB_LOCAL_ROOT}/secrets/target-api-auth-password' }
+networks:
+  test-targets: { internal: true }
+  test-admin: {}
+volumes:
+  target_postgres_data: { name: aitesthub_target_postgres_data }
+  target_mysql_data: { name: aitesthub_target_mysql_data }

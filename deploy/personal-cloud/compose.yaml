@@ -1,0 +1,265 @@
+name: aitesthub
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: 5m, max-file: '3' }
+x-app-env: &app-env
+  NODE_ENV: production
+  DB_HOST: postgres
+  DB_PORT: '5432'
+  DB_NAME: aitesthub
+  DB_USER: aitesthub_app
+  AITESTHUB_DB_PASSWORD_FILE: /run/secrets/postgres_app_password
+  AITESTHUB_S3_ENDPOINT: http://seaweedfs:8333
+  AITESTHUB_S3_BUCKET: ${AITESTHUB_S3_BUCKET:?Use the independently generated cloud bucket}
+  AITESTHUB_S3_ACCESS_KEY_FILE: /run/secrets/s3_app_access
+  AITESTHUB_S3_SECRET_KEY_FILE: /run/secrets/s3_app_secret
+  AITESTHUB_MASTER_KEY_FILE: /run/secrets/platform_master_key
+  AITESTHUB_RECOVERY_CONTROL_DIRECTORY: /var/lib/aitesthub-control/security-controls
+  AITESTHUB_RECOVERY_CONTROL_ANCHOR_FILE: /var/lib/aitesthub-anchors/security-control-anchor.json
+  AITESTHUB_RECOVERY_CONTROL_KEY_FILE: /run/secrets/recovery_control_key
+  AITESTHUB_BACKUP_DIRECTORY: /var/lib/aitesthub-backups/product
+  LANGSMITH_TRACING: 'false'
+  LANGCHAIN_TRACING_V2: 'false'
+x-app: &app
+  image: ${AITESTHUB_APP_IMAGE:?Load and verify the frozen cloud release image}
+  pull_policy: never
+  user: ${AITESTHUB_RUN_UID:?}:${AITESTHUB_RUN_GID:?}
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ['/tmp:size=32m,noexec,nosuid']
+  logging: *logging
+
+services:
+  postgres:
+    image: ${AITESTHUB_POSTGRES_IMAGE:?Verify the pinned PostgreSQL image}
+    pull_policy: never
+    container_name: aitesthub-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aitesthub
+      POSTGRES_USER: aitesthub_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    command:
+      [
+        postgres,
+        -c,
+        shared_buffers=32MB,
+        -c,
+        work_mem=1MB,
+        -c,
+        maintenance_work_mem=16MB,
+        -c,
+        max_connections=40,
+        -c,
+        max_parallel_workers_per_gather=0,
+        -c,
+        max_wal_size=512MB,
+        -c,
+        min_wal_size=80MB,
+      ]
+    secrets:
+      - postgres_admin_password
+      - source: postgres_app_password_pg
+        target: postgres_app_password
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    # Host Ops needs these loopback sockets; nothing binds 0.0.0.0.
+    ports: ['127.0.0.1:55432:5432']
+    networks:
+      state: {}
+      host-state: { gw_priority: 1 }
+    mem_limit: 192m
+    cpus: 0.7
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U aitesthub_admin -d aitesthub]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging: *logging
+  seaweedfs:
+    image: ${AITESTHUB_SEAWEED_IMAGE:?Verify the pinned SeaweedFS image}
+    pull_policy: never
+    container_name: aitesthub-seaweedfs
+    restart: unless-stopped
+    working_dir: /data
+    command:
+      [
+        server,
+        -dir=/data,
+        -ip=seaweedfs,
+        -ip.bind=0.0.0.0,
+        -s3,
+        -s3.config=/run/secrets/s3_iam,
+        -s3.port=8333,
+        -s3.port.iceberg=0,
+        -s3.port.lance=0,
+        -master.volumeSizeLimitMB=1024,
+        -volume.max=32,
+        -volume.minFreeSpace=10GiB,
+      ]
+    environment: { GOMEMLIMIT: 192MiB }
+    secrets: [s3_iam]
+    volumes: [seaweed_data:/data]
+    ports: ['127.0.0.1:58333:8333']
+    networks:
+      state: {}
+      host-state: { gw_priority: 1 }
+    mem_limit: 224m
+    cpus: 0.5
+    logging: *logging
+  api:
+    <<: *app
+    restart: unless-stopped
+    depends_on:
+      {
+        postgres: { condition: service_healthy },
+        seaweedfs: { condition: service_started },
+      }
+    environment:
+      <<: *app-env
+      NODE_OPTIONS: --max-old-space-size=224
+      AITESTHUB_HOST: 0.0.0.0
+      AITESTHUB_PORT: '5300'
+      AITESTHUB_PUBLIC_ORIGIN: ${AITESTHUB_PUBLIC_ORIGIN:?}
+      AITESTHUB_COOKIE_SECURE: ${AITESTHUB_COOKIE_SECURE:?}
+      AITESTHUB_REQUIRE_RECOVERY_CONTROL: 'true'
+      AITESTHUB_API_WORKER_BOOTSTRAP_FILE: /run/secrets/api_worker_bootstrap
+      AITESTHUB_PRIVACY_LEDGER_DIRECTORY: /var/lib/aitesthub-control/privacy-deletions
+      AITESTHUB_TEST_TARGET_POLICY_FILE: /run/aitesthub/test-targets.json
+    secrets:
+      [
+        postgres_app_password,
+        s3_app_access,
+        s3_app_secret,
+        platform_master_key,
+        api_worker_bootstrap,
+        recovery_control_key,
+      ]
+    volumes:
+      - ${AITESTHUB_PRIVATE_ROOT}/control/privacy-deletions:/var/lib/aitesthub-control/privacy-deletions
+      - ${AITESTHUB_PRIVATE_ROOT}/control/security-controls:/var/lib/aitesthub-control/security-controls
+      - ${AITESTHUB_PRIVATE_ROOT}/recovery/controls:/var/lib/aitesthub-anchors
+      - ${AITESTHUB_PRIVATE_ROOT}/configuration/test-targets.json:/run/aitesthub/test-targets.json:ro
+    ports: ['127.0.0.1:5300:5300']
+    networks: [state, control, egress]
+    mem_limit: 384m
+    cpus: 0.8
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:5300/api/v1/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+  api-worker:
+    <<: *app
+    profiles: [workers]
+    restart: unless-stopped
+    depends_on: { api: { condition: service_healthy } }
+    command: [node, --max-old-space-size=128, dist/apps/api-worker/src/main.js]
+    environment:
+      AITESTHUB_CONTROL_URL: http://api:5300
+      AITESTHUB_API_WORKER_BOOTSTRAP_FILE: /run/secrets/api_worker_bootstrap
+    secrets: [api_worker_bootstrap]
+    networks: [control, execution]
+    mem_limit: 256m
+    cpus: 0.5
+    stop_grace_period: 20s
+  ai-worker:
+    <<: *app
+    profiles: [workers]
+    restart: unless-stopped
+    depends_on: { api: { condition: service_healthy } }
+    command: [node, --max-old-space-size=224, dist/apps/ai-worker/src/main.js]
+    environment: *app-env
+    secrets:
+      [
+        postgres_app_password,
+        s3_app_access,
+        s3_app_secret,
+        platform_master_key,
+        recovery_control_key,
+      ]
+    volumes:
+      - ${AITESTHUB_PRIVATE_ROOT}/control/security-controls:/var/lib/aitesthub-control/security-controls
+      - ${AITESTHUB_PRIVATE_ROOT}/recovery/controls:/var/lib/aitesthub-anchors
+    networks: [state, egress]
+    mem_limit: 384m
+    cpus: 0.8
+    stop_grace_period: 30s
+  migrate:
+    <<: *app
+    profiles: [setup]
+    depends_on: { postgres: { condition: service_healthy } }
+    command: [node, --max-old-space-size=96, dist/scripts/migrate.js]
+    environment: *app-env
+    secrets: [postgres_app_password]
+    networks: [state]
+    mem_limit: 160m
+  bootstrap-admin:
+    <<: *app
+    profiles: [setup]
+    command: [node, --max-old-space-size=96, dist/scripts/bootstrap-admin.js]
+    environment:
+      <<: *app-env
+      AITESTHUB_BOOTSTRAP_ACCOUNT: cloud-owner
+      AITESTHUB_BOOTSTRAP_NAME: AITestHub个人管理员
+      AITESTHUB_BOOTSTRAP_PASSWORD_FILE: /run/secrets/bootstrap_admin_password
+    secrets: [postgres_app_password, bootstrap_admin_password]
+    networks: [state]
+    mem_limit: 160m
+  bootstrap-storage:
+    <<: *app
+    profiles: [setup]
+    command: [node, /app/deployment/bootstrap-storage.mjs]
+    environment:
+      AITESTHUB_S3_ENDPOINT: http://seaweedfs:8333
+      AITESTHUB_S3_BUCKET: ${AITESTHUB_S3_BUCKET:?}
+    secrets: [s3_bootstrap_access, s3_bootstrap_secret]
+    volumes:
+      ['./bootstrap-storage.mjs:/app/deployment/bootstrap-storage.mjs:ro']
+    networks: [state]
+    mem_limit: 160m
+
+secrets:
+  postgres_admin_password:
+    { file: '${AITESTHUB_PRIVATE_ROOT}/secrets/postgres-admin-password' }
+  postgres_app_password:
+    { file: '${AITESTHUB_PRIVATE_ROOT}/secrets/postgres-app-password' }
+  postgres_app_password_pg:
+    { file: '${AITESTHUB_PRIVATE_ROOT}/secrets/postgres-app-password-pg' }
+  s3_iam: { file: '${AITESTHUB_PRIVATE_ROOT}/secrets/s3-iam.json' }
+  s3_app_access: { file: '${AITESTHUB_PRIVATE_ROOT}/secrets/s3-app-access' }
+  s3_app_secret: { file: '${AITESTHUB_PRIVATE_ROOT}/secrets/s3-app-secret' }
+  s3_bootstrap_access:
+    { file: '${AITESTHUB_PRIVATE_ROOT}/secrets/s3-bootstrap-access' }
+  s3_bootstrap_secret:
+    { file: '${AITESTHUB_PRIVATE_ROOT}/secrets/s3-bootstrap-secret' }
+  platform_master_key:
+    { file: '${AITESTHUB_PRIVATE_ROOT}/secrets/platform-master-key' }
+  api_worker_bootstrap:
+    { file: '${AITESTHUB_PRIVATE_ROOT}/secrets/api-worker-bootstrap' }
+  recovery_control_key:
+    { file: '${AITESTHUB_PRIVATE_ROOT}/secrets/recovery-control-key' }
+  bootstrap_admin_password:
+    { file: '${AITESTHUB_PRIVATE_ROOT}/secrets/bootstrap-admin-password' }
+volumes:
+  postgres_data: { name: aitesthub_postgres_data }
+  seaweed_data: { name: aitesthub_seaweed_data }
+networks:
+  state: { internal: true }
+  # Docker does not publish host ports from an internal-only endpoint.
+  # Only PG/S3 join this bridge; their two ports still bind strictly to 127.0.0.1.
+  host-state: {}
+  control: { internal: true }
+  egress: {}
+  execution: {}

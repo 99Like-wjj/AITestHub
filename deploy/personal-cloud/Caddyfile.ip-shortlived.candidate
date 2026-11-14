@@ -1,0 +1,101 @@
+# Fixed candidate: Caddy 2.11.9. Syntax tests are not issuance/renewal proof.
+# Set a real IP and a freshly generated bcrypt gate hash only in private env.
+{
+    admin localhost:2019
+    default_sni {$AITESTHUB_PUBLIC_IP}
+}
+
+https://{$AITESTHUB_PUBLIC_IP} {
+    tls {
+        issuer acme https://acme-v02.api.letsencrypt.org/directory {
+            profile shortlived
+        }
+    }
+
+    # Validate the external origin before adapting the frozen loopback-only MCP
+    # backend. Caddy 2.11.9 joins every repeated header value with commas; an
+    # exact comparison also rejects multiple/null/empty Origin values.
+    @invalidMachineHost expression `!({http.request.hostport} in ["{$AITESTHUB_PUBLIC_IP}", "{$AITESTHUB_PUBLIC_IP}:443"])`
+    @invalidMachineOrigin {
+        not header !Origin
+        expression `{http.request.header.Origin} != "https://{$AITESTHUB_PUBLIC_IP}"`
+    }
+
+    @mcpBearer {
+        path /mcp
+        method GET POST DELETE
+        header_regexp mcpAuth Authorization ^Bearer[[:space:]]+[^[:space:]]+$
+    }
+    handle @mcpBearer {
+        respond @invalidMachineHost "Forbidden machine host" 403
+        respond @invalidMachineOrigin "Forbidden machine origin" 403
+        reverse_proxy 127.0.0.1:5300 {
+            header_up Host 127.0.0.1:5300
+            header_up -Origin
+            header_up -Cookie
+            header_up X-AITestHub-Edge-Validated host-origin-v1
+            flush_interval -1
+        }
+    }
+
+    @fileBearer {
+        path_regexp fileContent ^/api/v1/files/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/content$
+        method GET HEAD PUT
+        header_regexp fileAuth Authorization ^Bearer[[:space:]]+[^[:space:]]+$
+    }
+    handle @fileBearer {
+        respond @invalidMachineHost "Forbidden" 403
+        respond @invalidMachineOrigin "Forbidden" 403
+        reverse_proxy 127.0.0.1:5300 {
+            header_up -Cookie
+            header_up X-AITestHub-Edge-Validated host-origin-v1
+            flush_interval -1
+        }
+    }
+
+    @knowledgeExportBearer {
+        path_regexp knowledgeExport ^/api/v1/mcp/knowledge-exports/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+        method GET
+        header_regexp knowledgeAuth Authorization ^Bearer[[:space:]]+[^[:space:]]+$
+    }
+    handle @knowledgeExportBearer {
+        respond @invalidMachineHost "Forbidden" 403
+        respond @invalidMachineOrigin "Forbidden" 403
+        reverse_proxy 127.0.0.1:5300 {
+            header_up Host 127.0.0.1:5300
+            header_up -Origin
+            header_up -Cookie
+            header_up X-AITestHub-Edge-Validated host-origin-v1
+            flush_interval -1
+        }
+    }
+
+    @reportExportBearer {
+        path_regexp reportExport ^/api/v1/mcp/report-exports/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+        method GET
+        header_regexp reportAuth Authorization ^Bearer[[:space:]]+[^[:space:]]+$
+    }
+    handle @reportExportBearer {
+        respond @invalidMachineHost "Forbidden" 403
+        respond @invalidMachineOrigin "Forbidden" 403
+        reverse_proxy 127.0.0.1:5300 {
+            header_up Host 127.0.0.1:5300
+            header_up -Origin
+            header_up -Cookie
+            header_up X-AITestHub-Edge-Validated host-origin-v1
+            flush_interval -1
+        }
+    }
+
+    # Entry gate is independent of the platform's cookie identity. Never forward
+    # its Basic header into controllers expecting either cookie or MCP Bearer.
+    handle {
+        basic_auth {
+            aitesthub-trial {$AITESTHUB_TRIAL_GATE_HASH}
+        }
+        reverse_proxy 127.0.0.1:5300 {
+            header_up -Authorization
+            flush_interval -1
+        }
+    }
+}

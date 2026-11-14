@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "aitesthub.skill-rule-sources.v1",
+  "sources": [
+    {
+      "skillId": "ath-case-design",
+      "version": "0.1.1",
+      "ruleVersion": "0.1.1",
+      "name": "用例设计与优化",
+      "archives": [
+        {
+          "kind": "zip",
+          "path": "/absolute/path/ath-case-design-0.1.1.zip",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "kind": "tgz",
+          "path": "/absolute/path/aitesthub-case-design-skill-0.1.1.tgz",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "sections": {
+        "entry": "SKILL.md",
+        "business-rules": "references/business-rules.md",
+        "coverage": "references/coverage.md",
+        "contracts": "references/contracts.md",
+        "review": "references/review.md",
+        "platform-adapter": "host-adapters/platform.md"
+      }
+    },
+    {
+      "skillId": "ath-project-knowledge",
+      "version": "0.1.0",
+      "ruleVersion": "0.1.0",
+      "name": "项目知识管理",
+      "archives": [
+        {
+          "kind": "zip",
+          "path": "/absolute/path/ath-project-knowledge-0.1.0.zip",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "sections": {
+        "entry": "SKILL.md",
+        "content-and-sources": "references/content-and-sources.md",
+        "platform-workflow": "references/platform-workflow.md",
+        "runtime": "references/runtime.md"
+      }
+    }
+  ]
+}

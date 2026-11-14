@@ -1,0 +1,40 @@
+[Unit]
+Description=AITestHub trusted backup and operations worker
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+SupplementaryGroups=docker
+WorkingDirectory=/srv/aitesthub/releases/33-e136d203/app
+Environment=NODE_ENV=production
+EnvironmentFile=/srv/aitesthub-private/ops.env
+ExecStart=/srv/aitesthub/releases/33-e136d203/node --max-old-space-size=96 dist/scripts/operations-worker.js
+Restart=on-failure
+RestartSec=10s
+KillMode=mixed
+TimeoutStopSec=1800
+UMask=0077
+MemoryMax=160M
+TasksMax=64
+CPUQuota=40%
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/srv/aitesthub-private/control /srv/aitesthub-private/recovery/controls /srv/aitesthub-private/backups /srv/aitesthub-private/setup
+CapabilityBoundingSet=
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

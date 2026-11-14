@@ -1,0 +1,14 @@
+# Apply only with the existing personal-cloud compose.yaml after the trusted
+# 34 policy anchor and 35/36 checkpoint are complete. Preserve 3 app roles and
+# the existing single API worker, state volumes, limits and HTTPS proxy.
+services:
+  api:
+    environment:
+      AITESTHUB_RESOURCE_POLICY_ANCHOR_FILE: /var/lib/aitesthub-anchors/resource-policy/anchor.json
+    volumes:
+      - ${AITESTHUB_PRIVATE_ROOT}/recovery/controls/resource-policy:/var/lib/aitesthub-anchors/resource-policy:ro
+  ai-worker:
+    environment:
+      AITESTHUB_RESOURCE_POLICY_ANCHOR_FILE: /var/lib/aitesthub-anchors/resource-policy/anchor.json
+    volumes:
+      - ${AITESTHUB_PRIVATE_ROOT}/recovery/controls/resource-policy:/var/lib/aitesthub-anchors/resource-policy:ro

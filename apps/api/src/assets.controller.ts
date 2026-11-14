@@ -1,0 +1,168 @@
+import {
+  assetListQuerySchema,
+  assetNavigationQuerySchema,
+} from '../../../packages/contracts/src/assets.js';
+import { booleanQueryValue } from './query-values.js';
+import { All, Controller, Inject, Req, Res } from '@nestjs/common';
+import type { Request, Response } from 'express';
+import {
+  idSchema,
+  kindSchema,
+  commandIdSchema,
+} from '../../../packages/contracts/src/base.js';
+import { AssetService } from '../../../packages/application/src/assets/service.js';
+import { ReviewService } from '../../../packages/application/src/assets/reviews.js';
+import { IdentityService } from '../../../packages/application/src/identity/service.js';
+import { DomainError } from '../../../packages/application/src/errors.js';
+
+@Controller('api/v1/projects/:projectId/assets')
+export class AssetsController {
+  constructor(
+    @Inject(AssetService) readonly assets: AssetService,
+    @Inject(ReviewService) readonly reviews: ReviewService,
+    @Inject(IdentityService) readonly identity: IdentityService,
+  ) {}
+  @All(['', '{*assetPath}'])
+  async handle(@Req() req: Request, @Res() res: Response) {
+    const projectId = idSchema.parse(req.params.projectId);
+    const prefix = `/api/v1/projects/${projectId}/assets`;
+    const path = req.path
+      .slice(prefix.length)
+      .replace(/^\//, '')
+      .replace(/\/$/, '');
+    const session = req.headers.cookie
+      ?.split(';')
+      .map((part) => part.trim())
+      .find((part) => part.startsWith('ath_session='))
+      ?.slice('ath_session='.length);
+    const authorization = req.header('authorization');
+    if (
+      authorization !== undefined &&
+      (!authorization.startsWith('Bearer ') || authorization.length > 512)
+    )
+      throw new DomainError('UNAUTHENTICATED', '认证格式无效。', 401);
+    const actor = await this.identity.authenticate(
+      session,
+      authorization?.slice(7),
+      String(res.locals.requestId),
+    );
+    if (actor.entrypoint !== 'web')
+      throw new DomainError('FORBIDDEN', '个人Key请使用官方MCP。', 403);
+    if (path === '' && req.method === 'GET')
+      return res.json(
+        await this.assets.list(
+          actor,
+          projectId,
+          assetListQuerySchema
+            .extend({
+              includeRemoved: booleanQueryValue(false),
+              includeArchivedRequirements: booleanQueryValue(true),
+            })
+            .parse(req.query),
+        ),
+      );
+    if (path === 'navigation' && req.method === 'GET') {
+      const query = assetNavigationQuerySchema
+        .extend({ includeArchivedRequirements: booleanQueryValue(true) })
+        .parse(req.query);
+      return res.json(
+        await this.assets.navigation(
+          actor,
+          projectId,
+          query.kind,
+          query.includeArchivedRequirements,
+        ),
+      );
+    }
+    const receipt = /^receipts\/([^/]+)$/.exec(path);
+    if (receipt?.[1] && req.method === 'GET')
+      return res.json(
+        await this.assets.operationStatus(
+          actor,
+          projectId,
+          commandIdSchema.parse(decodeURIComponent(receipt[1])),
+          req.query.operation,
+        ),
+      );
+    if (path === 'sets' && req.method === 'POST')
+      return res
+        .status(201)
+        .json(await this.assets.createSet(actor, projectId, req.body));
+    if (path === 'scenarios' && req.method === 'POST')
+      return res
+        .status(201)
+        .json(await this.assets.createScenario(actor, projectId, req.body));
+    if (path === 'cases' && req.method === 'POST')
+      return res
+        .status(201)
+        .json(await this.assets.createCase(actor, projectId, req.body));
+    if (path === 'submissions' && req.method === 'POST')
+      return res.json(await this.assets.submit(actor, projectId, req.body));
+    if (path === 'approval-previews' && req.method === 'POST')
+      return res.json(await this.reviews.preview(actor, projectId, req.body));
+    if (path === 'approve' && req.method === 'POST')
+      return res.json(await this.reviews.commit(actor, projectId, req.body));
+    const target =
+      /^([^/]+)(?:\/(opinions|optimization-notes|latest-approved)(?:\/([^/]+))?)?$/.exec(
+        path,
+      );
+    if (target?.[1]) {
+      const id = idSchema.parse(target[1]);
+      if (!target[2]) {
+        if (req.method === 'GET')
+          return res.json(await this.assets.detail(actor, projectId, id));
+        if (req.method === 'PUT')
+          return res.json(
+            await this.assets.revise(actor, projectId, id, req.body),
+          );
+        if (req.method === 'DELETE')
+          return res.json(
+            await this.assets.explicitRemove(actor, projectId, id, req.body),
+          );
+      }
+      if (target[2] === 'opinions') {
+        if (target[3] && req.method === 'DELETE')
+          return res.json(
+            await this.reviews.removeOpinion(
+              actor,
+              projectId,
+              id,
+              idSchema.parse(target[3]),
+              req.body,
+            ),
+          );
+        if (!target[3] && req.method === 'GET')
+          return res.json(
+            await this.reviews.opinions(
+              actor,
+              projectId,
+              id,
+              req.query.revisionId === undefined
+                ? undefined
+                : idSchema.parse(req.query.revisionId),
+            ),
+          );
+        if (!target[3] && req.method === 'POST')
+          return res
+            .status(201)
+            .json(
+              await this.reviews.addOpinion(actor, projectId, id, req.body),
+            );
+      }
+      if (target[2] === 'optimization-notes' && req.method === 'POST')
+        return res.json(
+          await this.reviews.optimizationNotes(actor, projectId, id, req.body),
+        );
+      if (target[2] === 'latest-approved' && req.method === 'GET')
+        return res.json(
+          await this.reviews.latestApproved(
+            actor,
+            projectId,
+            id,
+            kindSchema.parse(req.query.kind),
+          ),
+        );
+    }
+    throw new DomainError('NOT_FOUND', '没有此资产接口。', 404);
+  }
+}

@@ -1,0 +1,2638 @@
+import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import {
+  Alert,
+  App,
+  Button,
+  Card,
+  Dropdown,
+  Drawer,
+  Form,
+  Input,
+  Modal,
+  Skeleton,
+  Space,
+  Tag,
+  Typography,
+} from 'antd';
+import {
+  PaperClipOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  CommentOutlined,
+  ProjectOutlined,
+  ApiOutlined,
+  FileSearchOutlined,
+} from '@ant-design/icons';
+import { z } from 'zod';
+import { idSchema } from '../../../packages/contracts/src/base';
+import { availableModelV2ListSchema } from '../../../packages/contracts/src/model-configuration-v2';
+import type { AvailableModelV2 } from '../../../packages/contracts/src/model-configuration-v2';
+import {
+  conversationDetailSchema,
+  conversationMutationSchema,
+  conversationSidebarSchema,
+  requirementGroupCandidatesSchema,
+  requirementGroupMutationSchema,
+  sendMessageInputSchema,
+  sendReceiptSchema,
+  taskAcceptedSchema,
+  taskStateSchema,
+} from '../../../packages/contracts/src/conversations';
+import type {
+  Conversation,
+  ConversationDetail,
+  ConversationSidebar,
+  ConversationMessage,
+  SendMessageInput,
+} from '../../../packages/contracts/src/conversations';
+import { api, ApiError, describeError, isUncertainMutationError } from './api';
+import { modelDisplayLabel, modelServiceCaption } from './model-display-label';
+import { resolveComposerDestination } from './workspace-first-send';
+import {
+  conversationCreateChanged,
+  pendingConversationCreates,
+  prepareConversationCreate,
+  dispatchConversationCreate,
+  recoverConversationCreate,
+} from './workspace-create';
+import type { ConversationCreateAttempt } from './workspace-create';
+import { uiLayers } from './ui-layers';
+import { AppIcon } from './app-icon';
+import { BusinessConfirmationsPanel } from './business-confirmations';
+import { ExternalMcpInvocationsPanel } from './external-mcp-settings';
+import { AiRetryStatus } from './ai-retry-status';
+import { taskGuidanceLabel } from './task-guidance';
+import {
+  ModelAttemptFragments,
+  ModelRetryStatus,
+  modelMessagePresentation,
+  interruptedModelAttempts,
+} from './workspace-model-retry';
+import { onPersonalContentChanged } from './personal-content-events';
+import { uploadPersonalFile } from './file-channel';
+import { AuxiliaryAction } from './auxiliary-action';
+import { AutomaticAuxiliaryPanel } from './automatic-auxiliary-panel';
+import { currentIdentityOwner, identityContextEpoch } from './identity-context';
+import {
+  encodeConversationReference,
+  decodeConversationReference,
+} from '../../../packages/contracts/src/conversation-reference-code';
+import { downloadConversationMarkdown } from './conversation-download';
+import { ConversationMenu, WorkspaceSidebar } from './workspace-sidebar';
+import type {
+  ConversationAction,
+  GroupAction,
+  RequirementGroup,
+} from './workspace-sidebar';
+import {
+  WorkspaceInlineCandidates,
+  type WorkspaceInlineCandidatesHandle,
+} from './workspace-inline-candidates';
+import {
+  composerTrigger,
+  insertComposerReference,
+  insertComposerSkill,
+} from './workspace-trigger';
+import type { PlatformGuidanceSkillId } from '../../../packages/contracts/src/skill-guidance';
+import './workspace-composer.css';
+import { WorkspaceContextPicker } from './workspace-context-picker';
+import type { PreparedReference, ReferenceTab } from './workspace-references';
+import { taskStateLabels, useAiTask } from './workspace-tasks';
+import type { Me, Project } from './types';
+
+const modelsSchema = availableModelV2ListSchema;
+const cancelReceiptSchema = z.strictObject({
+  taskId: z.uuid(),
+  status: taskStateSchema,
+});
+const messageStatusLabels: Record<ConversationMessage['status'], string> = {
+  queued: '排队中',
+  streaming: '生成中',
+  completed: '已完成',
+  failed: '生成失败',
+  cancelled: '已停止',
+  interrupted: '已中断',
+  deleted: '已删除',
+};
+type GroupCandidate = z.infer<
+  typeof requirementGroupCandidatesSchema
+>['groups'][number];
+type AliasTarget =
+  | { type: 'conversation'; conversation: Conversation }
+  | { type: 'group'; group: RequirementGroup };
+interface Draft {
+  content: string;
+  references: PreparedReference[];
+}
+interface UncertainSend {
+  conversationId: string;
+  commandId: string;
+  input: SendMessageInput;
+}
+
+function conversationFromUrl() {
+  const query = new URLSearchParams(window.location.hash.split('?')[1]);
+  const result = idSchema.safeParse(query.get('conversationId'));
+  return result.success ? result.data : null;
+}
+function MessageText({ text }: { text: string }) {
+  return (
+    <>
+      {text.split('```').map((part, index) =>
+        index % 2 ? (
+          <pre className="message-code" key={index}>
+            {part}
+          </pre>
+        ) : (
+          <div className="message-prose" key={index}>
+            {part}
+          </div>
+        ),
+      )}
+    </>
+  );
+}
+function ModelCaption({ message }: { message: ConversationMessage }) {
+  return (
+    <Typography.Text type="secondary" className="message-caption">
+      发送时选择：
+      {message.modelSnapshot
+        ? 'schemaVersion' in message.modelSnapshot
+          ? `${modelDisplayLabel(message.modelSnapshot)} · ${modelServiceCaption(message.modelSnapshot)}`
+          : `${message.modelSnapshot.provider} / ${message.modelSnapshot.modelId}`
+        : (message.modelServiceId ?? '未记录模型标识')}{' '}
+      · 配置 r{message.configRevision ?? '未知'}
+      {message.effort ? ` · ${message.effort}` : ''}
+      {message.role === 'assistant'
+        ? ` · ${message.status === 'queued' ? '尚无模型响应' : message.executionOrigin === 'fixture' ? '隔离夹具记录' : message.executionOrigin === 'liveProvider' ? '供应商通道记录' : '执行来源未确认'}`
+        : ''}
+      {message.role === 'assistant' &&
+      ['failed', 'cancelled', 'interrupted'].includes(message.status)
+        ? ' · 此回复未完成，片段保留供核对'
+        : ''}
+    </Typography.Text>
+  );
+}
+
+export function Workspace({
+  dark,
+  onAppearance,
+  notificationBell,
+  me,
+  project,
+  onProjectChange,
+  onSettings,
+}: {
+  dark: boolean;
+  onAppearance: () => void;
+  notificationBell: ReactNode;
+  me: Me;
+  project: Project | null;
+  onProjectChange: (id: string | null) => void;
+  onSettings: () => void;
+}) {
+  const { message, modal } = App.useApp();
+  const [sidebar, setSidebar] = useState<ConversationSidebar | null>(null);
+  const [sideLoading, setSideLoading] = useState(true);
+  const [sideError, setSideError] = useState<string>();
+  const [models, setModels] = useState<AvailableModelV2[]>([]);
+  const [modelError, setModelError] = useState<string>();
+  const [modelLoading, setModelLoading] = useState(true);
+  const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+  const [selectedRevision, setSelectedRevision] = useState<number | null>(null);
+  const [effort, setEffort] = useState<string | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(conversationFromUrl);
+  const activeRef = useRef(activeId);
+  const browseRef = useRef(project?.id ?? null);
+  const browseGeneration = useRef(0);
+  if (browseRef.current !== (project?.id ?? null))
+    browseGeneration.current += 1;
+  browseRef.current = project?.id ?? null;
+  const [detail, setDetail] = useState<ConversationDetail | null>(null);
+  const [conversationLoading, setConversationLoading] = useState(false);
+  const [conversationError, setConversationError] = useState<string>();
+  const [content, setContent] = useState('');
+  const [dataScope, setDataScope] = useState<
+    'syntheticPublicOnly' | 'authorizedRelevantTestData'
+  >('syntheticPublicOnly');
+  const [references, setReferences] = useState<PreparedReference[]>([]);
+  const targetProjectId = project?.id ?? null;
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [createAttempts, setCreateAttempts] = useState<
+    ConversationCreateAttempt[]
+  >([]);
+  const [createRecoveryError, setCreateRecoveryError] = useState<string>();
+  const [uploading, setUploading] = useState<
+    { id: string; name: string; state: string; error?: string }[]
+  >([]);
+  const [sendError, setSendError] = useState<string>();
+  const [uncertain, setUncertain] = useState<UncertainSend | null>(null);
+  const [taskId, setTaskId] = useState<string | null>(null);
+  const [proposalTaskId, setProposalTaskId] = useState<string | null>(null);
+  const [referenceOpen, setReferenceOpen] = useState(false);
+  const [referenceTab, setReferenceTab] = useState<ReferenceTab>('history');
+  const [caret, setCaret] = useState(0);
+  const [composing, setComposing] = useState(false);
+  const [dismissedCandidate, setDismissedCandidate] = useState<string | null>(
+    null,
+  );
+  const [activeCandidateId, setActiveCandidateId] = useState<string>();
+  const [restoreOpen, setRestoreOpen] = useState(false);
+  const [groupCandidates, setGroupCandidates] = useState<GroupCandidate[]>([]);
+  const [groupError, setGroupError] = useState<string>();
+  const [groupLoading, setGroupLoading] = useState(false);
+  const [aliasTarget, setAliasTarget] = useState<AliasTarget | null>(null);
+  const [compactNavigation, setCompactNavigation] = useState(
+    () => window.matchMedia('(max-width: 700px)').matches,
+  );
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 700px)');
+    const changed = () => {
+      setCompactNavigation(media.matches);
+      if (!media.matches) setNavigationOpen(false);
+    };
+    media.addEventListener('change', changed);
+    return () => media.removeEventListener('change', changed);
+  }, []);
+  const aliasReturnFocus = useRef<(() => void) | null>(null);
+  const [aliasError, setAliasError] = useState<string>();
+  const [aliasForm] = Form.useForm<{ alias: string }>();
+  const [associateOpen, setAssociateOpen] = useState(false);
+  const [associationError, setAssociationError] = useState<string>();
+  const drafts = useRef(new Map<string, Draft>());
+  const creationDrafts = useRef(new Map<string, Draft>());
+  const creatingRef = useRef(false);
+  const sendDispatchInProgress = useRef(false);
+  const mounted = useRef(true);
+  const conversationNavigation = useRef(0);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      conversationNavigation.current += 1;
+    };
+  }, []);
+  const uncertainSends = useRef(new Map<string, UncertainSend>());
+  const conversationEpoch = useRef(0);
+  const sidebarEpoch = useRef(0);
+  const groupEpoch = useRef(0);
+  const composition = useRef(false);
+  const sendDisclosureOpen = useRef(false);
+  const input = useRef<HTMLTextAreaElement | null>(null);
+  const uploadInput = useRef<HTMLInputElement | null>(null);
+  const candidatesControl = useRef<WorkspaceInlineCandidatesHandle | null>(
+    null,
+  );
+  const codeReads = useRef(new Set<string>());
+  const stream = useAiTask(taskId);
+  const model = models.find((entry) => entry.modelEntryId === selectedModelId);
+  const active = detail?.conversation ?? null;
+  const mention = composing ? null : composerTrigger(content, caret);
+  const mentionKey = mention
+    ? `${mention.symbol}:${mention.start}:${mention.end}:${mention.query}`
+    : null;
+  const candidateOpen = Boolean(mention && dismissedCandidate !== mentionKey);
+  const currentGroup = sidebar?.groups.find(
+    (group) => group.requirementId === active?.requirementId,
+  );
+  const welcomeRequirement = active?.requirementId
+    ? (currentGroup?.alias ??
+      currentGroup?.generatedName ??
+      currentGroup?.formalTitle ??
+      active.requirementTitle)
+    : null;
+  const taskMatches = stream.task?.id === taskId;
+  const messageForTask = detail?.messages.findLast(
+    (entry) => entry.role === 'assistant' && entry.taskId === taskId,
+  );
+  const inFlight = Boolean(
+    taskId &&
+    (taskMatches
+      ? !stream.terminal
+      : messageForTask
+        ? ['queued', 'streaming'].includes(messageForTask.status)
+        : true),
+  );
+  const selectionCurrent = Boolean(
+    model && model.serviceRevision === selectedRevision,
+  );
+  const targetProject = me.projects.find(
+    (entry) => entry.id === targetProjectId,
+  );
+  const unresolvedCreates = createAttempts.filter(
+    (attempt) => attempt.state === 'unknown',
+  );
+  function refreshCreateAttempts() {
+    try {
+      setCreateAttempts(pendingConversationCreates(me.user.id));
+      setCreateRecoveryError(undefined);
+    } catch (error) {
+      setCreateRecoveryError(describeError(error));
+    }
+  }
+  useEffect(() => {
+    refreshCreateAttempts();
+    const changed = () => refreshCreateAttempts();
+    window.addEventListener(conversationCreateChanged, changed);
+    window.addEventListener('storage', changed);
+    return () => {
+      window.removeEventListener(conversationCreateChanged, changed);
+      window.removeEventListener('storage', changed);
+    };
+  }, [me.user.id]);
+
+  async function loadSidebar(signal?: AbortSignal, silent = false) {
+    const requestedProjectId = browseRef.current;
+    const epoch = ++sidebarEpoch.current;
+    if (!silent) setSideLoading(true);
+    try {
+      const response = await api(
+        `/me/conversations/sidebar${requestedProjectId ? `?projectId=${requestedProjectId}` : ''}`,
+        signal ? { signal } : {},
+        conversationSidebarSchema,
+      );
+      if (
+        !signal?.aborted &&
+        epoch === sidebarEpoch.current &&
+        requestedProjectId === browseRef.current
+      ) {
+        setSidebar(response);
+        setSideError(undefined);
+      }
+    } catch (error) {
+      if (
+        !signal?.aborted &&
+        epoch === sidebarEpoch.current &&
+        requestedProjectId === browseRef.current
+      ) {
+        if (!silent) setSidebar(null);
+        setSideError(describeError(error));
+      }
+    } finally {
+      if (!signal?.aborted && epoch === sidebarEpoch.current)
+        setSideLoading(false);
+    }
+  }
+  useEffect(() => {
+    const controller = new AbortController();
+    let refreshing = false;
+    const refresh = () => {
+      if (refreshing || document.visibilityState !== 'visible') return;
+      refreshing = true;
+      void loadSidebar(controller.signal, true).finally(() => {
+        refreshing = false;
+      });
+    };
+    const timer = window.setInterval(refresh, 10000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [me.user.id]);
+  useEffect(() => {
+    if (taskMatches) void loadSidebar(undefined, true);
+  }, [stream.task?.id, stream.task?.status, taskMatches]);
+  async function loadModels(signal?: AbortSignal) {
+    setModelLoading(true);
+    try {
+      const response = await api(
+        '/model-services',
+        signal ? { signal } : {},
+        modelsSchema,
+      );
+      if (!signal?.aborted) {
+        setModels(response.models);
+        setModelError(undefined);
+      }
+    } catch (error) {
+      if (!signal?.aborted) {
+        setModels([]);
+        setModelError(describeError(error));
+      }
+    } finally {
+      if (!signal?.aborted) setModelLoading(false);
+    }
+  }
+  async function loadConversation(id: string, signal?: AbortSignal) {
+    const epoch = ++conversationEpoch.current;
+    setConversationLoading(true);
+    setConversationError(undefined);
+    try {
+      const response = await api(
+        `/me/conversations/${id}`,
+        signal ? { signal } : {},
+        conversationDetailSchema,
+      );
+      if (
+        !signal?.aborted &&
+        epoch === conversationEpoch.current &&
+        activeRef.current === id
+      ) {
+        setDetail(response);
+        const last = response.messages.findLast(
+          (item) => item.role === 'assistant' && item.taskId !== null,
+        );
+        setTaskId(last?.taskId ?? null);
+        const draft = drafts.current.get(id);
+        if (draft) {
+          setContent(draft.content);
+          setReferences(draft.references);
+        } else {
+          setContent('');
+          setReferences([]);
+        }
+      }
+    } catch (error) {
+      if (!signal?.aborted && epoch === conversationEpoch.current) {
+        setDetail(null);
+        setTaskId(null);
+        setConversationError(describeError(error));
+      }
+    } finally {
+      if (!signal?.aborted && epoch === conversationEpoch.current)
+        setConversationLoading(false);
+    }
+  }
+  useEffect(() => {
+    const controller = new AbortController();
+    groupEpoch.current += 1;
+    setSidebar(null);
+    setRestoreOpen(false);
+    setAssociateOpen(false);
+    setGroupCandidates([]);
+    setGroupError(undefined);
+    setGroupLoading(false);
+    void loadSidebar(controller.signal);
+    return () => controller.abort();
+  }, [project?.id]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadModels(controller.signal);
+    return () => controller.abort();
+  }, [me.user.id]);
+  useEffect(
+    () =>
+      onPersonalContentChanged((change) => {
+        void loadSidebar();
+        if (change.type === 'conversationDeleted') {
+          drafts.current.delete(change.conversationId);
+          uncertainSends.current.delete(change.conversationId);
+          if (activeRef.current === change.conversationId) {
+            conversationNavigation.current += 1;
+            conversationEpoch.current += 1;
+            activeRef.current = null;
+            setActiveId(null);
+            setDetail(null);
+            setTaskId(null);
+            setContent('');
+            setReferences([]);
+            setUncertain(null);
+            setConversationError(undefined);
+            setSendError(undefined);
+            window.location.hash = 'workspace';
+          }
+        } else if (change.type === 'conversationRestored') {
+          if (activeRef.current === change.conversationId)
+            void loadConversation(change.conversationId);
+        } else {
+          const mark = (items: PreparedReference[]) =>
+            items.map((reference) =>
+              reference.reference.kind === 'resource' &&
+              reference.reference.resourceId === change.resourceId
+                ? {
+                    ...reference,
+                    label: '已删除的个人资源（占位）',
+                    note: '原资源已永久删除，不能再次读取；请明确重新选择有效资料。',
+                  }
+                : reference,
+            );
+          for (const [key, draft] of drafts.current)
+            drafts.current.set(key, {
+              ...draft,
+              references: mark(draft.references),
+            });
+          setReferences(mark);
+          if (activeRef.current) void loadConversation(activeRef.current);
+        }
+      }),
+    [me.user.id],
+  );
+  useEffect(() => {
+    activeRef.current = activeId;
+    setUncertain(
+      activeId ? (uncertainSends.current.get(activeId) ?? null) : null,
+    );
+    if (!activeId) {
+      conversationEpoch.current += 1;
+      setDetail(null);
+      setTaskId(null);
+      setConversationError(undefined);
+      return;
+    }
+    const controller = new AbortController();
+    setDetail(null);
+    setTaskId(null);
+    setSendError(undefined);
+    void loadConversation(activeId, controller.signal);
+    return () => controller.abort();
+  }, [activeId]);
+  useEffect(() => {
+    const changed = () => {
+      const id = conversationFromUrl();
+      if (id !== activeRef.current) {
+        conversationNavigation.current += 1;
+        saveDraft();
+        activeRef.current = id;
+        setActiveId(id);
+      }
+    };
+    window.addEventListener('hashchange', changed);
+    return () => window.removeEventListener('hashchange', changed);
+  }, [content, references]);
+  useEffect(() => {
+    if (
+      activeId &&
+      detail?.conversation.id === activeId &&
+      !conversationLoading
+    )
+      drafts.current.set(activeId, { content, references });
+  }, [
+    activeId,
+    content,
+    references,
+    detail?.conversation.id,
+    conversationLoading,
+  ]);
+
+  function saveDraft() {
+    drafts.current.set(activeRef.current ?? 'new', {
+      content,
+      references,
+    });
+  }
+  function openConversation(id: string) {
+    conversationNavigation.current += 1;
+    saveDraft();
+    activeRef.current = id;
+    setActiveId(id);
+    window.location.hash = `workspace?conversationId=${id}`;
+  }
+  function openReferences(tab: ReferenceTab) {
+    setReferenceTab(tab);
+    setReferenceOpen(true);
+    insertCandidateSymbol('@');
+  }
+  function insertCandidateSymbol(symbol: '@' | '/') {
+    const start = input.current?.selectionStart ?? content.length;
+    const before = content.slice(0, start),
+      after = content.slice(input.current?.selectionEnd ?? start);
+    const prefix = before && !/\s$/.test(before) ? ' ' : '';
+    const value = `${before}${prefix}${symbol}${after}`,
+      cursor = before.length + prefix.length + 1;
+    setContent(value);
+    setCaret(cursor);
+    setDismissedCandidate(null);
+    window.requestAnimationFrame(() => {
+      input.current?.focus();
+      input.current?.setSelectionRange(cursor, cursor);
+    });
+  }
+  function openSkills() {
+    setReferenceOpen(false);
+    insertCandidateSymbol('/');
+  }
+  function closeCandidates() {
+    setDismissedCandidate(mentionKey);
+    setReferenceOpen(false);
+    setActiveCandidateId(undefined);
+  }
+  function selectReference(reference: PreparedReference) {
+    if (references.length >= 30) return;
+    setReferences((previous) =>
+      previous.some(
+        (item) =>
+          JSON.stringify(item.reference) ===
+          JSON.stringify(reference.reference),
+      )
+        ? previous
+        : [...previous, reference],
+    );
+    if (mention) {
+      const inserted = insertComposerReference(
+        content,
+        mention,
+        reference.label,
+      );
+      setContent(inserted.text);
+      setCaret(inserted.caret);
+      window.requestAnimationFrame(() => {
+        input.current?.focus();
+        input.current?.setSelectionRange(inserted.caret, inserted.caret);
+      });
+    }
+    closeCandidates();
+  }
+  function selectSkill(skillId: PlatformGuidanceSkillId) {
+    if (!mention || mention.symbol !== '/') return;
+    const inserted = insertComposerSkill(content, mention, skillId);
+    setContent(inserted.text);
+    setCaret(inserted.caret);
+    window.requestAnimationFrame(() => {
+      input.current?.focus();
+      input.current?.setSelectionRange(inserted.caret, inserted.caret);
+    });
+    closeCandidates();
+  }
+  async function prepareReferenceCode(text: string) {
+    const codes = [
+      ...new Set(text.match(/\bATHC1-[a-f0-9]{32}\b/gi) ?? []),
+    ].slice(0, 30 - references.length);
+    const draftId = activeRef.current ?? 'new',
+      epoch = identityContextEpoch();
+    for (const code of codes) {
+      const decoded = decodeConversationReference(code);
+      if (!decoded || decoded.conversationId === activeRef.current) continue;
+      const key = `${draftId}:${code.toLowerCase()}`;
+      if (codeReads.current.has(key)) continue;
+      codeReads.current.add(key);
+      try {
+        const response = await api(
+          `/me/conversations/${decoded.conversationId}/reference`,
+          {},
+          conversationMutationSchema,
+        );
+        if (epoch !== identityContextEpoch()) return;
+        const prepared: PreparedReference = {
+          id: crypto.randomUUID(),
+          label: response.conversation.alias ?? response.conversation.title,
+          reference: { ...decoded, dataScope },
+          note: '已准备完整会话引用；发送时按当前权限读取，编码不授予访问权限。',
+        };
+        if ((activeRef.current ?? 'new') === draftId)
+          setReferences((previous) =>
+            previous.some(
+              (item) =>
+                item.reference.kind === 'conversation' &&
+                item.reference.conversationId === decoded.conversationId,
+            ) || previous.length >= 30
+              ? previous
+              : [...previous, prepared],
+          );
+        else {
+          const old = drafts.current.get(draftId) ?? {
+            content: '',
+            references: [],
+            targetProjectId: null,
+          };
+          if (old.references.length < 30)
+            drafts.current.set(draftId, {
+              ...old,
+              references: [...old.references, prepared],
+            });
+        }
+      } catch (error) {
+        if (epoch === identityContextEpoch())
+          setSendError(`会话引用未准备：${describeError(error)}`);
+      }
+    }
+  }
+  function attachFiles(files: readonly File[]) {
+    if (references.length + uploading.length + files.length > 30) {
+      setSendError('每条消息最多30个引用，请减少文件后再选择。');
+      return;
+    }
+    for (const file of files) void attach(file);
+  }
+  async function createConversation(
+    group?: Pick<RequirementGroup, 'projectId' | 'requirementId'>,
+  ): Promise<Conversation | null> {
+    if (creatingRef.current) return null;
+    creatingRef.current = true;
+    const epoch = identityContextEpoch(),
+      navigation = conversationNavigation.current,
+      browsing = browseGeneration.current,
+      previousId = activeRef.current;
+    const current = () =>
+      mounted.current &&
+      epoch === identityContextEpoch() &&
+      currentIdentityOwner() === me.user.id;
+    const currentView = () =>
+      current() &&
+      navigation === conversationNavigation.current &&
+      browsing === browseGeneration.current &&
+      previousId === activeRef.current;
+    setCreating(true);
+    setPending(true);
+    setSideError(undefined);
+    let attempt: ConversationCreateAttempt | undefined;
+    try {
+      attempt = prepareConversationCreate(me.user.id);
+      if (!previousId)
+        creationDrafts.current.set(attempt.commandId, { content, references });
+      const response = await dispatchConversationCreate(attempt, {
+        useDefaultTarget: !group,
+        ...(group
+          ? { projectId: group.projectId, requirementId: group.requirementId }
+          : {}),
+      });
+      const draft = creationDrafts.current.get(attempt.commandId);
+      if (current() && draft)
+        drafts.current.set(response.conversation.id, draft);
+      creationDrafts.current.delete(attempt.commandId);
+      if (!currentView()) return null;
+      if (response.notice)
+        void message.info(
+          '最近使用的需求已不可用，已建立个人对话；请重新核对归属和操作目标。',
+        );
+      openConversation(response.conversation.id);
+      const openedNavigation = conversationNavigation.current;
+      await loadSidebar();
+      if (
+        !current() ||
+        activeRef.current !== response.conversation.id ||
+        conversationNavigation.current !== openedNavigation ||
+        browsing !== browseGeneration.current
+      )
+        return null;
+      return response.conversation;
+    } catch (error) {
+      if (attempt && !isUncertainMutationError(error))
+        creationDrafts.current.delete(attempt.commandId);
+      if (currentView()) setSendError(describeError(error));
+      return null;
+    } finally {
+      creatingRef.current = false;
+      setCreating(false);
+      setPending(false);
+      if (current()) refreshCreateAttempts();
+    }
+  }
+  async function recoverCreatedConversation(
+    attempt: ConversationCreateAttempt,
+  ) {
+    if (creatingRef.current) return;
+    creatingRef.current = true;
+    setCreating(true);
+    const epoch = identityContextEpoch(),
+      navigation = conversationNavigation.current,
+      browsing = browseGeneration.current;
+    try {
+      const response = await recoverConversationCreate(attempt);
+      if (
+        !mounted.current ||
+        epoch !== identityContextEpoch() ||
+        currentIdentityOwner() !== me.user.id
+      )
+        return;
+      const draft = creationDrafts.current.get(attempt.commandId);
+      if (draft) drafts.current.set(response.conversation.id, draft);
+      creationDrafts.current.delete(attempt.commandId);
+      if (
+        navigation === conversationNavigation.current &&
+        browsing === browseGeneration.current
+      ) {
+        openConversation(response.conversation.id);
+        setSendError('原对话已找回；本条消息尚未发送，请重新检查并确认发送。');
+      }
+      await loadSidebar();
+    } catch (error) {
+      if (
+        epoch === identityContextEpoch() &&
+        currentIdentityOwner() === me.user.id
+      )
+        setCreateRecoveryError(
+          error instanceof ApiError && error.status === 404
+            ? '当前尚未查到原创建回执，不代表没有创建。请保留原标识继续只读查询，不换标识重复创建。'
+            : describeError(error),
+        );
+    } finally {
+      creatingRef.current = false;
+      setCreating(false);
+      if (
+        epoch === identityContextEpoch() &&
+        currentIdentityOwner() === me.user.id
+      ) {
+        try {
+          setCreateAttempts(pendingConversationCreates(me.user.id));
+        } catch (error) {
+          setCreateRecoveryError(describeError(error));
+        }
+      }
+    }
+  }
+  async function updateConversation(
+    conversation: Conversation,
+    change: { pinned?: boolean; archived?: boolean; alias?: string | null },
+  ) {
+    const result = await api(
+      `/me/conversations/${conversation.id}`,
+      {
+        method: 'PUT',
+        body: {
+          commandId: crypto.randomUUID(),
+          rowVersion: conversation.rowVersion,
+          ...change,
+        },
+      },
+      conversationMutationSchema,
+    );
+    if (activeRef.current === conversation.id)
+      setDetail((previous) =>
+        previous?.conversation.id === conversation.id
+          ? { ...previous, conversation: result.conversation }
+          : previous,
+      );
+    await loadSidebar();
+  }
+  async function updateGroup(
+    group: Pick<RequirementGroup, 'projectId' | 'requirementId' | 'rowVersion'>,
+    change: {
+      pinned?: boolean;
+      alias?: string | null;
+      archived?: boolean;
+      hidden?: boolean;
+      expanded?: boolean;
+      sortOrder?: number;
+    },
+    refresh = true,
+  ) {
+    await api(
+      `/me/requirement-groups/${group.projectId}/${group.requirementId}`,
+      {
+        method: 'PUT',
+        body: {
+          commandId: crypto.randomUUID(),
+          rowVersion: group.rowVersion,
+          ...change,
+        },
+      },
+      requirementGroupMutationSchema,
+    );
+    if (refresh) await loadSidebar();
+  }
+  async function conversationAction(
+    conversation: Conversation,
+    action: ConversationAction,
+    trigger?: HTMLElement,
+  ) {
+    if (action === 'copyReference' || action === 'exportMarkdown') {
+      setPending(true);
+      const epoch = identityContextEpoch();
+      try {
+        if (action === 'copyReference') {
+          const result = await api(
+            `/me/conversations/${conversation.id}/reference`,
+            {},
+            conversationMutationSchema,
+          );
+          const code = encodeConversationReference(result.conversation.id);
+          if (identityContextEpoch() !== epoch) return;
+          try {
+            await navigator.clipboard.writeText(code);
+          } catch {
+            if (identityContextEpoch() === epoch)
+              modal.info({
+                title: '复制深度链接',
+                className: 'workspace-code-copy',
+                width: 520,
+                centered: true,
+                icon: null,
+                content: (
+                  <Input
+                    readOnly
+                    value={code}
+                    aria-label="会话引用编码"
+                    onFocus={(event) => event.currentTarget.select()}
+                  />
+                ),
+                okText: '关闭',
+              });
+            return;
+          }
+          if (identityContextEpoch() === epoch)
+            void message.success('已复制会话引用编码，可粘贴到其他本人对话。');
+        } else await downloadConversationMarkdown(conversation.id);
+      } catch (error) {
+        if (identityContextEpoch() === epoch)
+          void message.error(describeError(error));
+      } finally {
+        setPending(false);
+      }
+      return;
+    }
+    if (action === 'edit') {
+      const selector = `${trigger?.closest('.conversation-header') ? '.conversation-header' : '.workspace-sidebar'} [data-conversation-menu="${conversation.id}"]`;
+      aliasReturnFocus.current = () => {
+        const destination = trigger?.isConnected
+          ? trigger
+          : document.querySelector<HTMLElement>(selector);
+        destination?.focus();
+      };
+      aliasForm.setFieldsValue({
+        alias: conversation.alias ?? conversation.title,
+      });
+      setAliasError(undefined);
+      setAliasTarget({ type: 'conversation', conversation });
+      return;
+    }
+    setPending(true);
+    try {
+      await updateConversation(
+        conversation,
+        action === 'pin'
+          ? { pinned: !conversation.pinnedAt }
+          : { archived: true },
+      );
+      if (
+        action === 'pin' &&
+        conversation.pinnedAt &&
+        conversation.requirementId
+      )
+        void message.info(
+          '已取消置顶，归属保持；可通过需求栏添加入口找回隐藏或归档分组。',
+        );
+    } catch (error) {
+      setSideError(describeError(error));
+    } finally {
+      setPending(false);
+    }
+  }
+  async function groupAction(
+    group: RequirementGroup,
+    action: GroupAction,
+    trigger?: HTMLElement,
+  ) {
+    if (action === 'edit') {
+      aliasReturnFocus.current = () => {
+        const destination = trigger?.isConnected
+          ? trigger
+          : document.querySelector<HTMLElement>(
+              `[data-requirement-menu="${group.requirementId}"]`,
+            );
+        destination?.focus();
+      };
+      aliasForm.setFieldsValue({
+        alias: group.alias ?? group.generatedName ?? group.formalTitle,
+      });
+      setAliasError(undefined);
+      setAliasTarget({ type: 'group', group });
+      return;
+    }
+    setPending(true);
+    try {
+      await updateGroup(
+        group,
+        action === 'pin'
+          ? { pinned: !group.pinnedAt }
+          : action === 'archive'
+            ? { archived: true }
+            : { hidden: true },
+      );
+    } catch (error) {
+      setSideError(describeError(error));
+    } finally {
+      setPending(false);
+    }
+  }
+  async function toggleGroup(group: RequirementGroup) {
+    setPending(true);
+    try {
+      await updateGroup(group, { expanded: !group.expanded });
+    } catch (error) {
+      setSideError(describeError(error));
+    } finally {
+      setPending(false);
+    }
+  }
+  async function moveGroup(
+    group: RequirementGroup,
+    destination: RequirementGroup,
+  ) {
+    const ordered = sidebar?.groups.filter((entry) => !entry.pinnedAt) ?? [];
+    const from = ordered.findIndex(
+      (entry) => entry.requirementId === group.requirementId,
+    );
+    const to = ordered.findIndex(
+      (entry) => entry.requirementId === destination.requirementId,
+    );
+    if (from < 0 || to < 0) return;
+    const [moving] = ordered.splice(from, 1);
+    if (!moving) return;
+    ordered.splice(to, 0, moving);
+    setPending(true);
+    const results = await Promise.allSettled(
+      ordered.map((entry, index) =>
+        updateGroup(entry, { sortOrder: (index + 1) * 100 }, false),
+      ),
+    );
+    const failures = results.filter((entry) => entry.status === 'rejected');
+    await loadSidebar();
+    if (failures.length)
+      setSideError(
+        `排序部分保存：${results.length - failures.length} 项成功，${failures.length} 项冲突或未完成，请刷新后重试受影响项。`,
+      );
+    setPending(false);
+  }
+  async function restoreCandidates(showRestore = true) {
+    const epoch = ++groupEpoch.current;
+    if (showRestore) setRestoreOpen(true);
+    const requestedProjectId = browseRef.current;
+    setGroupCandidates([]);
+    setGroupError(undefined);
+    setGroupLoading(true);
+    if (!requestedProjectId) {
+      setGroupError('先在输入框上方选择这个项目。');
+      setGroupLoading(false);
+      return;
+    }
+    try {
+      const response = await api(
+        `/me/requirement-groups/candidates?projectId=${requestedProjectId}`,
+        {},
+        requirementGroupCandidatesSchema,
+      );
+      if (
+        epoch === groupEpoch.current &&
+        requestedProjectId === browseRef.current
+      )
+        setGroupCandidates(response.groups);
+    } catch (error) {
+      if (
+        epoch === groupEpoch.current &&
+        requestedProjectId === browseRef.current
+      )
+        setGroupError(describeError(error));
+    } finally {
+      if (
+        epoch === groupEpoch.current &&
+        requestedProjectId === browseRef.current
+      )
+        setGroupLoading(false);
+    }
+  }
+  async function saveAlias(values: { alias: string }) {
+    if (!aliasTarget) return;
+    setPending(true);
+    setAliasError(undefined);
+    try {
+      if (aliasTarget.type === 'conversation')
+        await updateConversation(aliasTarget.conversation, {
+          alias: values.alias,
+        });
+      else await updateGroup(aliasTarget.group, { alias: values.alias });
+      setAliasTarget(null);
+    } catch (error) {
+      setAliasError(describeError(error));
+    } finally {
+      setPending(false);
+    }
+  }
+  async function restoreDefaultAlias() {
+    if (!aliasTarget || pending) return;
+    setPending(true);
+    setAliasError(undefined);
+    try {
+      if (aliasTarget.type === 'conversation')
+        await updateConversation(aliasTarget.conversation, { alias: null });
+      else await updateGroup(aliasTarget.group, { alias: null });
+      setAliasTarget(null);
+    } catch (error) {
+      setAliasError(describeError(error));
+    } finally {
+      setPending(false);
+    }
+  }
+  async function loadOlder() {
+    if (!activeId || !detail?.nextMessageCursor) return;
+    const id = activeId;
+    try {
+      const response = await api(
+        `/me/conversations/${id}?before=${detail.nextMessageCursor}&limit=50`,
+        {},
+        conversationDetailSchema,
+      );
+      if (activeRef.current === id)
+        setDetail((previous) =>
+          previous
+            ? {
+                ...previous,
+                messages: [
+                  ...response.messages.filter(
+                    (entry) =>
+                      !previous.messages.some(
+                        (current) => current.id === entry.id,
+                      ),
+                  ),
+                  ...previous.messages,
+                ],
+                nextMessageCursor: response.nextMessageCursor,
+              }
+            : previous,
+        );
+    } catch (error) {
+      setConversationError(describeError(error));
+    }
+  }
+  async function attach(file: File) {
+    const draftId = activeRef.current ?? 'new';
+    const id = crypto.randomUUID();
+    setUploading((previous) => [
+      ...previous,
+      { id, name: file.name, state: '完整上传/校验中' },
+    ]);
+    try {
+      const resource = await uploadPersonalFile(file, id);
+      const prepared: PreparedReference = {
+        id,
+        label: resource.originalName,
+        reference: {
+          kind: 'resource',
+          resourceId: resource.id,
+          dataScope: 'syntheticPublicOnly',
+        },
+        note: '字节已验证；正文尚未读取，解析以平台回执为准',
+      };
+      if ((activeRef.current ?? 'new') === draftId)
+        setReferences((previous) => [...previous, prepared]);
+      else {
+        const previous = drafts.current.get(draftId) ?? {
+          content: '',
+          references: [],
+          targetProjectId: null,
+        };
+        drafts.current.set(draftId, {
+          ...previous,
+          references: [...previous.references, prepared],
+        });
+        void message.info('附件已上传，引用保留在原草稿。');
+      }
+      setUploading((previous) => previous.filter((entry) => entry.id !== id));
+    } catch (error) {
+      setUploading((previous) =>
+        previous.map((entry) =>
+          entry.id === id
+            ? { ...entry, state: '上传未完成', error: describeError(error) }
+            : entry,
+        ),
+      );
+    }
+  }
+  async function submitMessage(
+    disclosureConfirmed = false,
+    destination?: Conversation,
+  ) {
+    const sendEpoch = identityContextEpoch();
+    if (currentIdentityOwner() !== me.user.id) return;
+    if (
+      Boolean(targetProjectId && !targetProject) ||
+      !content.trim() ||
+      inFlight ||
+      sending ||
+      uncertain ||
+      creatingRef.current ||
+      sendDispatchInProgress.current ||
+      pending
+    )
+      return;
+    if (model && !model.allowedDataScopes.includes(dataScope)) {
+      setSendError(
+        '当前模型未开放所选资料范围，请选择允许的范围或联系管理员。',
+      );
+      return;
+    }
+    if (model && effort && !model.effortValues.includes(effort)) {
+      setSendError('所选模型不支持当前参数，请重新选择。');
+      setModelPickerOpen(true);
+      return;
+    }
+    const resolved = await resolveComposerDestination({
+      activeId: destination?.id ?? activeRef.current,
+      conversation:
+        destination ??
+        (detail?.conversation.id === activeRef.current
+          ? detail.conversation
+          : null),
+      model,
+      selectionCurrent,
+      create: () => createConversation(),
+    });
+    if (resolved.state !== 'ready') {
+      setSendError(resolved.reason);
+      if (resolved.state === 'needsModel') setModelPickerOpen(true);
+      return;
+    }
+    const active = resolved.conversation;
+    if (
+      !mounted.current ||
+      sendEpoch !== identityContextEpoch() ||
+      currentIdentityOwner() !== me.user.id ||
+      !model ||
+      active.id !== activeRef.current
+    )
+      return;
+    if (!disclosureConfirmed) {
+      if (sendDisclosureOpen.current) return;
+      sendDisclosureOpen.current = true;
+      const disclosureEpoch = identityContextEpoch();
+      const disclosureNavigation = conversationNavigation.current;
+      const disclosureBrowsing = browseGeneration.current;
+      modal.confirm({
+        title: '确认本次模型资料发送',
+        className: 'ai-transmission-confirm',
+        width: 720,
+        centered: true,
+        icon: null,
+        content: (
+          <Space orientation="vertical">
+            <Typography.Text>
+              接收方：{modelServiceCaption(model)} · {model.baseUrl} ·{' '}
+              {model.modelId}
+            </Typography.Text>
+            <Typography.Text>
+              本次声明：
+              {dataScope === 'syntheticPublicOnly'
+                ? '仅合成或公开资料'
+                : '已获准的相关内部测试资料'}
+              。 业务目标：{targetProject?.name ?? '无新增业务目标'}；会话归属：
+              {active.projectId
+                ? (me.projects.find((entry) => entry.id === active.projectId)
+                    ?.name ?? '原关联项目')
+                : '个人会话'}
+              {active.requirementTitle ? ` / ${active.requirementTitle}` : ''}。
+            </Typography.Text>
+            <Typography.Text>
+              用途：继续当前 AI
+              对话。将发送当前消息、可用会话上下文、已选引用，以及所选目标和来源项目内的相关工具资料。
+            </Typography.Text>
+            <Typography.Text>
+              已选引用：
+              {references.map((entry) => entry.label).join('、') ||
+                '无新增引用'}
+              。请确认已获准向该接收方发送；凭据、无关公司源码和未经许可的资料仍不可发送。
+            </Typography.Text>
+          </Space>
+        ),
+        okText: '确认资料范围并发送',
+        cancelText: '返回检查',
+        afterClose: () => {
+          sendDisclosureOpen.current = false;
+        },
+        onOk: () => {
+          if (
+            identityContextEpoch() !== disclosureEpoch ||
+            currentIdentityOwner() !== me.user.id ||
+            activeRef.current !== active.id ||
+            browseRef.current !== targetProjectId ||
+            conversationNavigation.current !== disclosureNavigation ||
+            browseGeneration.current !== disclosureBrowsing
+          ) {
+            void message.warning(
+              '当前身份、会话或项目已变化，请重新核对资料发送范围。',
+            );
+            return;
+          }
+          return submitMessage(true, active);
+        },
+      });
+      return;
+    }
+    if (sendDispatchInProgress.current) return;
+    sendDispatchInProgress.current = true;
+    setSending(true);
+    setSendError(undefined);
+    const commandId = crypto.randomUUID();
+    try {
+      const payload = sendMessageInputSchema.parse({
+        commandId,
+        content,
+        modelSelection: {
+          modelServiceId: model.modelServiceId,
+          modelEntryId: model.modelEntryId,
+          serviceRevision: model.serviceRevision,
+          effort,
+        },
+        dataScope,
+        references: references.map((entry) => ({
+          ...entry.reference,
+          dataScope,
+        })),
+        operationTarget: targetProjectId
+          ? {
+              projectId: targetProjectId,
+              ...(targetProjectId === active.projectId && active.requirementId
+                ? { requirementId: active.requirementId }
+                : {}),
+            }
+          : null,
+      });
+      const unresolved: UncertainSend = {
+        conversationId: active.id,
+        commandId,
+        input: payload,
+      };
+      try {
+        const result = await api(
+          `/me/conversations/${active.id}/messages`,
+          { method: 'POST', body: payload },
+          taskAcceptedSchema,
+        );
+        drafts.current.delete(active.id);
+        uncertainSends.current.delete(active.id);
+        if (activeRef.current === active.id) {
+          setContent('');
+          setReferences([]);
+          setTaskId(result.taskId);
+        }
+        try {
+          const response = await api(
+            `/me/conversations/${active.id}`,
+            {},
+            conversationDetailSchema,
+          );
+          if (activeRef.current === active.id) {
+            setDetail(response);
+            setUncertain(null);
+          }
+        } catch (error) {
+          if (activeRef.current === active.id)
+            setConversationError(
+              `消息已受理，当前历史读取未完成：${describeError(error)}`,
+            );
+        }
+        await loadSidebar();
+      } catch (error) {
+        if (isUncertainMutationError(error)) {
+          uncertainSends.current.set(active.id, unresolved);
+          if (activeRef.current === active.id) setUncertain(unresolved);
+        }
+        throw error;
+      }
+    } catch (error) {
+      if (activeRef.current === active.id)
+        setSendError(
+          error instanceof z.ZodError
+            ? error.issues.map((issue) => issue.message).join('；')
+            : describeError(error),
+        );
+    } finally {
+      sendDispatchInProgress.current = false;
+      setSending(false);
+    }
+  }
+  async function recoverSend() {
+    if (!uncertain) return;
+    setSending(true);
+    try {
+      const receipt = await api(
+        `/me/conversations/${uncertain.conversationId}/send-receipts/${encodeURIComponent(uncertain.commandId)}`,
+        {},
+        sendReceiptSchema,
+      );
+      drafts.current.delete(uncertain.conversationId);
+      uncertainSends.current.delete(uncertain.conversationId);
+      if (activeRef.current === uncertain.conversationId) {
+        setTaskId(receipt.receipt.taskId);
+        setContent('');
+        setReferences([]);
+        setUncertain(null);
+        const result = await api(
+          `/me/conversations/${uncertain.conversationId}`,
+          {},
+          conversationDetailSchema,
+        );
+        if (activeRef.current === uncertain.conversationId) {
+          setDetail(result);
+          setSendError(undefined);
+        }
+      }
+    } catch (error) {
+      setSendError(
+        error instanceof ApiError && error.status === 404
+          ? '当前尚未查到本次回执，不代表消息未受理。请保留本次标识继续查询，不能换新标识重复发送。'
+          : describeError(error),
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+  async function stopReply() {
+    if (!taskId) return;
+    setSending(true);
+    try {
+      await api(
+        `/me/ai-tasks/${taskId}/cancel`,
+        { method: 'POST', body: { commandId: crypto.randomUUID() } },
+        cancelReceiptSchema,
+      );
+      stream.reconnect();
+    } catch (error) {
+      setSendError(describeError(error));
+    } finally {
+      setSending(false);
+    }
+  }
+  async function associate(associationId: string) {
+    if (
+      !active ||
+      active.id !== activeRef.current ||
+      conversationLoading ||
+      active.requirementId ||
+      !project ||
+      !associationId
+    )
+      return;
+    const epoch = conversationEpoch.current;
+    const isCurrentConversation = () =>
+      activeRef.current === active.id && conversationEpoch.current === epoch;
+    const isCurrentPicker = () =>
+      isCurrentConversation() && browseRef.current === project.id;
+    setPending(true);
+    setAssociationError(undefined);
+    try {
+      const response = await api(
+        `/me/conversations/${active.id}/associate`,
+        {
+          method: 'POST',
+          body: {
+            commandId: crypto.randomUUID(),
+            rowVersion: active.rowVersion,
+            projectId: project.id,
+            requirementId: associationId,
+          },
+        },
+        conversationMutationSchema,
+      );
+      if (isCurrentConversation())
+        setDetail((previous) =>
+          previous?.conversation.id === active.id
+            ? { ...previous, conversation: response.conversation }
+            : previous,
+        );
+      if (isCurrentPicker()) setAssociateOpen(false);
+      await loadSidebar();
+    } catch (error) {
+      if (isCurrentPicker()) setAssociationError(describeError(error));
+    } finally {
+      setPending(false);
+    }
+  }
+  function prepareScenes() {
+    setContent(
+      '请根据我明确引用的资料梳理测试场景，区分 UI 与接口范围，并说明证据缺口。',
+    );
+    input.current?.focus();
+  }
+  function keyboardCard(
+    event: { key: string; preventDefault: () => void },
+    action: () => void,
+  ) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      action();
+    }
+  }
+
+  const sidebarNavigation = (
+    <WorkspaceSidebar
+      projects={me.projects}
+      projectName={project?.name ?? null}
+      notificationBell={notificationBell}
+      restorePicker={{
+        open: restoreOpen,
+        onOpenChange: (value) => {
+          if (value) void restoreCandidates();
+          else setRestoreOpen(false);
+        },
+        candidates: groupCandidates,
+        loading: groupLoading,
+        ...(groupError ? { error: groupError } : {}),
+        onRestore: (group) => {
+          setPending(true);
+          void updateGroup(group, { hidden: false, archived: false })
+            .then(() => setRestoreOpen(false))
+            .catch((error) => setGroupError(describeError(error)))
+            .finally(() => setPending(false));
+        },
+      }}
+      displayName={me.user.displayName}
+      sidebar={sidebar}
+      loading={sideLoading}
+      error={sideError}
+      pending={pending}
+      selectedId={activeId}
+      onCreate={(group) => {
+        setNavigationOpen(false);
+        void createConversation(group);
+      }}
+      onOpen={(id) => {
+        setNavigationOpen(false);
+        openConversation(id);
+      }}
+      onConversationAction={(conversation, action, trigger) =>
+        void conversationAction(conversation, action, trigger)
+      }
+      onGroupAction={(group, action, trigger) =>
+        void groupAction(group, action, trigger)
+      }
+      onToggleGroup={(group) => void toggleGroup(group)}
+      onMoveGroup={(group, destination) => void moveGroup(group, destination)}
+      onRestoreGroups={() => void restoreCandidates()}
+      onSettings={onSettings}
+    />
+  );
+  return (
+    <div className="workspace-shell">
+      {compactNavigation ? (
+        <Drawer
+          title="本人对话与项目"
+          placement="left"
+          className="workspace-mobile-drawer"
+          width={272}
+          zIndex={uiLayers.drawer}
+          open={navigationOpen}
+          onClose={() => setNavigationOpen(false)}
+          destroyOnHidden
+          styles={{ body: { padding: 0 } }}
+        >
+          {sidebarNavigation}
+        </Drawer>
+      ) : (
+        sidebarNavigation
+      )}
+      <section className="workspace-chat-main">
+        <header className="conversation-header">
+          {compactNavigation && (
+            <Button
+              type="text"
+              className="iconbtn"
+              aria-label="打开对话列表"
+              aria-expanded={navigationOpen}
+              icon={<AppIcon name="panel" />}
+              onClick={() => setNavigationOpen(true)}
+            />
+          )}
+          <div className="chat-title-context">
+            <div className="row wrap">
+              <h2>{active ? (active.alias ?? active.title) : '新对话'}</h2>
+              {active?.archivedAt && <Tag>已归档，新增消息需先恢复</Tag>}
+            </div>
+            <p>
+              {active
+                ? active.projectId
+                  ? `${me.projects.find((item) => item.id === active.projectId)?.name ?? '原项目（当前不可用）'}${active.requirementId ? ' · 需求会话' : ''}`
+                  : '个人对话'
+                : '选择或新建本人对话'}
+            </p>
+          </div>
+          <Space className="chat-head-actions">
+            <Button
+              type="text"
+              className="iconbtn"
+              aria-label="全平台外观"
+              icon={<AppIcon name={dark ? 'moon' : 'sun'} />}
+              onClick={onAppearance}
+            />
+            {active ? (
+              <>
+                <Button
+                  type="text"
+                  className="iconbtn"
+                  icon={<ReloadOutlined />}
+                  aria-label="刷新当前对话"
+                  onClick={() => {
+                    saveDraft();
+                    void loadConversation(active.id);
+                    stream.reconnect();
+                  }}
+                />
+                <ConversationMenu
+                  conversation={active}
+                  onAction={(conversation, action, trigger) =>
+                    void conversationAction(conversation, action, trigger)
+                  }
+                  disabled={pending}
+                  label="当前对话更多"
+                />
+              </>
+            ) : (
+              <Dropdown
+                trigger={['click']}
+                classNames={{ root: 'user-workspace-sidebar-menu' }}
+                menu={{
+                  items: [
+                    { key: 'new', label: '新聊天' },
+                    {
+                      key: 'preferences',
+                      label: '个人设置',
+                      icon: <AppIcon name="settings" />,
+                    },
+                  ],
+                  onClick: ({ key }) => {
+                    if (key === 'new') void createConversation();
+                    else onSettings();
+                  },
+                }}
+              >
+                <Button
+                  type="text"
+                  className="iconbtn"
+                  icon={<AppIcon name="more" />}
+                  aria-label="新对话更多"
+                />
+              </Dropdown>
+            )}
+          </Space>
+        </header>
+        <div className="conversation-scroll" aria-live="polite">
+          {conversationLoading && <Skeleton active paragraph={{ rows: 5 }} />}
+          {conversationError && (
+            <Alert type="error" title={conversationError} showIcon />
+          )}
+          {(!active || detail?.messages.length === 0) &&
+            !conversationLoading &&
+            !conversationError && (
+              <div className="welcome-content welcome">
+                <img
+                  src="/brand-f-mono.png"
+                  className="welcome-brand brand-mono"
+                  alt="AITestHub F 标志"
+                />
+                <h1>
+                  {welcomeRequirement ? (
+                    <>
+                      你想让我们在{' '}
+                      <span className="welcome-requirement-name">
+                        {welcomeRequirement}
+                      </span>{' '}
+                      中构建什么？
+                    </>
+                  ) : (
+                    '我们要构建什么？'
+                  )}
+                </h1>
+                <p>从一个问题开始，让测试的下一步更清晰。</p>
+                <div className="welcome-cards">
+                  <button
+                    type="button"
+                    className="welcome-card"
+                    aria-label="梳理测试场景，准备任务"
+                    onKeyDown={(event) => keyboardCard(event, prepareScenes)}
+                    onClick={prepareScenes}
+                  >
+                    <AppIcon name="check" />
+                    <span>梳理测试场景</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="welcome-card"
+                    aria-label="用Skill开始任务，查看候选"
+                    onKeyDown={(event) => keyboardCard(event, openSkills)}
+                    onClick={openSkills}
+                  >
+                    <AppIcon name="spark" />
+                    <span>用 Skill 开始任务</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="welcome-card"
+                    aria-label="引用已有知识，选择候选"
+                    onKeyDown={(event) =>
+                      keyboardCard(event, () => openReferences('knowledge'))
+                    }
+                    onClick={() => openReferences('knowledge')}
+                  >
+                    <AppIcon name="book" />
+                    <span>引用已有知识</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          {detail?.nextMessageCursor && (
+            <Button onClick={() => void loadOlder()}>加载更早的本人消息</Button>
+          )}
+          {detail?.messages.map((entry) => {
+            const currentTask =
+              entry.role === 'assistant' &&
+              entry.taskId === taskId &&
+              stream.task?.id === entry.taskId
+                ? stream.task
+                : null;
+            const text = currentTask
+              ? modelMessagePresentation(currentTask).content
+              : entry.content;
+            return (
+              <article className={`chat-message ${entry.role}`} key={entry.id}>
+                <Typography.Text strong>
+                  {entry.role === 'user' ? me.user.displayName : 'AI 回复'}
+                </Typography.Text>
+                <ModelCaption message={entry} />
+                {currentTask && <ModelAttemptFragments task={currentTask} />}
+                {text ? (
+                  <MessageText text={text} />
+                ) : !currentTask ||
+                  !interruptedModelAttempts(currentTask.modelAttempts)
+                    .length ? (
+                  <Typography.Text type="secondary">
+                    尚未取得模型内容；当前消息状态：
+                    {
+                      messageStatusLabels[
+                        currentTask?.messageStatus ?? entry.status
+                      ]
+                    }
+                  </Typography.Text>
+                ) : null}
+                {!!entry.references.length && (
+                  <Space wrap>
+                    {entry.references.map((reference, index) => (
+                      <Tag key={index}>
+                        {reference.reference.kind === 'projectAccess'
+                          ? '工具来源项目（只读元数据）'
+                          : `发送时引用：${reference.reference.kind}`}
+                      </Tag>
+                    ))}
+                  </Space>
+                )}
+                {entry.role === 'assistant' && entry.taskId && (
+                  <Button
+                    size="small"
+                    onClick={() => setProposalTaskId(entry.taskId)}
+                  >
+                    查看此消息工具提案与回执
+                  </Button>
+                )}
+              </article>
+            );
+          })}
+          {stream.task && (
+            <Card
+              size="small"
+              title={`平台任务状态：${taskStateLabels[stream.task.status]}`}
+              className="task-process-card"
+            >
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Typography.Text type="secondary">
+                  任务 {stream.task.id} · {stream.task.createdAt}
+                </Typography.Text>
+                {stream.task.errorCode && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    title={`任务未完成：${stream.task.errorCode}`}
+                    description={
+                      stream.task.errorDetails
+                        ? `供应商通道状态 ${stream.task.errorDetails.httpStatus ?? '未知'}；${stream.task.errorDetails.providerCode ?? '未提供错误细分'}。未知用量不会记为零。`
+                        : '请保留任务 ID 查询原记录。'
+                    }
+                  />
+                )}
+                <ModelRetryStatus
+                  task={stream.task}
+                  {...(inFlight && !sending
+                    ? { onCancel: () => void stopReply() }
+                    : {})}
+                />
+                {stream.events
+                  .filter(
+                    (event) =>
+                      event.type === 'ai.tool' ||
+                      event.type === 'ai.guidance.bound' ||
+                      event.type === 'ai.guidance.loaded',
+                  )
+                  .map((event) => {
+                    const guidance = taskGuidanceLabel(event);
+                    return guidance ? (
+                      <Tag
+                        key={event.sequence}
+                        style={{ whiteSpace: 'normal', maxWidth: '100%' }}
+                      >
+                        {guidance} · {event.createdAt}
+                      </Tag>
+                    ) : event.type === 'ai.tool' ? (
+                      <Tag key={event.sequence}>
+                        {event.payload.name} ·{' '}
+                        {'unknownEffect' in event.payload &&
+                        event.payload.unknownEffect === true
+                          ? '结果未知，查原回执'
+                          : event.payload.state === 'started'
+                            ? '已开始'
+                            : event.payload.state === 'completed'
+                              ? '已返回'
+                              : event.payload.state === 'waitingConfirmation'
+                                ? '待本人决定'
+                                : '未完成'}{' '}
+                        · {event.createdAt}
+                      </Tag>
+                    ) : null;
+                  })}
+                {stream.events.some(
+                  (event) => event.type === 'ai.contextReset',
+                ) && (
+                  <Alert
+                    type="info"
+                    title="模型上下文已按当前授权重新整理。已保存的本人文字与可再次读取的来源权限分别判断。"
+                  />
+                )}
+                {stream.error && !stream.retry && (
+                  <Alert type="warning" title={stream.error} showIcon />
+                )}
+                <Button onClick={stream.reconnect}>
+                  只读查询/恢复原任务事件
+                </Button>
+              </Space>
+            </Card>
+          )}
+          {taskId && (stream.retry || stream.connection === 'connecting') && (
+            <AiRetryStatus
+              state={
+                stream.retry ?? {
+                  layer: 'events',
+                  phase: 'connecting',
+                  attempt: 0,
+                  maxAttempts: 5,
+                  nextAttemptAt: null,
+                  reason: null,
+                }
+              }
+              onCancel={stream.pause}
+              onReconnect={stream.reconnect}
+            />
+          )}
+          {taskId && !stream.task && stream.error && !stream.retry && (
+            <Alert
+              type="warning"
+              title={stream.error}
+              showIcon
+              action={
+                <Button onClick={stream.reconnect}>手工查询原任务</Button>
+              }
+            />
+          )}
+          {taskId &&
+            stream.events.some(
+              (event) =>
+                event.type === 'ai.tool' &&
+                event.payload.state === 'waitingConfirmation' &&
+                Boolean(event.payload.confirmationId),
+            ) && (
+              <BusinessConfirmationsPanel
+                taskId={taskId}
+                refreshKey={stream.events.length}
+                onResolved={stream.reconnect}
+              />
+            )}
+          {taskId &&
+            stream.events.some(
+              (event) =>
+                event.type === 'ai.tool' &&
+                Boolean(event.payload.externalInvocationId),
+            ) && (
+              <ExternalMcpInvocationsPanel
+                taskId={taskId}
+                refreshKey={stream.events.length}
+                onResolved={stream.reconnect}
+              />
+            )}
+          <AutomaticAuxiliaryPanel
+            projectId={project?.id ?? null}
+            refreshKey={
+              sidebar?.groups.map((group) => group.requirementId).join('|') ??
+              ''
+            }
+            onNamesChanged={() => void loadSidebar(undefined, true)}
+          />
+        </div>
+        <div
+          className="workspace-composer composer-wrap user-composer"
+          onDragOver={(event) => {
+            if (event.dataTransfer.types.includes('Files'))
+              event.preventDefault();
+          }}
+          onDrop={(event) => {
+            if (event.dataTransfer.files.length) {
+              event.preventDefault();
+              attachFiles([...event.dataTransfer.files]);
+            }
+          }}
+        >
+          <div className="composer-context-bar">
+            <WorkspaceContextPicker
+              open={associateOpen}
+              onOpenChange={(value) => {
+                setAssociateOpen(value);
+                if (value) {
+                  setAssociationError(undefined);
+                  void restoreCandidates(false);
+                }
+              }}
+              selectedId={active?.requirementId ?? ''}
+              placeholder="搜索需求"
+              loading={groupLoading}
+              error={associationError ?? groupError}
+              emptyText={project ? '当前没有本人参与的需求' : '先选择这个项目'}
+              caption={
+                active?.requirementId
+                  ? '当前对话已关联，既有归属保持不变。'
+                  : '选择后关联本对话；不会改动已发任务。'
+              }
+              options={[
+                {
+                  id: '',
+                  label: '不关联需求',
+                  disabled: Boolean(active?.requirementId),
+                },
+                ...(active?.requirementId &&
+                !groupCandidates.some(
+                  (group) => group.requirementId === active.requirementId,
+                )
+                  ? [
+                      {
+                        id: active.requirementId,
+                        label: active.requirementTitle ?? '当前需求',
+                      },
+                    ]
+                  : []),
+                ...groupCandidates.map((group) => ({
+                  id: group.requirementId,
+                  label:
+                    group.alias ?? group.generatedName ?? group.formalTitle,
+                  description: group.formalTitle,
+                  disabled: Boolean(
+                    active?.requirementId &&
+                    active.requirementId !== group.requirementId,
+                  ),
+                })),
+              ]}
+              onChoose={(id) => {
+                if (!id || id === active?.requirementId) {
+                  setAssociateOpen(false);
+                  return;
+                }
+                const selected = groupCandidates.find(
+                  (group) => group.requirementId === id,
+                );
+                if (!selected) return;
+                if (!active) {
+                  void createConversation(selected).then((created) => {
+                    if (created) setAssociateOpen(false);
+                  });
+                } else void associate(id);
+              }}
+            >
+              <Button
+                type="text"
+                className="composer-requirement-context"
+                icon={<AppIcon name="folder-closed" />}
+                disabled={pending || sending || conversationLoading}
+                title={
+                  currentGroup?.formalTitle ??
+                  active?.requirementTitle ??
+                  '选择需求'
+                }
+                aria-label="选择当前对话需求"
+              >
+                {currentGroup?.alias ??
+                  currentGroup?.generatedName ??
+                  currentGroup?.formalTitle ??
+                  active?.requirementTitle ??
+                  '未关联需求'}
+                <AppIcon name="down" />
+              </Button>
+            </WorkspaceContextPicker>
+            <WorkspaceContextPicker
+              open={projectPickerOpen}
+              onOpenChange={setProjectPickerOpen}
+              selectedId={project?.id ?? ''}
+              placeholder="搜索项目"
+              options={[
+                { id: '', label: '不在项目中工作' },
+                ...me.projects.map((entry) => ({
+                  id: entry.id,
+                  label: entry.name,
+                })),
+              ]}
+              onChoose={(id) => {
+                onProjectChange(id || null);
+                setProjectPickerOpen(false);
+              }}
+            >
+              <Button
+                type="text"
+                className="composer-project-context"
+                disabled={creating || sending || Boolean(uncertain)}
+                title={project?.name ?? '不在项目'}
+                aria-label={'切换全站项目：' + (project?.name ?? '不在项目')}
+              >
+                <ProjectOutlined />
+                <span className="composer-project-name">
+                  {project?.name ?? '不在项目'}
+                </span>
+                <AppIcon name="down" />
+              </Button>
+            </WorkspaceContextPicker>
+          </div>
+          <div className="composer user-composer-anchor">
+            {candidateOpen && mention && (
+              <WorkspaceInlineCandidates
+                ref={candidatesControl}
+                trigger={mention.symbol}
+                query={mention.query}
+                projectId={project?.id ?? null}
+                projects={me.projects}
+                remaining={30 - references.length}
+                dataScope={dataScope}
+                {...(activeId ? { currentConversationId: activeId } : {})}
+                {...(referenceOpen ? { filter: referenceTab } : {})}
+                onAdd={selectReference}
+                onSkill={selectSkill}
+                onClose={closeCandidates}
+                onActiveDescendantChange={setActiveCandidateId}
+              />
+            )}
+            {sendError && (
+              <Alert
+                type="error"
+                showIcon
+                title={sendError}
+                className="section-alert"
+              />
+            )}
+            {(createRecoveryError || unresolvedCreates.length > 0) && (
+              <Alert
+                type="warning"
+                showIcon
+                className="section-alert"
+                title="本人对话创建回执待核对；本条消息尚未发送"
+                description={
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    {createRecoveryError && <span>{createRecoveryError}</span>}
+                    <span>
+                      只读查询原创建，不换标识再建。找回后请重新检查草稿并确认发送。
+                    </span>
+                    {unresolvedCreates.map((attempt) => (
+                      <Button
+                        key={attempt.commandId}
+                        size="small"
+                        loading={creating}
+                        onClick={() => void recoverCreatedConversation(attempt)}
+                      >
+                        只读找回原对话 · {attempt.commandId}
+                      </Button>
+                    ))}
+                  </Space>
+                }
+              />
+            )}
+            {uncertain && (
+              <Alert
+                type="warning"
+                showIcon
+                title={`本次发送回执尚未确认：${uncertain.commandId}`}
+                action={
+                  <Button loading={sending} onClick={() => void recoverSend()}>
+                    查询同一次发送
+                  </Button>
+                }
+              />
+            )}
+            {modelError && <Alert type="error" title={modelError} showIcon />}
+            {selectedModelId && !selectionCurrent && (
+              <Alert
+                type="warning"
+                title="模型配置已变化，请重新选择本条消息的模型。"
+                showIcon
+              />
+            )}
+            {(references.length > 0 || uploading.length > 0) && (
+              <Space wrap className="prepared-references">
+                {references.map((reference) => (
+                  <Tag
+                    key={reference.id}
+                    closable={!creating && !sending}
+                    onClose={() =>
+                      setReferences((previous) =>
+                        previous.filter((entry) => entry.id !== reference.id),
+                      )
+                    }
+                    title={reference.note}
+                  >
+                    {reference.label} · 待解析/权限校验
+                  </Tag>
+                ))}
+                {uploading.map((upload) => (
+                  <Tag
+                    key={upload.id}
+                    color={upload.error ? 'red' : 'default'}
+                    title={upload.error}
+                  >
+                    {upload.name} · {upload.state}
+                  </Tag>
+                ))}
+              </Space>
+            )}
+            <Input.TextArea
+              ref={(value) => {
+                input.current = value?.resizableTextArea?.textArea ?? null;
+              }}
+              aria-label="聊天消息"
+              aria-autocomplete="list"
+              aria-controls={
+                candidateOpen ? 'workspace-inline-candidates' : undefined
+              }
+              aria-expanded={candidateOpen}
+              aria-activedescendant={
+                candidateOpen ? activeCandidateId : undefined
+              }
+              disabled={conversationLoading || creating || sending}
+              value={content}
+              onChange={(event) => {
+                const value = event.target.value;
+                setContent(value);
+                setCaret(event.target.selectionStart);
+                void prepareReferenceCode(value);
+              }}
+              onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
+              onFocus={(event) => {
+                setCaret(event.currentTarget.selectionStart);
+                setDismissedCandidate(null);
+              }}
+              onBlur={(event) => {
+                if (
+                  !event.relatedTarget?.closest('.workspace-inline-candidates')
+                )
+                  closeCandidates();
+              }}
+              onCompositionStart={() => {
+                composition.current = true;
+                setComposing(true);
+              }}
+              onCompositionEnd={(event) => {
+                composition.current = false;
+                setComposing(false);
+                setCaret(event.currentTarget.selectionStart);
+              }}
+              onPaste={(event) => {
+                if (event.clipboardData.files.length) {
+                  event.preventDefault();
+                  attachFiles([...event.clipboardData.files]);
+                  return;
+                }
+                void prepareReferenceCode(event.clipboardData.getData('text'));
+              }}
+              onKeyDown={(event) => {
+                if (
+                  composition.current ||
+                  event.nativeEvent.isComposing ||
+                  event.keyCode === 229
+                )
+                  return;
+                if (
+                  candidateOpen &&
+                  candidatesControl.current?.handleKeyDown(event)
+                )
+                  return;
+                if (
+                  candidateOpen &&
+                  !candidatesControl.current &&
+                  event.key === 'Enter' &&
+                  !event.shiftKey
+                ) {
+                  event.preventDefault();
+                  return;
+                }
+                if (
+                  event.key === 'Enter' &&
+                  !event.shiftKey &&
+                  !event.ctrlKey &&
+                  !event.altKey &&
+                  !event.metaKey
+                ) {
+                  event.preventDefault();
+                  void submitMessage();
+                }
+                if (event.key === '@' || event.key === '/') {
+                  setReferenceOpen(false);
+                  setDismissedCandidate(null);
+                }
+              }}
+              autoSize={{ minRows: 3, maxRows: 8 }}
+              maxLength={100000}
+              placeholder={
+                active
+                  ? '输入消息，@ 引用，/ 选择 Skill'
+                  : '输入消息，选择模型后开始新对话'
+              }
+            />
+            <input
+              hidden
+              type="file"
+              multiple
+              ref={uploadInput}
+              aria-label="选择附件文件"
+              onChange={(event) => {
+                attachFiles([...(event.target.files ?? [])]);
+                event.currentTarget.value = '';
+              }}
+            />
+            <div className="composer-toolbar">
+              <Dropdown
+                trigger={['click']}
+                placement="topLeft"
+                classNames={{
+                  root: 'user-composer-add-menu user-workspace-sidebar-menu',
+                }}
+                menu={{
+                  items: [
+                    {
+                      key: 'upload',
+                      label: '添加文件',
+                      icon: <PaperClipOutlined />,
+                      disabled: references.length + uploading.length >= 30,
+                    },
+                    { type: 'divider' },
+                    {
+                      key: 'history',
+                      label: '引用本人对话',
+                      icon: <CommentOutlined />,
+                    },
+                    {
+                      key: 'resources',
+                      label: '引用已有附件',
+                      icon: <FileSearchOutlined />,
+                    },
+                    {
+                      key: 'requirements',
+                      label: '引用需求版本',
+                      icon: <AppIcon name="file" />,
+                    },
+                    {
+                      key: 'knowledge',
+                      label: '引用项目知识',
+                      icon: <AppIcon name="book" />,
+                    },
+                    {
+                      key: 'external',
+                      label: '引用外部 MCP',
+                      icon: <ApiOutlined />,
+                    },
+                  ],
+                  onClick: ({ key }) => {
+                    if (key === 'upload') uploadInput.current?.click();
+                    else if (
+                      key === 'history' ||
+                      key === 'resources' ||
+                      key === 'requirements' ||
+                      key === 'knowledge' ||
+                      key === 'external'
+                    )
+                      openReferences(key);
+                  },
+                }}
+              >
+                <Button
+                  type="text"
+                  icon={<PlusOutlined />}
+                  aria-label="添加附件或引用"
+                  disabled={creating || sending}
+                />
+              </Dropdown>
+              <Space className="composer-model-controls">
+                <Dropdown
+                  trigger={['click']}
+                  placement="topRight"
+                  autoFocus
+                  classNames={{ root: 'workspace-model-picker-menu' }}
+                  open={modelPickerOpen}
+                  onOpenChange={setModelPickerOpen}
+                  disabled={creating || sending || Boolean(uncertain)}
+                  menu={{
+                    selectable: true,
+                    selectedKeys: [
+                      selectedModelId ? 'model:' + selectedModelId : '',
+                      effort ? 'effort:' + effort : '',
+                      'scope:' + dataScope,
+                    ],
+                    items: [
+                      ...(models.length
+                        ? models.map((entry) => ({
+                            key: 'model:' + entry.modelEntryId,
+                            disabled: !entry.available,
+                            label: (
+                              <span className="composer-model-option">
+                                <span>{modelDisplayLabel(entry)}</span>
+                                <small>
+                                  {modelServiceCaption(entry)}
+                                  {!entry.available ? ' · 缺少凭据' : ''}
+                                </small>
+                              </span>
+                            ),
+                            title:
+                              modelDisplayLabel(entry) +
+                              ' · ' +
+                              modelServiceCaption(entry),
+                          }))
+                        : [
+                            {
+                              key: 'empty',
+                              label: modelLoading
+                                ? '正在读取模型'
+                                : '没有可用模型',
+                              disabled: true,
+                            },
+                          ]),
+                      ...(model && model.effortValues.length
+                        ? [
+                            {
+                              key: 'efforts',
+                              label: '思考强度',
+                              children: [
+                                { key: 'effort:', label: '默认' },
+                                ...model.effortValues.map((value) => ({
+                                  key: 'effort:' + value,
+                                  label: value,
+                                })),
+                              ],
+                            },
+                          ]
+                        : []),
+                      {
+                        key: 'scope',
+                        label: '资料范围',
+                        children: [
+                          {
+                            key: 'scope:syntheticPublicOnly',
+                            label: '仅合成 / 公开资料',
+                            disabled: !model?.allowedDataScopes.includes(
+                              'syntheticPublicOnly',
+                            ),
+                          },
+                          {
+                            key: 'scope:authorizedRelevantTestData',
+                            label: '已获准的相关测试资料',
+                            disabled: !model?.allowedDataScopes.includes(
+                              'authorizedRelevantTestData',
+                            ),
+                          },
+                        ],
+                      },
+                      { type: 'divider' },
+                      {
+                        key: 'refresh',
+                        label: '刷新模型列表',
+                        icon: <ReloadOutlined />,
+                      },
+                    ],
+                    onClick: ({ key }) => {
+                      if (key === 'refresh') {
+                        void loadModels();
+                        return;
+                      }
+                      if (key.startsWith('model:')) {
+                        const selected = models.find(
+                          (entry) => entry.modelEntryId === key.slice(6),
+                        );
+                        if (selected) {
+                          setSelectedModelId(selected.modelEntryId);
+                          setSelectedRevision(selected.serviceRevision);
+                          setEffort(selected.defaultEffort);
+                          setModelPickerOpen(false);
+                        }
+                      } else if (key.startsWith('effort:')) {
+                        const value = key.slice(7);
+                        if (!value || model?.effortValues.includes(value))
+                          setEffort(value || null);
+                        setModelPickerOpen(false);
+                      } else if (
+                        key === 'scope:syntheticPublicOnly' ||
+                        key === 'scope:authorizedRelevantTestData'
+                      ) {
+                        const value =
+                          key === 'scope:syntheticPublicOnly'
+                            ? 'syntheticPublicOnly'
+                            : 'authorizedRelevantTestData';
+                        if (model?.allowedDataScopes.includes(value))
+                          setDataScope(value);
+                        setModelPickerOpen(false);
+                      }
+                    },
+                  }}
+                >
+                  <Button
+                    type="text"
+                    className="composer-model-trigger"
+                    aria-label="本条消息模型与参数"
+                    title={model ? modelDisplayLabel(model) : '选择模型'}
+                  >
+                    <span>
+                      {model ? modelDisplayLabel(model) : '选择模型'}
+                      {model && effort ? ' · ' + effort : ''}
+                    </span>
+                    <AppIcon name="down" />
+                  </Button>
+                </Dropdown>
+                {inFlight ? (
+                  <Button
+                    className="send-message-button stop-message-button"
+                    shape="circle"
+                    type="primary"
+                    aria-label={
+                      taskMatches && stream.task?.status === 'cancelling'
+                        ? '正在停止回复'
+                        : '停止回复'
+                    }
+                    aria-disabled={
+                      sending ||
+                      (taskMatches && stream.task?.status === 'cancelling')
+                    }
+                    aria-busy={sending}
+                    icon={
+                      <span
+                        className="composer-stop-square"
+                        aria-hidden="true"
+                      />
+                    }
+                    onClick={() => {
+                      if (
+                        !sending &&
+                        !(taskMatches && stream.task?.status === 'cancelling')
+                      )
+                        void stopReply();
+                    }}
+                  />
+                ) : (
+                  <Button
+                    className="send-message-button"
+                    shape="circle"
+                    aria-label="发送消息"
+                    type="primary"
+                    icon={<AppIcon name="send" />}
+                    loading={creating || sending}
+                    disabled={
+                      pending ||
+                      conversationLoading ||
+                      Boolean(activeId && !active) ||
+                      Boolean(targetProjectId && !targetProject) ||
+                      !content.trim() ||
+                      Boolean(active?.archivedAt) ||
+                      Boolean(uncertain) ||
+                      Boolean(
+                        !activeId &&
+                        (unresolvedCreates.length || createRecoveryError),
+                      ) ||
+                      uploading.some((entry) => !entry.error) ||
+                      Boolean(
+                        model && effort && !model.effortValues.includes(effort),
+                      )
+                    }
+                    onClick={() => void submitMessage()}
+                  />
+                )}
+              </Space>
+            </div>
+          </div>
+        </div>
+      </section>
+      <Modal
+        title="编辑个人显示名称"
+        zIndex={uiLayers.dialog}
+        afterClose={() => aliasReturnFocus.current?.()}
+        open={aliasTarget !== null}
+        onCancel={() => setAliasTarget(null)}
+        onOk={() => aliasForm.submit()}
+        confirmLoading={pending}
+        width={610}
+        okText="保存名称"
+        cancelText="取消"
+        destroyOnHidden
+      >
+        {aliasError && <Alert type="error" title={aliasError} showIcon />}
+        {aliasTarget && (
+          <Button
+            type="link"
+            disabled={pending}
+            onClick={() => void restoreDefaultAlias()}
+          >
+            恢复默认名称
+          </Button>
+        )}
+        <Form
+          form={aliasForm}
+          layout="vertical"
+          onFinish={(values: { alias: string }) => void saveAlias(values)}
+        >
+          <Form.Item
+            name="alias"
+            label="个人显示名称"
+            rules={[{ required: true, whitespace: true, max: 200 }]}
+          >
+            <Input autoFocus maxLength={200} disabled={pending} />
+          </Form.Item>
+          {aliasTarget && (
+            <AuxiliaryAction
+              label="AI 生成精简名"
+              source={() =>
+                aliasTarget.type === 'conversation'
+                  ? {
+                      purpose: 'alias',
+                      conversationId: aliasTarget.conversation.id,
+                      baseRowVersion: aliasTarget.conversation.rowVersion,
+                      text: aliasTarget.conversation.title,
+                    }
+                  : {
+                      purpose: 'alias',
+                      projectId: aliasTarget.group.projectId,
+                      requirementId: aliasTarget.group.requirementId,
+                      baseRowVersion: aliasTarget.group.rowVersion,
+                      text: aliasTarget.group.formalTitle,
+                    }
+              }
+              onUse={(result) => {
+                if (result.purpose === 'alias')
+                  aliasForm.setFieldValue('alias', result.suggestedName);
+              }}
+            />
+          )}
+        </Form>
+        <Typography.Text type="secondary">
+          只改本人侧栏显示，不改正式需求名称。
+        </Typography.Text>
+      </Modal>
+      <Modal
+        title="本人模型过程与工具回执"
+        zIndex={uiLayers.dialog}
+        open={proposalTaskId !== null}
+        onCancel={() => setProposalTaskId(null)}
+        footer={null}
+        width={800}
+        destroyOnHidden
+      >
+        {proposalTaskId && (
+          <>
+            <HistoricalModelTask
+              key={`model:${proposalTaskId}`}
+              taskId={proposalTaskId}
+            />
+            <BusinessConfirmationsPanel
+              key={`business:${proposalTaskId}`}
+              taskId={proposalTaskId}
+            />
+            <ExternalMcpInvocationsPanel
+              key={`external:${proposalTaskId}`}
+              taskId={proposalTaskId}
+            />
+          </>
+        )}
+      </Modal>
+    </div>
+  );
+}
+
+function HistoricalModelTask({ taskId }: { taskId: string }) {
+  const stream = useAiTask(taskId);
+  return (
+    <section className="mb">
+      <h3>原任务模型过程</h3>
+      {stream.error && !stream.retry && (
+        <Alert
+          type="warning"
+          className="section-alert"
+          showIcon
+          title={stream.error}
+        />
+      )}
+      {stream.retry && (
+        <AiRetryStatus
+          state={stream.retry}
+          onCancel={stream.pause}
+          onReconnect={stream.reconnect}
+        />
+      )}
+      {stream.task ? (
+        <>
+          <p className="caption">
+            {taskStateLabels[stream.task.status]} · 原任务 {stream.task.id}
+          </p>
+          <ModelAttemptFragments task={stream.task} />
+          <ModelRetryStatus task={stream.task} />
+          {!stream.task.modelAttempts.length && (
+            <p className="caption">
+              该任务未记录模型尝试分段；不推断旧内容是否发生过重试。
+            </p>
+          )}
+        </>
+      ) : (
+        !stream.error && <Skeleton active paragraph={{ rows: 2 }} />
+      )}
+      <Button size="small" onClick={stream.reconnect}>
+        只读查询原任务
+      </Button>
+    </section>
+  );
+}
