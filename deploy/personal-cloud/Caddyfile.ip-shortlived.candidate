@@ -89,6 +89,9 @@ https://{$AITESTHUB_PUBLIC_IP} {
 
     handle {
         reverse_proxy 127.0.0.1:5300 {
+            # Web authentication uses its Cookie. Ignore cached browser Basic
+            # headers; the dedicated Bearer routes above keep their own handling.
+            header_up -Authorization
             flush_interval -1
         }
     }
