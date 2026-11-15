@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - 'feat/**'
+      - 'fix/**'
+      - 'docs/**'
+      - 'chore/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up the declared Node version
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: package.json
+          package-manager-cache: false
+      - name: Install the declared pnpm version
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const metadata = JSON.parse(readFileSync('package.json', 'utf8'));
+          assert.match(metadata.packageManager, /^pnpm@[0-9]+\.[0-9]+\.[0-9]+$/);
+          assert.equal(process.versions.node, metadata.engines.node);
+          execFileSync('npm', ['install', '--global', metadata.packageManager, '--ignore-scripts', '--no-audit', '--no-fund'], { stdio: 'inherit' });
+          NODE
+      - name: Install locked dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir tooling/local-client --ignore-workspace install --frozen-lockfile
+      - name: Check formatting and types
+        run: pnpm quality:check
+      - name: Build application
+        run: pnpm build
+      - name: Summarize the check boundary
+        shell: bash
+        run: |
+          printf '%s\n' '### CI checks passed' 'Formatting, TypeScript and application builds passed. Private local test suites, UI execution and real model/target calls are outside this workflow.' >> "$GITHUB_STEP_SUMMARY"

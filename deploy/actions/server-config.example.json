@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "ath.actions-host.v1",
+  "repository": "example/aitesthub",
+  "platformId": "11111111-1111-4111-8111-111111111111",
+  "privateRoot": "/srv/aitesthub-private",
+  "releaseRoot": "/srv/aitesthub/releases",
+  "stateRoot": "/srv/aitesthub-private/setup/actions-cicd",
+  "cloudEnv": "/srv/aitesthub-private/cloud.env",
+  "opsEnv": "/srv/aitesthub-private/ops.env",
+  "opsUnit": "aitesthub-ops.service",
+  "opsUser": "deployment-operator",
+  "opsDropIn": "/etc/systemd/system/aitesthub-ops.service.d/90-code-only-release.conf",
+  "composeFiles": [
+    "/srv/aitesthub/deploy/personal-cloud/compose.yaml",
+    "/srv/aitesthub/releases/example/operator/compose.overlay.yaml"
+  ],
+  "composeProfiles": ["workers"],
+  "services": {
+    "api": "api",
+    "apiWorker": "api-worker",
+    "aiWorker": "ai-worker"
+  },
+  "containers": {
+    "api": "aitesthub-api-1",
+    "apiWorker": "aitesthub-api-worker-1",
+    "aiWorker": "aitesthub-ai-worker-1",
+    "database": "aitesthub-postgres"
+  },
+  "healthOrigin": "http://127.0.0.1:5300",
+  "proxy": {
+    "unit": "aitesthub-caddy.service",
+    "configFile": "/srv/aitesthub/deploy/personal-cloud/Caddyfile.ip-shortlived.candidate",
+    "adminOrigin": "http://127.0.0.1:2019"
+  },
+  "qualificationPublicKey": "REPLACE_WITH_REVIEWED_ED25519_PUBLIC_KEY_PEM",
+  "qualificationMaxAgeHours": 168
+}

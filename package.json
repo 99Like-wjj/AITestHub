@@ -17,7 +17,7 @@
     "dev:web": "vite --config apps/web/vite.config.ts",
     "start:api": "node dist/apps/api/src/main.js",
     "db:migrate": "pnpm build:server && node dist/scripts/migrate.js",
-    "format:check": "prettier --check \"apps/**/*.{ts,tsx}\" \"packages/**/*.ts\" \"scripts/*.{ts,mjs}\" \"deploy/**/*.{mjs,yaml,json}\" \"tooling/local-client/src/**/*.ts\" \"tooling/local-client/scripts/*.mjs\" package.json tsconfig.server.json tsconfig.tools.json",
+    "format:check": "prettier --check \"apps/**/*.{ts,tsx}\" \"packages/**/*.ts\" \"scripts/*.{ts,mjs}\" \"deploy/**/*.{mjs,yaml,json}\" \"tooling/local-client/src/**/*.ts\" \"tooling/local-client/scripts/*.mjs\" package.json tsconfig.server.json tsconfig.tools.json \".github/workflows/*.yml\"",
     "format:docs": "prettier --check AGENTS.md AGENTS.example.md CONTRIBUTING.md SECURITY.md README.md SOURCE_PUBLICATION.md \"docs/development/*.md\" .github/pull_request_template.md .prettierrc.json",
     "quality:check": "pnpm format:check && pnpm format:docs && pnpm typecheck && pnpm quality:client",
     "quality:client": "pnpm --dir tooling/local-client --ignore-workspace typecheck"

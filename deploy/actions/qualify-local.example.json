@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "ath.actions-local-config.v1",
+  "repository": "example/aitesthub",
+  "dockerExecutable": "/usr/bin/docker",
+  "dockerContext": "default",
+  "applicationContainers": [
+    "example-api",
+    "example-api-worker",
+    "example-ai-worker"
+  ],
+  "databaseContainer": "example-database",
+  "databaseUser": "example_admin",
+  "databaseName": "example_database",
+  "readyUrl": "http://127.0.0.1:5300/api/v1/health/ready",
+  "signingKeyFile": "/path/outside/source/qualification-private.pem"
+}

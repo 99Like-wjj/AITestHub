@@ -1,0 +1,71 @@
+name: Deploy Cloud
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Plan is read-only; deploy requires a registered local qualification'
+        type: choice
+        options: [plan, deploy, status]
+        default: plan
+        required: true
+      build_run_id:
+        description: 'Successful main Build Image run ID (required for plan/deploy)'
+        type: string
+        required: false
+      operation_id:
+        description: 'Original operation UUID (required for status; do not retry unknown deploys)'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
+concurrency:
+  group: ${{ inputs.mode == 'deploy' && 'cloud-deployment' || format('cloud-observation-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout trusted deployment client
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: package.json
+      - name: Run explicit cloud operation
+        id: request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATH_DEPLOY_HOST: ${{ secrets.ATH_DEPLOY_HOST }}
+          ATH_DEPLOY_USER: ${{ secrets.ATH_DEPLOY_USER }}
+          ATH_DEPLOY_SSH_KEY: ${{ secrets.ATH_DEPLOY_SSH_KEY }}
+          ATH_DEPLOY_KNOWN_HOSTS: ${{ secrets.ATH_DEPLOY_KNOWN_HOSTS }}
+          REQUEST_MODE: ${{ inputs.mode }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          OPERATION_ID: ${{ inputs.operation_id }}
+        shell: bash
+        run: |
+          args=(--action "$REQUEST_MODE" --output cloud-result.json)
+          if [ "$REQUEST_MODE" = status ]; then
+            args+=(--operation-id "$OPERATION_ID")
+          else
+            args+=(--run-id "$BUILD_RUN_ID")
+          fi
+          node deploy/actions/client.mjs "${args[@]}"
+      - name: Preserve operation receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cloud-operation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: cloud-result.json
+          if-no-files-found: warn
+          retention-days: 30
