@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Button, Empty, Popover, Slider, Spin } from 'antd';
-import { CheckOutlined, RightOutlined } from '@ant-design/icons';
+import { CheckOutlined, DownOutlined, RightOutlined } from '@ant-design/icons';
 import type { AvailableModelV2 } from '../../../packages/contracts/src/model-configuration-v2';
 import { modelDisplayLabel, modelServiceCaption } from './model-display-label';
 
@@ -33,19 +33,20 @@ export function WorkspaceModelPicker({
   loading: boolean;
   onOpenChange: (open: boolean) => void;
   onModel: (model: AvailableModelV2) => void;
-  onEffort: (value: string) => void;
+  onEffort: (value: string | null) => void;
 }) {
   const [choosingModel, setChoosingModel] = useState(false);
   useEffect(() => {
     if (!open) setChoosingModel(false);
   }, [open]);
   const levels = model?.effortValues ?? [];
-  const index = Math.max(
-    0,
-    levels.indexOf(effort ?? model?.defaultEffort ?? ''),
-  );
-  const current = levels[index];
-  const label = current ? (effortNames[current] ?? current) : 'Standard';
+  const choices = [null, ...levels];
+  const index = Math.max(0, choices.indexOf(effort));
+  const label = effort === null ? 'Default' : (effortNames[effort] ?? effort);
+  const choiceLabel = (position: number) => {
+    const value = choices[position];
+    return value ? (effortNames[value] ?? value) : 'Default';
+  };
   return (
     <Popover
       trigger="click"
@@ -111,45 +112,34 @@ export function WorkspaceModelPicker({
                 <RightOutlined />
               </span>
             </button>
-            {levels.length > 1 ? (
+            {levels.length ? (
               <Slider
-                ariaLabelForHandle="模型思考强度"
-                ariaValueTextFormatterForHandle={(position) => {
-                  const value = levels[position];
-                  return value ? (effortNames[value] ?? value) : '';
-                }}
+                ariaLabelForHandle="模型思考强度，Default 表示不指定"
+                ariaValueTextFormatterForHandle={choiceLabel}
                 min={0}
-                max={levels.length - 1}
+                max={choices.length - 1}
                 step={1}
                 value={index}
                 dots
                 marks={Object.fromEntries(
-                  levels.map((value, position) => [
+                  choices.map((_, position) => [
                     position,
                     {
                       label: '',
                       style: {},
-                      title: effortNames[value] ?? value,
+                      title: choiceLabel(position),
                     },
                   ]),
                 )}
                 tooltip={{
-                  formatter: (position) => {
-                    const value = levels[position ?? 0];
-                    return value ? (effortNames[value] ?? value) : '';
-                  },
+                  formatter: (position) => choiceLabel(position ?? 0),
                 }}
                 onChange={(position) => {
-                  const value = levels[position];
-                  if (value) onEffort(value);
+                  onEffort(choices[position] ?? null);
                 }}
               />
             ) : (
-              <div className="workspace-effort-note">
-                {levels.length
-                  ? '此模型仅支持当前思考等级'
-                  : '此模型未提供可调思考等级'}
-              </div>
+              <div className="workspace-effort-note">Uses model defaults</div>
             )}
           </div>
         )
@@ -162,11 +152,11 @@ export function WorkspaceModelPicker({
         aria-label="本条消息模型与参数"
         title={model ? modelDisplayLabel(model) : '选择模型'}
       >
-        <span>
+        <span className="composer-model-label">
           {model ? modelDisplayLabel(model) : '选择模型'}
-          {current ? ` · ${label}` : ''}
+          {effort !== null ? ` · ${label}` : ''}
         </span>
-        <span aria-hidden="true">⌄</span>
+        <DownOutlined className="composer-model-chevron" aria-hidden="true" />
       </Button>
     </Popover>
   );

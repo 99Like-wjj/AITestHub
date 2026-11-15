@@ -65,10 +65,23 @@
   gap: 7px;
   font-size: 12px;
 }
-.user-composer .composer-model-trigger > span {
+.user-composer .composer-model-trigger .composer-model-label {
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.user-composer .composer-model-trigger .composer-model-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  line-height: 1;
+}
+.user-composer .composer-model-chevron svg {
+  display: block;
 }
 .user-composer .composer-model-trigger .ico {
   width: 13px;

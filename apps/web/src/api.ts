@@ -4,6 +4,7 @@ import {
   identityContextEpoch,
   currentIdentityOwner,
   identityRecheckPending,
+  type IdentityChangeReason,
 } from './identity-context';
 import {
   makeIdentityCommand,
@@ -24,6 +25,21 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+export function isSessionDenial(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError &&
+    error.status === 401 &&
+    error.code === 'UNAUTHENTICATED'
+  );
+}
+
+export function sessionDenialReason(error: ApiError): IdentityChangeReason {
+  if (error.details?.reason === 'session-expired') return 'session-expired';
+  if (error.details?.reason === 'session-invalidated')
+    return 'account-security-changed';
+  return 'session-unknown';
 }
 
 export function isUncertainMutationError(error: unknown): error is ApiError {
@@ -120,6 +136,14 @@ export async function api(
       '/auth/reset-password',
       '/me/password',
     ].includes(path);
+  const changedReason: IdentityChangeReason =
+    path === '/auth/login'
+      ? 'login'
+      : path === '/auth/logout'
+        ? 'logout'
+        : path === '/me/password'
+          ? 'password-changed'
+          : 'password-reset';
   const timeout = AbortSignal.timeout(
     options.timeoutMs ?? (options.rawBody ? 180_000 : 30_000),
   );
@@ -149,7 +173,7 @@ export async function api(
     });
   } catch (error) {
     if (originalCommand) uncertainIdentityCommand(originalCommand);
-    if (changesIdentity) announceIdentityChange();
+    if (changesIdentity) announceIdentityChange('session-unknown');
     if (
       options.signal?.aborted &&
       error instanceof DOMException &&
@@ -166,7 +190,7 @@ export async function api(
   }
   const responseStatus = response.status;
   if (changesIdentity && (response.ok || responseStatus >= 500))
-    announceIdentityChange();
+    announceIdentityChange(response.ok ? changedReason : 'session-unknown');
   let value: unknown;
   if (responseStatus !== 204) {
     try {
@@ -198,11 +222,16 @@ export async function api(
     const error = errorObject(value);
     if (
       responseStatus === 401 &&
+      error.code === 'UNAUTHENTICATED' &&
       !options.signal?.aborted &&
       !path.startsWith('/auth/') &&
       path !== '/me'
     ) {
-      window.dispatchEvent(new Event('aitesthub:session-expired'));
+      window.dispatchEvent(
+        new CustomEvent('aitesthub:session-expired', {
+          detail: { reason: error.details?.reason },
+        }),
+      );
     }
     const failure = new ApiError(
       error.message ?? `请求未完成（HTTP ${responseStatus}）`,

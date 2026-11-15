@@ -23,6 +23,7 @@ import {
 import type { ActorContext } from '../../../packages/contracts/src/identity.js';
 import { Database } from '../../../packages/persistence/src/database.js';
 import { IdentityService } from '../../../packages/application/src/identity/service.js';
+import { WebSessionService } from '../../../packages/application/src/identity/web-session.js';
 import { ProjectService } from '../../../packages/application/src/projects/service.js';
 import { DomainError } from '../../../packages/application/src/errors.js';
 import { RequirementService } from '../../../packages/application/src/requirements/service.js';
@@ -110,13 +111,14 @@ function bearerFrom(req: Request): string | undefined {
   return value.slice(7);
 }
 
-function cookie(res: Response, value: string, clear = false) {
+function cookie(res: Response, value: string, expiresAt: string | null) {
   res.cookie('ath_session', value, {
     httpOnly: true,
     sameSite: 'strict',
     secure: process.env.AITESTHUB_COOKIE_SECURE === 'true',
     path: '/',
-    maxAge: clear ? 0 : 12 * 60 * 60_000,
+    maxAge:
+      expiresAt === null ? 0 : Math.max(0, Date.parse(expiresAt) - Date.now()),
   });
 }
 
@@ -207,7 +209,7 @@ class ApiController {
     if (path === 'auth/login' && method === 'POST') {
       authLimit(req);
       const result = await this.identity.login(body);
-      cookie(res, result.session);
+      cookie(res, result.session, result.sessionInfo.cookieExpiresAt);
       return res.json({ user: result.user });
     }
     if (path === 'auth/reset-password' && method === 'POST') {
@@ -228,16 +230,34 @@ class ApiController {
       );
     if (path === 'me' && method === 'GET')
       return res.json(await this.identity.me(actor));
+    if (path === 'auth/session' && method === 'GET')
+      return res.json({
+        session: await new WebSessionService(this.db).status(
+          actor,
+          sessionFrom(req),
+        ),
+      });
+    if (path === 'auth/session/renew' && method === 'POST') {
+      const currentSession = sessionFrom(req);
+      if (!currentSession)
+        throw new DomainError('UNAUTHENTICATED', '请先登录。', 401);
+      const result = await new WebSessionService(this.db).renew(
+        actor,
+        currentSession,
+        body,
+      );
+      return res.json(result);
+    }
     if (path === 'me' && method === 'PUT')
       return res.json(await this.identity.updateProfile(actor, body));
     if (path === 'auth/logout' && method === 'POST') {
       await this.identity.logout(sessionFrom(req));
-      cookie(res, '', true);
+      cookie(res, '', null);
       return res.json({ completed: true });
     }
     if (path === 'me/password' && method === 'POST') {
       await this.identity.changePassword(actor, body);
-      cookie(res, '', true);
+      cookie(res, '', null);
       return res.json({ completed: true });
     }
     if (path === 'me/keys' && method === 'GET')

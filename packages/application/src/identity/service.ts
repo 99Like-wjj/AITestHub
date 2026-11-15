@@ -29,6 +29,8 @@ import {
   randomSecret,
   secretHash,
 } from './password.js';
+import { createWebSession, readWebSession } from './web-session.js';
+import type { WebSessionInfo } from '../../../contracts/src/web-session.js';
 
 interface UserRow {
   id: string;
@@ -93,7 +95,9 @@ export class IdentityService {
     });
   }
 
-  async login(raw: unknown): Promise<{ user: User; session: string }> {
+  async login(
+    raw: unknown,
+  ): Promise<{ user: User; session: string; sessionInfo: WebSessionInfo }> {
     const input = loginInputSchema.parse(raw);
     const result = await this.db.query<UserRow>(
       'SELECT * FROM app.users WHERE account=$1',
@@ -124,12 +128,13 @@ export class IdentityService {
           401,
         );
       }
-      await tx.query(
-        `INSERT INTO app.sessions(id_hash,user_id,credential_version,expires_at)
-         VALUES($1,$2,$3,clock_timestamp()+interval '12 hours')`,
-        [secretHash(session), user.id, user.credential_version],
+      const sessionInfo = await createWebSession(
+        tx,
+        user.id,
+        user.credential_version,
+        session,
       );
-      return { user: userDto(locked), session };
+      return { user: userDto(locked), session, sessionInfo };
     });
   }
 
@@ -155,14 +160,8 @@ export class IdentityService {
           requestId,
         };
     } else if (session) {
-      const result = await this.db.query<{ user_id: string }>(
-        `SELECT s.user_id FROM app.sessions s JOIN app.users u ON u.id=s.user_id
-         WHERE s.id_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()
-           AND u.active AND s.credential_version=u.credential_version`,
-        [secretHash(session)],
-      );
-      const row = result.rows[0];
-      if (row) return { userId: row.user_id, entrypoint: 'web', requestId };
+      const current = await readWebSession(this.db, session);
+      return { userId: current.row.user_id, entrypoint: 'web', requestId };
     }
     throw new DomainError(
       'UNAUTHENTICATED',

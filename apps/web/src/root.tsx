@@ -38,12 +38,20 @@ import {
 } from '@ant-design/icons';
 import { meSchema } from '../../../packages/contracts/src/identity';
 import { idSchema } from '../../../packages/contracts/src/base';
-import { api, ApiError, describeError } from './api';
+import {
+  api,
+  describeError,
+  isSessionDenial,
+  sessionDenialReason,
+} from './api';
 import {
   announceIdentityChange,
   subscribeIdentityChanges,
   setIdentityOwner,
+  lastIdentityChangeReason,
+  identityChangeNotice,
 } from './identity-context';
+import { useSessionRenewal } from './session-renewal';
 import { AuthPage } from './auth';
 import { IdentityCommandRecovery } from './identity-command-recovery';
 import { roleLabels } from './types';
@@ -889,6 +897,7 @@ export function Root() {
   const epoch = useRef(0);
   const meRequest = useRef(0),
     ownerScope = useRef<string | null>(null);
+  useSessionRenewal(me?.user.id ?? null);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const requestEpoch = epoch.current;
@@ -912,13 +921,14 @@ export function Root() {
             .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
         ]);
         if (ownerScope.current !== null && ownerScope.current !== scope) {
-          announceIdentityChange();
+          announceIdentityChange('account-security-changed');
           return;
         }
         ownerScope.current = scope;
         setIdentityOwner(response.user.id);
         setMe(response);
         setError(undefined);
+        setAuthNotice(undefined);
       }
     } catch (err) {
       if (
@@ -927,9 +937,9 @@ export function Root() {
         serial !== meRequest.current
       )
         return;
-      if (err instanceof ApiError && err.status === 401) {
+      if (isSessionDenial(err)) {
         if (ownerScope.current !== null) {
-          announceIdentityChange();
+          announceIdentityChange(sessionDenialReason(err));
           return;
         }
         setMe(null);
@@ -969,9 +979,7 @@ export function Root() {
       setMe(null);
       setLoading(true);
       setError(undefined);
-      setAuthNotice(
-        '账号状态已变化，已清除旧页面范围。请按当前身份继续；原操作回执仍按原身份查询。',
-      );
+      setAuthNotice(identityChangeNotice(lastIdentityChangeReason()));
       void refresh().catch(() => undefined);
     });
   }, [refresh]);
@@ -988,8 +996,16 @@ export function Root() {
     };
   }, [refresh]);
   useEffect(() => {
-    const listener = () => {
-      announceIdentityChange();
+    const listener = (event: Event) => {
+      const reason: unknown =
+        event instanceof CustomEvent ? event.detail?.reason : undefined;
+      announceIdentityChange(
+        reason === 'session-expired'
+          ? 'session-expired'
+          : reason === 'session-invalidated'
+            ? 'account-security-changed'
+            : 'session-unknown',
+      );
     };
     window.addEventListener('aitesthub:session-expired', listener);
     return () =>

@@ -661,8 +661,9 @@ export class ModelConfigurationV2Service {
       frozen.data.modelService.serviceRevision !== row.config_revision
     )
       throw unavailable();
-    const effort =
-      input.effort === undefined ? model.defaultEffort : input.effort;
+    // An omitted/null per-message effort uses the provider's own default.
+    // A configured menu default is not an implicit override of that choice.
+    const effort = input.effort ?? null;
     if (effort !== null && !model.effortValues.includes(effort))
       throw new DomainError(
         'PRECONDITIONS_MISSING',

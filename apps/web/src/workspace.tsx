@@ -100,6 +100,12 @@ import {
 } from './workspace-access';
 import { WorkspaceModelPicker } from './workspace-model-picker';
 import {
+  chooseWorkspaceModel,
+  rememberWorkspaceModelSelection,
+  restoreWorkspaceModelPreference,
+  type WorkspaceModelPreference,
+} from './workspace-model-preference';
+import {
   WorkspacePendingMessages,
   useWorkspaceSendQueue,
 } from './workspace-queue-controller';
@@ -197,9 +203,13 @@ export function Workspace({
   const [models, setModels] = useState<AvailableModelV2[]>([]);
   const [modelError, setModelError] = useState<string>();
   const [modelLoading, setModelLoading] = useState(true);
-  const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
-  const [selectedRevision, setSelectedRevision] = useState<number | null>(null);
-  const [effort, setEffort] = useState<string | null>(null);
+  const [modelPreference, setModelPreference] =
+    useState<WorkspaceModelPreference | null>(null);
+  const selection =
+    modelPreference?.ownerId === me.user.id ? modelPreference : null;
+  const selectedModelId = selection?.modelEntryId ?? null;
+  const selectedRevision = selection?.serviceRevision ?? null;
+  const effort = selection?.effort ?? null;
   const [activeId, setActiveId] = useState<string | null>(conversationFromUrl);
   const activeRef = useRef(activeId);
   const pendingMessages = useWorkspaceSendQueue(me.user.id, activeId);
@@ -319,7 +329,11 @@ export function Workspace({
       event.type === 'ai.tool' &&
       (event.payload.confirmationId || event.payload.externalInvocationId),
   ).length;
-  const model = models.find((entry) => entry.modelEntryId === selectedModelId);
+  const model = models.find(
+    (entry) =>
+      entry.modelEntryId === selectedModelId &&
+      entry.modelServiceId === selection?.modelServiceId,
+  );
   const active = detail?.conversation ?? null;
   const scroll = useWorkspaceScroll(activeId);
   const mention = composing ? null : composerTrigger(content, caret);
@@ -364,7 +378,7 @@ export function Workspace({
         : true),
   );
   const selectionCurrent = Boolean(
-    model && model.serviceRevision === selectedRevision,
+    model?.available && model.serviceRevision === selectedRevision,
   );
   const targetProject = me.projects.find(
     (entry) => entry.id === targetProjectId,
@@ -445,6 +459,7 @@ export function Workspace({
     if (taskMatches) void loadSidebar(undefined, true);
   }, [stream.task?.id, stream.task?.status, taskMatches]);
   async function loadModels(signal?: AbortSignal) {
+    const ownerId = me.user.id;
     setModelLoading(true);
     try {
       const response = await api(
@@ -452,8 +467,11 @@ export function Workspace({
         signal ? { signal } : {},
         modelsSchema,
       );
-      if (!signal?.aborted) {
+      if (!signal?.aborted && currentIdentityOwner() === ownerId) {
         setModels(response.models);
+        setModelPreference(
+          restoreWorkspaceModelPreference(ownerId, response.models),
+        );
         setModelError(undefined);
       }
     } catch (error) {
@@ -519,6 +537,8 @@ export function Workspace({
   }, [project?.id]);
   useEffect(() => {
     const controller = new AbortController();
+    setModels([]);
+    setModelPreference(null);
     void loadModels(controller.signal);
     return () => controller.abort();
   }, [me.user.id]);
@@ -1457,7 +1477,7 @@ export function Workspace({
           modelServiceId: model.modelServiceId,
           modelEntryId: model.modelEntryId,
           serviceRevision: model.serviceRevision,
-          effort,
+          ...(effort !== null ? { effort } : {}),
         },
         dataScope,
         accessMode,
@@ -1532,6 +1552,11 @@ export function Workspace({
           { method: 'POST', body: payload },
           taskAcceptedSchema,
         );
+        if (
+          sendEpoch === identityContextEpoch() &&
+          currentIdentityOwner() === me.user.id
+        )
+          rememberWorkspaceModelSelection(me.user.id, payload.modelSelection);
         sendTimings.current.set(result.taskId, {
           submittedAt,
           acceptedAt: performance.now(),
@@ -1594,6 +1619,7 @@ export function Workspace({
   }
   async function recoverSend() {
     if (!uncertain) return;
+    const sendEpoch = identityContextEpoch();
     setSending(true);
     try {
       const receipt = await readWorkspaceSendReceipt(
@@ -1601,6 +1627,14 @@ export function Workspace({
         uncertain.conversationId,
         uncertain.commandId,
       );
+      if (
+        sendEpoch === identityContextEpoch() &&
+        currentIdentityOwner() === me.user.id
+      )
+        rememberWorkspaceModelSelection(
+          me.user.id,
+          uncertain.input.modelSelection,
+        );
       const clearComposer = clearSubmittedDraft(
         drafts.current,
         uncertain.conversationId,
@@ -2530,11 +2564,19 @@ export function Workspace({
                   loading={modelLoading}
                   disabled={creating || sending || Boolean(uncertain)}
                   onModel={(selected) => {
-                    setSelectedModelId(selected.modelEntryId);
-                    setSelectedRevision(selected.serviceRevision);
-                    setEffort(selected.defaultEffort);
+                    if (currentIdentityOwner() !== me.user.id) return;
+                    setModelPreference((previous) =>
+                      chooseWorkspaceModel(me.user.id, selected, previous),
+                    );
                   }}
-                  onEffort={setEffort}
+                  onEffort={(next) => {
+                    if (currentIdentityOwner() !== me.user.id) return;
+                    setModelPreference((previous) =>
+                      previous?.ownerId === me.user.id
+                        ? { ...previous, effort: next }
+                        : previous,
+                    );
+                  }}
                 />
                 {inFlight ? (
                   <>

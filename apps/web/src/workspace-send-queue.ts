@@ -44,7 +44,11 @@ export interface WorkspaceQueuePorts {
   cancel: (taskId: string, commandId: string) => Promise<void>;
   send: (conversationId: string, input: SendMessageInput) => Promise<Accepted>;
   receipt: (conversationId: string, commandId: string) => Promise<Accepted>;
-  accepted: (conversationId: string, receipt: Accepted) => void;
+  accepted: (
+    conversationId: string,
+    receipt: Accepted,
+    input: SendMessageInput,
+  ) => void;
   uncertain: (error: unknown) => boolean;
   errorText: (error: unknown) => string;
 }
@@ -206,7 +210,7 @@ export class WorkspaceSendQueue {
           queue.blockingTaskId = receipt.taskId;
           queue.paused = null;
           this.save();
-          this.ports.accepted(conversationId, receipt);
+          this.ports.accepted(conversationId, receipt, item.input);
         } catch (error) {
           if (!queue.items.includes(item)) queue.items.unshift(item);
           item.state = 'unknown';
@@ -301,7 +305,7 @@ export class WorkspaceSendQueue {
           queue.items = queue.items.filter((entry) => entry !== item);
           queue.blockingTaskId = receipt.taskId;
           this.save();
-          this.ports.accepted(conversationId, receipt);
+          this.ports.accepted(conversationId, receipt, item.input);
         } catch (error) {
           if (!queue.items.includes(item)) queue.items.unshift(item);
           item.state =

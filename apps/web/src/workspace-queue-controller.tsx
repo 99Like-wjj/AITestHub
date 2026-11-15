@@ -13,6 +13,7 @@ import {
 } from '../../../packages/contracts/src/conversations';
 import { readWorkspaceSendReceipt } from './workspace-send-receipt';
 import { workspaceQueueStorageKey } from './workspace-queue-storage';
+import { rememberWorkspaceModelSelection } from './workspace-model-preference';
 import {
   WorkspaceSendQueue,
   savedWorkspaceQueueSchema,
@@ -109,12 +110,14 @@ function controller(ownerId: string) {
       receipt: async (conversationId, commandId) =>
         (await readWorkspaceSendReceipt(ownerId, conversationId, commandId))
           .receipt,
-      accepted: (conversationId, receipt) =>
+      accepted: (conversationId, receipt, input) => {
+        rememberWorkspaceModelSelection(ownerId, input.modelSelection);
         window.dispatchEvent(
           new CustomEvent('aitesthub:queued-message-accepted', {
             detail: { ownerId, conversationId, receipt },
           }),
-        ),
+        );
+      },
       uncertain: isUncertainMutationError,
       errorText: describeError,
     },

@@ -38,34 +38,48 @@ const limit = z
   .positive()
   .max(Number.MAX_SAFE_INTEGER)
   .nullable();
+const modelEntryShapeV2 = {
+  id: idSchema,
+  displayName: titleSchema,
+  modelId: modelIdValue,
+  enabled: z.boolean(),
+  contextLimit: limit,
+  effortValues: z.array(modelEffortSchema).max(20),
+  defaultEffort: modelEffortSchema.nullable(),
+  maxOutput: limit,
+};
+const checkModelEntryV2 = (
+  input: { effortValues: string[]; defaultEffort: string | null },
+  ctx: z.RefinementCtx,
+) => {
+  if (new Set(input.effortValues).size !== input.effortValues.length)
+    ctx.addIssue({
+      code: 'custom',
+      path: ['effortValues'],
+      message: '强度不可重复',
+    });
+  if (
+    input.defaultEffort !== null &&
+    !input.effortValues.includes(input.defaultEffort)
+  )
+    ctx.addIssue({
+      code: 'custom',
+      path: ['defaultEffort'],
+      message: '默认强度须在配置清单中',
+    });
+};
 export const modelEntryInputV2Schema = z
   .strictObject({
-    id: idSchema,
-    displayName: titleSchema,
-    modelId: modelIdValue,
-    enabled: z.boolean(),
-    contextLimit: limit,
-    effortValues: z.array(modelEffortSchema).max(20),
-    defaultEffort: modelEffortSchema.nullable(),
-    maxOutput: limit,
+    ...modelEntryShapeV2,
+    effortValues: modelEntryShapeV2.effortValues.default(() => []),
+    defaultEffort: modelEntryShapeV2.defaultEffort.default(null),
   })
-  .superRefine((input, ctx) => {
-    if (new Set(input.effortValues).size !== input.effortValues.length)
-      ctx.addIssue({
-        code: 'custom',
-        path: ['effortValues'],
-        message: '强度不可重复',
-      });
-    if (
-      input.defaultEffort !== null &&
-      !input.effortValues.includes(input.defaultEffort)
-    )
-      ctx.addIssue({
-        code: 'custom',
-        path: ['defaultEffort'],
-        message: '默认强度须在配置清单中',
-      });
-  });
+  .superRefine(checkModelEntryV2);
+// Persisted rows and revision history must remain complete. Input defaults
+// cannot silently repair missing fields in an old or damaged snapshot.
+const persistedModelEntryV2Schema = z
+  .strictObject(modelEntryShapeV2)
+  .superRefine(checkModelEntryV2);
 const editable = {
   name: titleSchema,
   note: z.string().max(2000),
@@ -154,7 +168,7 @@ export const modelCredentialV2Schema = modelServiceCasV2Schema.extend({
     .max(16384)
     .refine((value) => !/[\r\n\0]/.test(value)),
 });
-export const modelEntryV2Schema = modelEntryInputV2Schema.safeExtend({
+export const modelEntryV2Schema = persistedModelEntryV2Schema.safeExtend({
   removedAt: timestampSchema.nullable(),
   verification: modelVerificationSchema,
 });

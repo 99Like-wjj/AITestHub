@@ -952,20 +952,28 @@ function ServiceEditor({
                     />
                   </label>
                   <label className="field-label">
-                    支持的强度
+                    支持的强度（可选）
                     <Select
                       mode="tags"
+                      allowClear
                       disabled={commands.blocked || discovering}
                       tokenSeparators={[',', '，']}
                       value={row.effortValues}
-                      onChange={(effortValues) =>
-                        updateEntry(index, { effortValues })
+                      onChange={(effortValues: string[]) =>
+                        updateEntry(index, {
+                          effortValues,
+                          defaultEffort:
+                            row.defaultEffort &&
+                            effortValues.includes(row.defaultEffort)
+                              ? row.defaultEffort
+                              : null,
+                        })
                       }
-                      placeholder="仅填写上游支持的值，不猜测"
+                      placeholder="可留空，仅填写上游明确支持的值"
                     />
                   </label>
                   <label className="field-label">
-                    默认强度
+                    默认强度（可选）
                     <Select
                       allowClear
                       disabled={commands.blocked || discovering}

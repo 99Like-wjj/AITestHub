@@ -180,6 +180,21 @@
   text-align: left;
   cursor: pointer;
 }
+.workspace-process-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
+  line-height: 1;
+}
+.workspace-process-chevron svg {
+  display: block;
+}
+.workspace-process-chevron.is-expanded {
+  transform: rotate(180deg);
+}
 
 .workspace-process-trigger:hover,
 .workspace-turn-link:hover {

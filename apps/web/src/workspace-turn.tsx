@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { CheckOutlined, CopyOutlined } from '@ant-design/icons';
+import { CheckOutlined, CopyOutlined, DownOutlined } from '@ant-design/icons';
 import type { ReactNode } from 'react';
 import type {
   AiTaskEvent,
@@ -342,7 +342,10 @@ export function WorkspaceTurn({
           {elapsed && (
             <span className="workspace-process-time">· {elapsed}</span>
           )}
-          <span aria-hidden="true">{expanded ? '⌃' : '⌄'}</span>
+          <DownOutlined
+            aria-hidden="true"
+            className={`workspace-process-chevron${expanded ? ' is-expanded' : ''}`}
+          />
         </button>
         {expanded && (
           <div id={processId} className="workspace-process-content">
