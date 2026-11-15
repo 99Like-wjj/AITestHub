@@ -1,5 +1,5 @@
 # Fixed candidate: Caddy 2.11.9. Syntax tests are not issuance/renewal proof.
-# Set a real IP and a freshly generated bcrypt gate hash only in private env.
+# Set the public IP only in private env. Visitors reach the platform login page.
 {
     admin localhost:2019
     default_sni {$AITESTHUB_PUBLIC_IP}
@@ -87,14 +87,8 @@ https://{$AITESTHUB_PUBLIC_IP} {
         }
     }
 
-    # Entry gate is independent of the platform's cookie identity. Never forward
-    # its Basic header into controllers expecting either cookie or MCP Bearer.
     handle {
-        basic_auth {
-            aitesthub-trial {$AITESTHUB_TRIAL_GATE_HASH}
-        }
         reverse_proxy 127.0.0.1:5300 {
-            header_up -Authorization
             flush_interval -1
         }
     }

@@ -83,6 +83,7 @@ import { OverviewController } from './overview.controller.js';
 import { ControlJournal } from '../../../packages/application/src/recovery/control-journal.js';
 import { assertModelProtocolCheckpoint } from '../../../packages/application/src/configuration/model-checkpoint.js';
 import { createModelDiscoveryPort } from '../../../packages/application/src/configuration/discovery.js';
+import { createModelConnectionProbePort } from '../../../packages/application/src/configuration/model-connection-native.js';
 import {
   MaintenanceService,
   recoverySchemaReady,
@@ -363,6 +364,7 @@ export async function createApp(db: Database) {
   const schedules = new ScheduleService(db, plans);
   const configuration = new ConfigurationService(db, broker, {
     modelDiscovery: createModelDiscoveryPort(),
+    modelConnection: createModelConnectionProbePort(),
   });
   const externalMcp = new ExternalMcpService(db, broker);
   const externalInvocations = new ExternalMcpInvocations(db, externalMcp);

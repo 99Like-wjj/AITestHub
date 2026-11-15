@@ -10,6 +10,10 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { LLMResult } from '@langchain/core/outputs';
 import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import { z } from 'zod';
+import {
+  workspaceAccessModeSchema,
+  type WorkspaceAccessMode,
+} from '../../../packages/contracts/src/workspace-access.js';
 import type { ActorContext } from '../../../packages/contracts/src/identity.js';
 import type { Database } from '../../../packages/persistence/src/database.js';
 import { ProjectService } from '../../../packages/application/src/projects/service.js';
@@ -32,7 +36,10 @@ import {
   ModelAdapterError,
   type TokenUsage,
 } from '../../../packages/model-adapters/src/index.js';
-import { assertSafeModelInput } from '../../../packages/application/src/security/model-input.js';
+import {
+  assertSafeModelInput,
+  withWorkspaceModelAccess,
+} from '../../../packages/application/src/security/model-input.js';
 import {
   AI_BUSINESS_TOOL_NAMES,
   createAiBusinessTools,
@@ -69,6 +76,7 @@ export interface AiHostRequest {
   onEvent?: (event: AiHostEvent) => void;
   contextRevision?: string;
   dataScope?: 'syntheticPublicOnly' | 'authorizedRelevantTestData';
+  accessMode?: WorkspaceAccessMode;
   allowedSourceProjectIds?: readonly string[];
   authorizeContext?: () => Promise<void>;
   beforeModelCall?: (
@@ -209,9 +217,18 @@ export class RestrictedAiHost {
   }
 
   async run(actor: ActorContext, input: AiHostRequest): Promise<AiHostResult> {
+    return withWorkspaceModelAccess(input.accessMode, () =>
+      this.#run(actor, input),
+    );
+  }
+  async #run(actor: ActorContext, input: AiHostRequest): Promise<AiHostResult> {
     z.string().min(1).max(100_000).parse(input.prompt);
+    const accessMode = workspaceAccessModeSchema
+      .optional()
+      .parse(input.accessMode);
+    const restricted = accessMode === 'restricted';
     const allowedSourceProjectIds =
-      input.dataScope === 'syntheticPublicOnly'
+      !accessMode && input.dataScope === 'syntheticPublicOnly'
         ? [
             ...new Set(
               z
@@ -226,7 +243,9 @@ export class RestrictedAiHost {
       internalActor,
       input.conversationId,
       input.projectId,
-      input.contextRevision,
+      accessMode
+        ? `${input.contextRevision ?? 'workspace'}:access-${accessMode}`
+        : input.contextRevision,
     );
     const toolEvents: Extract<AiHostEvent, { type: 'tool' }>[] = [];
     const emit = (event: AiHostEvent) => {
@@ -453,46 +472,50 @@ export class RestrictedAiHost {
         schema: z.strictObject({}),
       },
     );
-    const businessTools = createAiBusinessTools(this.db, internalActor, {
-      ...(allowedSourceProjectIds !== undefined
-        ? { allowedSourceProjectIds }
-        : {}),
-      assertEffectsSettled: () => {
-        if (toolEvents.some((event) => event.unknownEffect))
-          throw new DomainError(
-            'OPERATION_RESULT_UNKNOWN',
-            '已有工具写结果未知，请先核对原回执；未发起后续写操作。',
-            409,
-          );
-      },
-      ...(this.options.businessServices
-        ? { services: this.options.businessServices }
-        : {}),
-      ...(input.taskId ? { taskId: input.taskId } : {}),
-      ...(input.operationTarget !== undefined
-        ? { operationTarget: input.operationTarget }
-        : {}),
-      conversationId: input.conversationId,
-      assertActive: async () => {
-        await this.#access.assertActive(internalActor, scope);
-        await input.authorizeContext?.();
-      },
-      emit,
-    });
-    const externalTools = await createAiExternalTools(
-      this.db,
-      internalActor,
-      this.options.externalServices,
-      {
-        ...(input.taskId ? { taskId: input.taskId } : {}),
-        conversationId: input.conversationId,
-        assertActive: async () => {
-          await this.#access.assertActive(internalActor, scope);
-          await input.authorizeContext?.();
-        },
-        emit,
-      },
-    );
+    const businessTools = restricted
+      ? []
+      : createAiBusinessTools(this.db, internalActor, {
+          ...(allowedSourceProjectIds !== undefined
+            ? { allowedSourceProjectIds }
+            : {}),
+          assertEffectsSettled: () => {
+            if (toolEvents.some((event) => event.unknownEffect))
+              throw new DomainError(
+                'OPERATION_RESULT_UNKNOWN',
+                '已有工具写结果未知，请先核对原回执；未发起后续写操作。',
+                409,
+              );
+          },
+          ...(this.options.businessServices
+            ? { services: this.options.businessServices }
+            : {}),
+          ...(input.taskId ? { taskId: input.taskId } : {}),
+          ...(input.operationTarget !== undefined
+            ? { operationTarget: input.operationTarget }
+            : {}),
+          conversationId: input.conversationId,
+          assertActive: async () => {
+            await this.#access.assertActive(internalActor, scope);
+            await input.authorizeContext?.();
+          },
+          emit,
+        });
+    const externalTools = restricted
+      ? []
+      : await createAiExternalTools(
+          this.db,
+          internalActor,
+          this.options.externalServices,
+          {
+            ...(input.taskId ? { taskId: input.taskId } : {}),
+            conversationId: input.conversationId,
+            assertActive: async () => {
+              await this.#access.assertActive(internalActor, scope);
+              await input.authorizeContext?.();
+            },
+            emit,
+          },
+        );
     // Static, verified S01/S02 guidance is pinned once per run. It grants no
     // business capability and exposes neither a path nor a version override.
     const ruleRegistry =
@@ -511,7 +534,7 @@ export class RestrictedAiHost {
       },
     });
     const enabledTools = [
-      projectTool,
+      ...(restricted ? [] : [projectTool]),
       createProgressTool({
         assertActive: async () => {
           await this.#access.assertActive(internalActor, scope);

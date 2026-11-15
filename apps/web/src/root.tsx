@@ -149,7 +149,38 @@ const pageKeys = new Set([
   'usage',
   'business-confirmations',
   'external-mcp',
+  'personal-settings',
 ]);
+
+const personalSettingsTabs = new Set([
+  'profile',
+  'security',
+  'appearance',
+  'usage',
+  'archive',
+  'resources',
+  'keys',
+  'models',
+]);
+
+function readSettingsTab() {
+  const tab = new URLSearchParams(window.location.hash.split('?')[1]).get(
+    'tab',
+  );
+  return tab && personalSettingsTabs.has(tab) ? tab : 'profile';
+}
+
+function workspaceReturnHash(value: string | null) {
+  const hash = value?.replace(/^#\/?/, '') ?? 'workspace';
+  if (hash.split('?')[0] !== 'workspace') return '#workspace';
+  const query = new URLSearchParams(hash.split('?')[1]);
+  const result = new URLSearchParams();
+  for (const key of ['conversationId', 'projectId']) {
+    const id = idSchema.safeParse(query.get(key));
+    if (id.success) result.set(key, id.data);
+  }
+  return `#workspace${result.size ? '?' + result.toString() : ''}`;
+}
 
 function readPage() {
   const candidate =
@@ -236,6 +267,7 @@ function SignedIn({
 }) {
   const [page, setPage] = useState(readPage);
   const currentHash = useRef(window.location.hash);
+  const workspaceMounted = useRef(readPage() === 'workspace');
   const navigationGranted = useRef(false);
   const [projectId, setProjectId] = useState<string | null>(() => {
     const scope = readCaseScope();
@@ -246,21 +278,30 @@ function SignedIn({
   });
   const [businessCollapsed, setBusinessCollapsed] = useState(false);
   const [workspaceExpanded, setWorkspaceExpanded] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsMounted, setSettingsMounted] = useState(false);
-  const [settingsInitialTab, setSettingsInitialTab] = useState('profile');
+  const [settingsInitialTab, setSettingsInitialTab] = useState(readSettingsTab);
+  const lastWorkspaceHash = useRef(
+    readPage() === 'workspace'
+      ? workspaceReturnHash(window.location.hash)
+      : workspaceReturnHash(
+          new URLSearchParams(window.location.hash.split('?')[1]).get(
+            'returnTo',
+          ),
+        ),
+  );
+  const restoreWorkspaceFocus = useRef(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notificationUnread, setNotificationUnread] = useState<number | null>(
     null,
   );
-  const settingsTrigger = useRef<HTMLElement | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [caseScope, setCaseScope] = useState<CaseScope | null>(readCaseScope);
   const { message } = AntApp.useApp();
   const isWorkspace = page === 'workspace';
+  const isPersonalSettings = page === 'personal-settings';
   const isPersonalToolPage =
     page === 'business-confirmations' || page === 'external-mcp';
-  const collapsed = isWorkspace ? !workspaceExpanded : businessCollapsed;
+  const collapsed =
+    isWorkspace || isPersonalSettings ? !workspaceExpanded : businessCollapsed;
   const selectedProject =
     me.projects.find((project) => project.id === projectId) ?? null;
   const isPlatformPage =
@@ -277,6 +318,7 @@ function SignedIn({
       usage: 'AI 使用监控',
       'business-confirmations': '本人业务提案',
       'external-mcp': '外部工具调用',
+      'personal-settings': '个人设置',
     }[page] ??
     'AITestHub';
 
@@ -301,7 +343,19 @@ function SignedIn({
       }
       navigationGranted.current = false;
       currentHash.current = nextHash;
-      setPage(readPage());
+      const nextPage = readPage();
+      setPage(nextPage);
+      if (nextPage === 'workspace') workspaceMounted.current = true;
+      else if (nextPage !== 'personal-settings')
+        workspaceMounted.current = false;
+      if (nextPage === 'workspace')
+        lastWorkspaceHash.current = workspaceReturnHash(nextHash);
+      if (nextPage === 'personal-settings') {
+        setSettingsInitialTab(readSettingsTab());
+        lastWorkspaceHash.current = workspaceReturnHash(
+          new URLSearchParams(nextHash.split('?')[1]).get('returnTo'),
+        );
+      }
       const scope = readCaseScope();
       if (
         scope &&
@@ -321,15 +375,21 @@ function SignedIn({
     function followPersonalTarget() {
       const query = new URLSearchParams(window.location.hash.split('?')[1]);
       if (readPage() === 'workspace' && query.get('panel') === 'resources') {
-        setSettingsInitialTab('resources');
-        setSettingsMounted(true);
-        setSettingsOpen(true);
+        openSettings('resources');
       }
     }
     followPersonalTarget();
     window.addEventListener('hashchange', followPersonalTarget);
     return () => window.removeEventListener('hashchange', followPersonalTarget);
   }, []);
+  useEffect(() => {
+    if (!isWorkspace || !restoreWorkspaceFocus.current) return;
+    restoreWorkspaceFocus.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>('[data-workspace-account]')?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [isWorkspace]);
   useEffect(() => {
     if (projectId && !me.projects.some((project) => project.id === projectId))
       setProjectId(me.projects[0]?.id ?? null);
@@ -352,12 +412,42 @@ function SignedIn({
     });
   }
   function openSettings(tab = 'profile') {
+    requestNavigation(() => {
+      const selectedTab = personalSettingsTabs.has(tab) ? tab : 'profile';
+      if (readPage() === 'workspace')
+        lastWorkspaceHash.current = workspaceReturnHash(window.location.hash);
+      setSettingsInitialTab(selectedTab);
+      const query = new URLSearchParams({
+        tab: selectedTab,
+        returnTo: lastWorkspaceHash.current.slice(1),
+      });
+      const hash = `#personal-settings?${query.toString()}`;
+      if (window.location.hash === hash) return;
+      navigationGranted.current = true;
+      window.location.hash = hash;
+    });
+  }
+  function closeSettings() {
+    requestNavigation(() => {
+      restoreWorkspaceFocus.current = true;
+      navigationGranted.current = true;
+      window.location.hash = lastWorkspaceHash.current;
+    });
+  }
+  function changeSettingsTab(tab: string) {
+    if (!personalSettingsTabs.has(tab)) return;
     setSettingsInitialTab(tab);
-    settingsTrigger.current = document.querySelector<HTMLElement>(
-      isWorkspace ? '[data-workspace-account]' : '[data-account-menu]',
+    const query = new URLSearchParams({
+      tab,
+      returnTo: lastWorkspaceHash.current.slice(1),
+    });
+    const hash = `#personal-settings?${query.toString()}`;
+    currentHash.current = hash;
+    window.history.replaceState(
+      null,
+      '',
+      `${window.location.pathname}${window.location.search}${hash}`,
     );
-    setSettingsMounted(true);
-    setSettingsOpen(true);
   }
   function changeProject(value: string | null) {
     if (value !== null && !me.projects.some((project) => project.id === value))
@@ -407,16 +497,22 @@ function SignedIn({
       onClick={() => setNotificationsOpen(true)}
     />
   );
-  if (page === 'workspace')
+  if (page === 'workspace') content = null;
+  else if (isPersonalSettings)
     content = (
-      <Workspace
-        dark={dark}
-        onAppearance={() => openSettings('appearance')}
-        notificationBell={notificationBell}
-        me={me}
-        project={selectedProject}
-        onProjectChange={changeProject}
-        onSettings={() => openSettings()}
+      <PersonalSettings
+        initialTab={settingsInitialTab}
+        onTabChange={changeSettingsTab}
+        user={me.user}
+        onClose={closeSettings}
+        onRefresh={onRefresh}
+        onPasswordChanged={() => {
+          navigationGranted.current = true;
+          window.location.hash = lastWorkspaceHash.current;
+          onPasswordChanged();
+        }}
+        onLogout={onLogout}
+        projects={me.projects}
       />
     );
   else if (page === 'requirements')
@@ -588,7 +684,7 @@ function SignedIn({
               className="iconbtn"
               icon={<AppIcon name="panel" />}
               onClick={() =>
-                isWorkspace
+                isWorkspace || isPersonalSettings
                   ? setWorkspaceExpanded((value) => !value)
                   : setBusinessCollapsed((value) => !value)
               }
@@ -602,7 +698,7 @@ function SignedIn({
         </div>
       </Layout.Sider>
       <Layout>
-        {!isWorkspace && (
+        {!isWorkspace && !isPersonalSettings && (
           <Layout.Header className="topbar globalbar" aria-label={currentLabel}>
             <div className="global-project-context">
               {!isPlatformPage && !isPersonalToolPage && (
@@ -673,26 +769,35 @@ function SignedIn({
         )}
         <IdentityCommandRecovery userId={me.user.id} />
         <Layout.Content
-          className={isWorkspace ? 'workspace-container' : 'page-content'}
+          className={
+            isWorkspace
+              ? 'workspace-container'
+              : isPersonalSettings
+                ? 'personal-settings-container'
+                : 'page-content'
+          }
         >
-          <Suspense fallback={<Skeleton active />}>{content}</Suspense>
+          {(isWorkspace ||
+            (isPersonalSettings && workspaceMounted.current)) && (
+            <div hidden={!isWorkspace} className="workspace-route">
+              <Suspense fallback={<Skeleton active />}>
+                <Workspace
+                  dark={dark}
+                  onAppearance={() => openSettings('appearance')}
+                  notificationBell={notificationBell}
+                  me={me}
+                  project={selectedProject}
+                  onProjectChange={changeProject}
+                  onSettings={() => openSettings()}
+                />
+              </Suspense>
+            </div>
+          )}
+          {!isWorkspace && (
+            <Suspense fallback={<Skeleton active />}>{content}</Suspense>
+          )}
         </Layout.Content>
       </Layout>
-      {settingsMounted && (
-        <Suspense fallback={<ModalLoading />}>
-          <PersonalSettings
-            initialTab={settingsInitialTab}
-            user={me.user}
-            open={settingsOpen}
-            onClose={() => setSettingsOpen(false)}
-            onRefresh={onRefresh}
-            onPasswordChanged={onPasswordChanged}
-            onLogout={onLogout}
-            onAfterClose={() => settingsTrigger.current?.focus()}
-            projects={me.projects}
-          />
-        </Suspense>
-      )}
       <NotificationPanel
         open={notificationsOpen}
         onClose={() => setNotificationsOpen(false)}
@@ -738,14 +843,6 @@ function SignedIn({
         </div>
       )}
     </Layout>
-  );
-}
-
-function ModalLoading() {
-  return (
-    <div className="settings-loading" role="status">
-      正在加载个人设置…
-    </div>
   );
 }
 

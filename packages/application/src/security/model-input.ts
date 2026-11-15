@@ -1,4 +1,9 @@
 import { DomainError } from '../errors.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import {
+  workspaceAccessModeSchema,
+  type WorkspaceAccessMode,
+} from '../../../contracts/src/workspace-access.js';
 import { parseStrictJsonText } from '../../../contracts/src/safe-json.js';
 
 const field =
@@ -10,6 +15,55 @@ const declaration =
 const allowed = (value: string) =>
   value.length === 0 || placeholder.test(value) || declaration.test(value);
 const maximumCharacters = 16 * 1024 * 1024;
+const workspaceAccess = new AsyncLocalStorage<WorkspaceAccessMode>();
+
+/** Only trusted conversation entry points bind a validated user-selected mode.
+ * This changes content classification, never object permissions or secret DTOs. */
+export function withWorkspaceModelAccess<T>(
+  mode: WorkspaceAccessMode | undefined,
+  work: () => T,
+): T {
+  if (mode === undefined) return work();
+  return workspaceAccess.run(workspaceAccessModeSchema.parse(mode), work);
+}
+
+export function assertModelInputStructure(value: unknown): void {
+  const stack = [{ value, depth: 0 }];
+  let nodes = 0,
+    characters = 0;
+  while (stack.length) {
+    const entry = stack.pop();
+    if (!entry) break;
+    if (++nodes > 500000 || entry.depth > 64)
+      throw new DomainError('VALIDATION_ERROR', '资料结构超过处理上限。', 400);
+    if (typeof entry.value === 'string') {
+      characters += entry.value.length;
+      if (
+        characters > maximumCharacters ||
+        entry.value.includes('\0') ||
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+          entry.value,
+        )
+      )
+        throw new DomainError(
+          'VALIDATION_ERROR',
+          '资料大小或文本编码不符合处理要求。',
+          400,
+        );
+    } else if (entry.value && typeof entry.value === 'object') {
+      for (const [key, child] of Object.entries(entry.value)) {
+        characters += key.length;
+        if (characters > maximumCharacters)
+          throw new DomainError(
+            'VALIDATION_ERROR',
+            '资料大小超过处理上限。',
+            400,
+          );
+        stack.push({ value: child, depth: entry.depth + 1 });
+      }
+    }
+  }
+}
 const schemaMetadata = new Set([
   'type',
   'description',
@@ -138,6 +192,10 @@ function scanText(text: string) {
 
 /** Secondary structural/pattern guard, not complete private-data detection. Values never enter errors/logs. */
 export function assertSafeModelInput(value: unknown): void {
+  if (workspaceAccess.getStore() !== undefined) {
+    assertModelInputStructure(value);
+    return;
+  }
   const stack: {
     item: unknown;
     key: string;

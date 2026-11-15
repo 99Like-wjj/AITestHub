@@ -30,6 +30,9 @@ import {
 } from '../../../packages/contracts/src/model-sampling';
 import { userSummarySchema } from '../../../packages/contracts/src/identity';
 import { api, describeError } from './api';
+import { describeModelDiscoveryError } from './model-discovery-error';
+import { ModelConnectionControl } from './model-connection-control';
+import type { ModelConnectionObservation } from '../../../packages/contracts/src/model-connections';
 import {
   currentIdentityOwner,
   identityContextEpoch,
@@ -124,11 +127,11 @@ function Verification({
         <span
           className={`badge ${model.verification.status === 'failed' ? 'red' : model.verification.status === 'verified' ? 'green' : ''}`}
         >
-          {verificationLabels[model.verification.status]}
+          能力覆盖 · {verificationLabels[model.verification.status]}
         </span>
       </summary>
       <div className="caption mt">
-        最近实际验证：
+        最近逐项能力验证：
         {model.verification.checkedAt
           ? new Date(model.verification.checkedAt).toLocaleString('zh-CN')
           : '未执行'}
@@ -146,7 +149,7 @@ function Verification({
         ))}
       </div>
       <p className="caption">
-        保存配置、设置 Key 或获取模型列表不会标记联通成功。
+        此处记录工具、图片等各项能力。基础连接和实际聊天调用不等于全部能力通过。
       </p>
     </details>
   );
@@ -614,7 +617,7 @@ function ServiceEditor({
       }
     } catch (failure) {
       if (alive.current && epoch.current === identityContextEpoch())
-        setError(errorText(failure));
+        setError(describeModelDiscoveryError(failure));
     } finally {
       if (alive.current) setDiscovering(false);
     }
@@ -663,7 +666,7 @@ function ServiceEditor({
     >
       <div className="model-settings-v2">
         <p className="caption">
-          服务管理连接与访问权限；每个模型行独立配置菜单显示名和实际标识。配置只保存草稿，不发起模型调用。
+          服务管理连接与访问权限；每个模型行独立配置菜单显示名和实际标识。保存后可供已授权账号使用，保存动作不会自动调用模型。
         </p>
         {(error || commands.error) && (
           <Alert
@@ -1026,9 +1029,10 @@ function ServiceEditor({
             )}
           </div>
           <div className="mt">
-            <strong>允许外发的资料范围</strong>
+            <strong>辅助分析可用的资料范围</strong>
             <p className="caption">
-              资料许可与服务使用权限独立；每次发送仍需选择范围并确认实际接收地址。
+              用于辅助分析的资料发送许可；AI
+              工作台按输入框中选择的访问模式读取资料。
             </p>
             {(
               ['syntheticPublicOnly', 'authorizedRelevantTestData'] as const
@@ -1318,6 +1322,9 @@ export function PlatformModelSettings() {
     [auxiliary, setAuxiliary] = useState<Auxiliary | null>(null);
   const generation = useRef(0),
     owner = currentIdentityOwner();
+  const [connections, setConnections] = useState<ModelConnectionObservation[]>(
+    [],
+  );
   function received(receipt: ModelCommandReceipt) {
     generation.current++;
     setLoading(false);
@@ -1338,10 +1345,10 @@ export function PlatformModelSettings() {
     setCredentialValue('');
     void load();
   });
-  async function load(signal?: AbortSignal) {
+  async function load(signal?: AbortSignal, silent = false) {
     const attempt = ++generation.current,
       start = identityContextEpoch();
-    setLoading(true);
+    if (!silent) setLoading(true);
     try {
       const response = await api(
         '/admin/model-services',
@@ -1354,6 +1361,7 @@ export function PlatformModelSettings() {
         start === identityContextEpoch()
       ) {
         setServices(response.services);
+        setConnections(response.connections ?? []);
         setError(undefined);
       }
     } catch (failure) {
@@ -1382,6 +1390,7 @@ export function PlatformModelSettings() {
         setCredential(null);
         setCredentialValue('');
         setServices([]);
+        setConnections([]);
         setAuxiliary(null);
         generation.current++;
       }),
@@ -1532,7 +1541,7 @@ export function PlatformModelSettings() {
               <>
                 <div className="notice mb">
                   API Key
-                  只在安全输入中配置，不会在列表或普通草稿中显示。此处不自动探测模型，不将保存或发现列表算作验证通过。
+                  只在安全输入中配置，不会在列表或普通草稿中显示。“测试连接”会发送一次简短测试提示；已有实际调用也会显示当前配置的连接状态。工具、图片等能力单独记录。
                 </div>
                 {loading ? (
                   <Spin />
@@ -1641,7 +1650,7 @@ export function PlatformModelSettings() {
                                   <th>菜单显示名</th>
                                   <th>实际模型标识</th>
                                   <th>配置</th>
-                                  <th>验证</th>
+                                  <th>连接与能力</th>
                                 </tr>
                               </thead>
                               <tbody>
@@ -1688,6 +1697,29 @@ export function PlatformModelSettings() {
                                         />
                                       </td>
                                       <td>
+                                        <ModelConnectionControl
+                                          key={`${service.serviceRevision}:${row.id}`}
+                                          serviceId={service.id}
+                                          entryId={row.id}
+                                          revision={service.serviceRevision}
+                                          enabled={
+                                            service.enabled &&
+                                            service.hasCredential &&
+                                            row.enabled
+                                          }
+                                          observation={connections.find(
+                                            (connection) =>
+                                              connection.modelServiceId ===
+                                                service.id &&
+                                              connection.modelEntryId ===
+                                                row.id &&
+                                              connection.serviceRevision ===
+                                                service.serviceRevision,
+                                          )}
+                                          onTested={() =>
+                                            void load(undefined, true)
+                                          }
+                                        />
                                         <Verification model={row} />
                                       </td>
                                     </tr>

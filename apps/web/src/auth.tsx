@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Alert, Button, Form, Input, Space } from 'antd';
 import { api, describeError } from './api';
+import { passwordSchema } from '../../../packages/contracts/src/identity';
 
 type AuthMode = 'login' | 'register' | 'help' | 'reset';
 
@@ -22,7 +23,15 @@ export const accountRules = [
 
 export const passwordRules = [
   { required: true, message: '请输入密码' },
-  { min: 15, max: 128, message: '密码须为 15–128 个字符，支持密码短语' },
+  {
+    validator: async (_rule: unknown, value: unknown) => {
+      const checked = passwordSchema.safeParse(value);
+      if (!checked.success)
+        throw new Error(
+          checked.error.issues[0]?.message ?? '密码须包含字母和特殊符号',
+        );
+    },
+  },
 ];
 
 export function AuthPage({
@@ -194,6 +203,11 @@ export function AuthPage({
                 <Form.Item
                   name="password"
                   label={mode === 'reset' ? '新密码' : '密码'}
+                  extra={
+                    mode === 'login'
+                      ? undefined
+                      : '8–128 个字符，包含字母和特殊符号'
+                  }
                   rules={
                     mode === 'login'
                       ? [{ required: true, message: '请输入密码' }]

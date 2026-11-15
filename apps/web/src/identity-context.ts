@@ -1,4 +1,5 @@
 import { markIdentityCommandsUnknown } from './identity-commands';
+import { clearStoredWorkspaceQueues } from './workspace-queue-storage';
 const storageKey = 'aitesthub:identity-epoch:v1',
   eventName = 'aitesthub:identity-context-changed',
   channelName = 'aitesthub-identity-v1';
@@ -30,6 +31,7 @@ function receive(value: unknown) {
   if (seen.size > 128) seen.delete(seen.values().next().value!);
   epoch += 1;
   actorId = null;
+  clearStoredWorkspaceQueues();
   markIdentityCommandsUnknown();
   window.dispatchEvent(new Event(eventName));
 }

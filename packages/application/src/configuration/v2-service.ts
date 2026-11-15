@@ -25,6 +25,7 @@ import {
 import { recordOperationFence } from '../recovery/fences.js';
 import { assertSafeModelInput } from '../security/model-input.js';
 import { SecretBroker } from './secrets.js';
+import { currentModelConnections } from './model-connections.js';
 import type { RuntimeModelSelectionV2 } from './model-selection.js';
 
 const migration = '0035_model_protocols.sql';
@@ -317,7 +318,7 @@ export class ModelConfigurationV2Service {
       const services = [];
       for (const row of rows.rows)
         services.push(await this.dto(tx, await this.row(tx, row.id)));
-      return { services };
+      return { services, connections: await currentModelConnections(tx) };
     });
   }
   async available(actor: ActorContext) {
@@ -942,10 +943,20 @@ export class ModelConfigurationV2Service {
             '模型列表读取已停止，请核对当前权限、服务修订或手工添加模型。',
             error.status,
           );
+        const upstreamStatus =
+          error instanceof DomainError
+            ? error.details?.upstreamHttpStatus
+            : undefined;
         throw new DomainError(
           'DEPENDENCY_UNAVAILABLE',
           '上游模型列表读取未成功；请检查配置或手工添加，不会自动更换地址或Key。',
           503,
+          typeof upstreamStatus === 'number' &&
+            Number.isInteger(upstreamStatus) &&
+            upstreamStatus >= 100 &&
+            upstreamStatus <= 599
+            ? { upstreamHttpStatus: upstreamStatus, automaticRetry: false }
+            : undefined,
         );
       });
     const checked = contracts.modelDiscoveryV2ReceiptSchema.safeParse({

@@ -727,13 +727,20 @@ function ConfigurationEditor({
               >
                 <Input disabled={pending} />
               </Form.Item>
-              <Form.Item name="port" label="端口" rules={[{ required: true }]}>
-                <InputNumber
-                  min={1}
-                  max={65535}
-                  precision={0}
-                  disabled={pending}
-                />
+              <Form.Item
+                name="port"
+                label="端口"
+                rules={[
+                  { required: true, message: '请输入数据库端口' },
+                  {
+                    type: 'integer',
+                    min: 1,
+                    max: 65535,
+                    message: '端口必须为 1 至 65535 的整数，请修改后再保存',
+                  },
+                ]}
+              >
+                <InputNumber disabled={pending} />
               </Form.Item>
               <Form.Item
                 name="database"

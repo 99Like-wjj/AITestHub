@@ -71,6 +71,25 @@ export class ConfigurationController {
           req.body,
         ),
       );
+    const connection =
+      /^admin\/model-services\/([^/]+)\/connection-tests(?:\/([^/]+))?$/.exec(
+        path,
+      );
+    if (connection?.[1]) {
+      const serviceId = idSchema.parse(connection[1]);
+      if (!connection[2] && req.method === 'POST')
+        return res.json(
+          await this.service.connections.test(actor, serviceId, req.body),
+        );
+      if (connection[2] && req.method === 'GET')
+        return res.json(
+          await this.service.connections.get(
+            actor,
+            serviceId,
+            idSchema.parse(connection[2]),
+          ),
+        );
+    }
     const model = /^admin\/model-services\/([^/]+)(\/credential)?$/.exec(path);
     if (model?.[1]) {
       const id = idSchema.parse(model[1]);

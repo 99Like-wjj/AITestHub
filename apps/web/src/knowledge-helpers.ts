@@ -2,6 +2,9 @@ import { z } from 'zod';
 import {
   knowledgeContentSchema,
   knowledgeLocalManifestItemSchema,
+  type KnowledgeComparisonItem,
+  knowledgeComparisonSchema,
+  knowledgeSelectionReceiptSchema,
   type KnowledgeContent,
 } from '../../../packages/contracts/src/knowledge';
 
@@ -131,6 +134,57 @@ export function parseKnowledgeManifest(
       return { ...item, entryId: null, baseRevisionId: null };
     });
   return items;
+}
+export function applyKnowledgeSelectionReceipt(
+  manifest: z.infer<typeof knowledgeLocalManifestItemSchema>[],
+  comparison: z.infer<typeof knowledgeComparisonSchema>,
+  receipt: z.infer<typeof knowledgeSelectionReceiptSchema>,
+) {
+  if (
+    receipt.comparisonId !== comparison.id ||
+    receipt.scopeDigest !== comparison.scopeDigest
+  )
+    throw new Error('回执与原比较范围不一致；本地清单保留。');
+  const changes = new Map<string, KnowledgeComparisonItem>(
+    comparison.items.flatMap((item) =>
+      item.localId === null ? [] : [[item.localId, item]],
+    ),
+  );
+  const results = new Map(receipt.results.map((item) => [item.changeId, item]));
+  return manifest.map((local) => {
+    const compared = changes.get(local.localId);
+    const result = compared ? results.get(compared.changeId) : undefined;
+    if (
+      !compared ||
+      !result ||
+      !result.entryId ||
+      !result.revisionId ||
+      local.entryId !== compared.entryId ||
+      local.baseRevisionId !== compared.localBaseRevisionId ||
+      local.operation !== compared.localOperation ||
+      (local.operation === 'upsert' &&
+        JSON.stringify(local.content) !== JSON.stringify(compared.localContent))
+    )
+      return local;
+    if (
+      local.operation === 'upsert' &&
+      result.localContent &&
+      (result.status === 'created' ||
+        result.status === 'updated' ||
+        result.status === 'unchanged')
+    )
+      return {
+        ...local,
+        entryId: result.entryId,
+        baseRevisionId: result.revisionId,
+        content: result.localContent,
+      };
+    if (local.operation === 'explicitDelete' && result.status === 'deleted')
+      return { ...local, baseRevisionId: result.revisionId };
+    // A conflict or a choice to keep the remote side does not accept the local
+    // proposal as a shared baseline. Unselected and later-edited drafts stay intact.
+    return local;
+  });
 }
 export function pinKnowledgeReference(
   entry: { id: string; title: string; revisionId: string; revisionNo: number },

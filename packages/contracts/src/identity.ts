@@ -8,7 +8,12 @@ titleSchema,
 } from './base.js';
 
 export const accountSchema = z.string().regex(/^[A-Za-z0-9._-]{3,64}$/);
-export const passwordSchema = z.string().min(15).max(128);
+export const passwordSchema = z
+  .string()
+  .min(8, '密码须为 8–128 个字符，并包含字母和特殊符号')
+  .max(128, '密码须为 8–128 个字符，并包含字母和特殊符号')
+  .regex(/[A-Za-z]/, '密码须包含字母')
+  .regex(/[\p{P}\p{S}]/u, '密码须包含特殊符号');
 export const displayNameSchema = z.string().trim().min(1).max(50);
 export const themeSchema = z.enum(['light', 'dark', 'system']);
 export const projectRoleSchema = z.enum(['tester', 'developer', 'product']);

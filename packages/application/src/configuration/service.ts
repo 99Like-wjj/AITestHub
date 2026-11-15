@@ -29,6 +29,10 @@ import {
   type ModelDiscoveryPort,
 } from './v2-service.js';
 import { readPersistedModelSelection } from './model-selection.js';
+import {
+  ModelConnectionsService,
+  type ModelConnectionProbePort,
+} from './model-connections.js';
 
 interface ModelRow extends QueryResultRow {
   allowed_data_scopes?: (
@@ -94,15 +98,25 @@ function officialEndpoint(
 
 export class ConfigurationService {
   readonly v2: ModelConfigurationV2Service;
+  readonly connections: ModelConnectionsService;
   constructor(
     readonly db: Database,
     private readonly broker: SecretBroker,
-    options: { modelDiscovery?: ModelDiscoveryPort } = {},
+    options: {
+      modelDiscovery?: ModelDiscoveryPort;
+      modelConnection?: ModelConnectionProbePort;
+    } = {},
   ) {
     this.v2 = new ModelConfigurationV2Service(
       db,
       broker,
       options.modelDiscovery,
+    );
+    this.connections = new ModelConnectionsService(
+      db,
+      broker,
+      this.v2,
+      options.modelConnection,
     );
   }
 

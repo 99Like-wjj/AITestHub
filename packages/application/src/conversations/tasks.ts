@@ -22,8 +22,15 @@ import { OperationService, canonicalJson } from '../operations/service.js';
 import { DomainError } from '../errors.js';
 import { assertNewWorkAllowed } from '../recovery/maintenance.js';
 import { hasDispatchFence, recordDispatchFence } from '../recovery/fences.js';
-import { assertSafeModelInput } from '../security/model-input.js';
-import { assertModelDataScope } from '../security/model-data-scope.js';
+import {
+  assertSafeModelInput,
+  withWorkspaceModelAccess,
+} from '../security/model-input.js';
+import { assertConversationDataScope } from '../security/model-data-scope.js';
+import {
+  workspaceAccessModeSchema,
+  type WorkspaceAccessMode,
+} from '../../../contracts/src/workspace-access.js';
 import { taskSourceProjectIds } from './source-projects.js';
 import { ModelUsageService, type UsageOriginScope } from './usage.js';
 import {
@@ -106,6 +113,7 @@ export interface ConversationRunner {
       signal: AbortSignal;
       contextRevision: string;
       dataScope?: 'syntheticPublicOnly' | 'authorizedRelevantTestData';
+      accessMode?: WorkspaceAccessMode;
       allowedSourceProjectIds?: readonly string[];
       onEvent: (event: RunnerEvent) => void;
       authorizeContext: () => Promise<void>;
@@ -613,6 +621,23 @@ export class AiTaskWorker {
     await this.heartbeat();
     const task = await this.#claim(taskId);
     if (!task) return false;
+    const snapshot = (
+      await this.tasks.db.query<{ model_snapshot: unknown }>(
+        'SELECT model_snapshot FROM app.ai_messages WHERE id=$1 AND deleted_at IS NULL',
+        [task.user_message_id],
+      )
+    ).rows[0];
+    const accessMode = z
+      .object({ workspaceAccessMode: workspaceAccessModeSchema.optional() })
+      .parse(snapshot?.model_snapshot ?? {}).workspaceAccessMode;
+    return withWorkspaceModelAccess(accessMode, () =>
+      this.#execute(task, accessMode),
+    );
+  }
+  async #execute(
+    task: TaskRow,
+    accessMode: WorkspaceAccessMode | undefined,
+  ): Promise<boolean> {
     const timings = new Map<string, ModelTimingSamples>();
     this.#timings.set(task.id, timings);
     const actor: ActorContext = {
@@ -649,8 +674,12 @@ export class AiTaskWorker {
         [task.conversation_id, actor.userId, conversation.project_id],
       );
       const userMessage = (
-        await this.tasks.db.query<{ content: string; explicit_refs: unknown }>(
-          'SELECT content,explicit_refs FROM app.ai_messages WHERE id=$1 AND deleted_at IS NULL',
+        await this.tasks.db.query<{
+          content: string;
+          explicit_refs: unknown;
+          model_snapshot: unknown;
+        }>(
+          'SELECT content,explicit_refs,model_snapshot FROM app.ai_messages WHERE id=$1 AND deleted_at IS NULL',
           [task.user_message_id],
         )
       ).rows[0];
@@ -660,13 +689,20 @@ export class AiTaskWorker {
           '消息或供应商资料范围不满足发送条件。',
           422,
         );
-      const dataScope = assertModelDataScope(selection, task.data_scope);
-      const allRows = (
-        await this.tasks.db.query<{ explicit_refs: unknown }>(
-          'SELECT explicit_refs FROM app.ai_messages WHERE conversation_id=$1 AND deleted_at IS NULL ORDER BY created_at,id',
-          [task.conversation_id],
-        )
-      ).rows;
+      const restricted = accessMode === 'restricted';
+      const dataScope = assertConversationDataScope(
+        selection,
+        task.data_scope,
+        accessMode,
+      );
+      const allRows = restricted
+        ? []
+        : (
+            await this.tasks.db.query<{ explicit_refs: unknown }>(
+              'SELECT explicit_refs FROM app.ai_messages WHERE conversation_id=$1 AND deleted_at IS NULL ORDER BY created_at,id',
+              [task.conversation_id],
+            )
+          ).rows;
       const sourceMap = new Map<string, unknown>();
       for (const row of allRows)
         for (const source of z.array(z.unknown()).parse(row.explicit_refs))
@@ -760,7 +796,7 @@ export class AiTaskWorker {
           'UPDATE app.ai_conversations SET context_revision=$2,source_fingerprints=$3 WHERE id=$1',
           [task.conversation_id, revision, fingerprints],
         );
-        return `explicit-ref-context-${revision}`;
+        return `explicit-ref-context-${revision}${accessMode ? ':' + accessMode : ''}`;
       });
       const sourceDigest = createHash('sha256')
         .update(
@@ -786,7 +822,7 @@ export class AiTaskWorker {
             actor,
             task.model_selection,
           );
-        assertModelDataScope(currentSelection, dataScope);
+        assertConversationDataScope(currentSelection, dataScope, accessMode);
         for (const source of usedProvenance.values())
           if (!(await this.tasks.references.readable(actor, source)))
             throw new DomainError(
@@ -859,7 +895,8 @@ export class AiTaskWorker {
         signal: controller.signal,
         contextRevision,
         dataScope,
-        ...(dataScope === 'syntheticPublicOnly'
+        ...(accessMode ? { accessMode } : {}),
+        ...(!accessMode && dataScope === 'syntheticPublicOnly'
           ? {
               allowedSourceProjectIds: await this.tasks.db.transaction((tx) =>
                 taskSourceProjectIds(tx, actor, task.id),

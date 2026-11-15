@@ -377,68 +377,74 @@ export function ProjectSettings({
       {error && (
         <Alert type="error" title={error} showIcon className="section-alert" />
       )}
-      <Table<ProjectMember>
-        rowKey="userId"
-        dataSource={members}
-        loading={loading}
-        pagination={{ pageSize: 20 }}
-        scroll={{ x: 720 }}
-        columns={[
-          { title: '姓名', dataIndex: 'displayName' },
-          { title: '账号', dataIndex: 'account' },
-          {
-            title: '账号状态',
-            render: (_, member) =>
-              member.active ? <Tag color="green">有效</Tag> : <Tag>已停用</Tag>,
-          },
-          {
-            title: '管理身份',
-            render: (_, member) =>
-              member.isAdmin ? <Tag color="cyan">项目管理员</Tag> : '成员',
-          },
-          {
-            title: '业务角色',
-            render: (_, member) =>
-              member.roles.length ? (
-                member.roles.map((role) => (
-                  <Tag key={role}>{roleLabels[role]}</Tag>
-                ))
-              ) : (
-                <Typography.Text type="secondary">未授予</Typography.Text>
-              ),
-          },
-          ...(canManage
-            ? [
-                {
-                  title: '操作',
-                  key: 'actions',
-                  render: (_: unknown, member: ProjectMember) => (
-                    <Space>
-                      <Button
-                        type="text"
-                        icon={<EditOutlined />}
-                        onClick={() => {
-                          setEditing(member);
-                          setEditorOpen(true);
-                        }}
-                      >
-                        编辑
-                      </Button>
-                      <Button
-                        type="text"
-                        danger
-                        icon={<DeleteOutlined />}
-                        onClick={() => remove(member)}
-                      >
-                        移除
-                      </Button>
-                    </Space>
-                  ),
-                },
-              ]
-            : []),
-        ]}
-      />
+      {!error && (
+        <Table<ProjectMember>
+          rowKey="userId"
+          dataSource={members}
+          loading={loading}
+          pagination={{ pageSize: 20 }}
+          scroll={{ x: 720 }}
+          columns={[
+            { title: '姓名', dataIndex: 'displayName' },
+            { title: '账号', dataIndex: 'account' },
+            {
+              title: '账号状态',
+              render: (_, member) =>
+                member.active ? (
+                  <Tag color="green">有效</Tag>
+                ) : (
+                  <Tag>已停用</Tag>
+                ),
+            },
+            {
+              title: '管理身份',
+              render: (_, member) =>
+                member.isAdmin ? <Tag color="cyan">项目管理员</Tag> : '成员',
+            },
+            {
+              title: '业务角色',
+              render: (_, member) =>
+                member.roles.length ? (
+                  member.roles.map((role) => (
+                    <Tag key={role}>{roleLabels[role]}</Tag>
+                  ))
+                ) : (
+                  <Typography.Text type="secondary">未授予</Typography.Text>
+                ),
+            },
+            ...(canManage
+              ? [
+                  {
+                    title: '操作',
+                    key: 'actions',
+                    render: (_: unknown, member: ProjectMember) => (
+                      <Space>
+                        <Button
+                          type="text"
+                          icon={<EditOutlined />}
+                          onClick={() => {
+                            setEditing(member);
+                            setEditorOpen(true);
+                          }}
+                        >
+                          编辑
+                        </Button>
+                        <Button
+                          type="text"
+                          danger
+                          icon={<DeleteOutlined />}
+                          onClick={() => remove(member)}
+                        >
+                          移除
+                        </Button>
+                      </Space>
+                    ),
+                  },
+                ]
+              : []),
+          ]}
+        />
+      )}
       {canManage && (
         <MemberEditor
           project={project}

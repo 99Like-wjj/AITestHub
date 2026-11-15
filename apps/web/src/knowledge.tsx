@@ -30,6 +30,7 @@ import {
   draftFromKnowledge,
   parseKnowledgeDraft,
   parseKnowledgeManifest,
+  applyKnowledgeSelectionReceipt,
   pinKnowledgeReference,
   type KnowledgeDraft,
 } from './knowledge-helpers';
@@ -1121,9 +1122,27 @@ function CompareDialog({
       );
     });
     if (result) {
-      setReceipt(result);
-      onChanged();
+      acceptReceipt(result);
     }
+  }
+  function acceptReceipt(result: SelectionReceipt) {
+    setReceipt(result);
+    if (comparison && !initialComparison) {
+      try {
+        const manifest = parseKnowledgeManifest(text, target.project.id, asNew);
+        setText(
+          JSON.stringify(
+            applyKnowledgeSelectionReceipt(manifest, comparison, result),
+            null,
+            2,
+          ),
+        );
+        setAsNew(false);
+      } catch (failure) {
+        setError(describeError(failure));
+      }
+    }
+    onChanged();
   }
   function mapCandidate(item: KnowledgeComparisonItem, id: string) {
     try {
@@ -1571,10 +1590,7 @@ function CompareDialog({
           operation="knowledge.commit-selection"
           command={commitCommand}
           schema={knowledgeSelectionReceiptSchema}
-          onRecovered={(result) => {
-            setReceipt(result);
-            onChanged();
-          }}
+          onRecovered={acceptReceipt}
         />
       )}
     </EditDialog>

@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode, SetStateAction } from 'react';
 import { Alert, Button, Modal, Space, Typography } from 'antd';
 import { z } from 'zod';
-import { isUncertainMutationError, describeError } from './api';
+import { ApiError, isUncertainMutationError, describeError } from './api';
 import { uiLayers } from './ui-layers';
 
 export function useBusinessCommand(session: string | null) {
@@ -24,6 +24,7 @@ export function useBusinessCommand(session: string | null) {
   const initial = {
     pending: false,
     error: undefined as string | undefined,
+    errorCode: undefined as string | undefined,
     uncertain: false,
   };
   const [state, setState] = useState(() => ({ intent, ...initial }));
@@ -48,6 +49,7 @@ export function useBusinessCommand(session: string | null) {
       return {
         ...before,
         error: typeof value === 'function' ? value(before.error) : value,
+        errorCode: undefined,
       };
     });
   }
@@ -63,7 +65,7 @@ export function useBusinessCommand(session: string | null) {
     )
       return null;
     intent.busy = true;
-    patch({ pending: true, error: undefined });
+    patch({ pending: true, error: undefined, errorCode: undefined });
     try {
       const result = await action(intent.key);
       return alive.current && current.current === intent ? result : null;
@@ -73,13 +75,15 @@ export function useBusinessCommand(session: string | null) {
           intent.uncertain = true;
           patch({ uncertain: true });
         }
-        setError(
-          failure instanceof z.ZodError
-            ? failure.issues
-                .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
-                .join('；')
-            : describeError(failure),
-        );
+        patch({
+          error:
+            failure instanceof z.ZodError
+              ? failure.issues
+                  .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+                  .join('；')
+              : describeError(failure),
+          errorCode: failure instanceof ApiError ? failure.code : undefined,
+        });
       }
       return null;
     } finally {
@@ -91,6 +95,7 @@ export function useBusinessCommand(session: string | null) {
     commandId: intent.key,
     pending: view.pending,
     error: view.error,
+    errorCode: view.errorCode,
     uncertain: view.uncertain,
     run,
     setError,

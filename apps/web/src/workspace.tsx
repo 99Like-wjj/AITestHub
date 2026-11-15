@@ -34,7 +34,6 @@ import {
   requirementGroupCandidatesSchema,
   requirementGroupMutationSchema,
   sendMessageInputSchema,
-  sendReceiptSchema,
   taskAcceptedSchema,
   taskStateSchema,
 } from '../../../packages/contracts/src/conversations';
@@ -92,7 +91,19 @@ import {
 } from './workspace-trigger';
 import type { PlatformGuidanceSkillId } from '../../../packages/contracts/src/skill-guidance';
 import './workspace-composer.css';
+import './workspace-ai-controls.css';
 import { WorkspaceContextPicker } from './workspace-context-picker';
+import {
+  WorkspaceAccessPicker,
+  readWorkspaceAccess,
+  saveWorkspaceAccess,
+} from './workspace-access';
+import { WorkspaceModelPicker } from './workspace-model-picker';
+import {
+  WorkspacePendingMessages,
+  useWorkspaceSendQueue,
+} from './workspace-queue-controller';
+import { workspaceDataScope } from '../../../packages/contracts/src/workspace-access';
 import type { PreparedReference, ReferenceTab } from './workspace-references';
 import { taskStateLabels, useAiTask } from './workspace-tasks';
 import {
@@ -100,11 +111,13 @@ import {
   pendingWorkspaceSends,
   pendingCreationDrafts,
   clearSubmittedDraft,
+  saveWorkspaceDraft,
   newDraftKey,
   moveInsertion,
   removeInsertions,
 } from './workspace-drafts';
 import type { ComposerInsertion, WorkspaceDraft } from './workspace-drafts';
+import { readWorkspaceSendReceipt } from './workspace-send-receipt';
 import { WorkspaceMarkdown } from './workspace-markdown';
 import { WorkspaceTurn } from './workspace-turn';
 import { useWorkspaceScroll } from './workspace-scroll';
@@ -189,6 +202,7 @@ export function Workspace({
   const [effort, setEffort] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(conversationFromUrl);
   const activeRef = useRef(activeId);
+  const pendingMessages = useWorkspaceSendQueue(me.user.id, activeId);
   const browseRef = useRef(project?.id ?? null);
   const browseGeneration = useRef(0);
   if (browseRef.current !== (project?.id ?? null))
@@ -198,9 +212,13 @@ export function Workspace({
   const [conversationLoading, setConversationLoading] = useState(false);
   const [conversationError, setConversationError] = useState<string>();
   const [content, setContent] = useState('');
-  const [dataScope, setDataScope] = useState<
-    'syntheticPublicOnly' | 'authorizedRelevantTestData'
-  >('syntheticPublicOnly');
+  const [accessMode, setAccessMode] = useState(() =>
+    readWorkspaceAccess(me.user.id),
+  );
+  const dataScope = workspaceDataScope(accessMode);
+  useEffect(() => {
+    setAccessMode(readWorkspaceAccess(me.user.id));
+  }, [me.user.id]);
   const [references, setReferences] = useState<PreparedReference[]>([]);
   const targetProjectId = project?.id ?? null;
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -210,6 +228,7 @@ export function Workspace({
     conversationId: string;
     content: string;
     userMessageId: string | null;
+    createdAt: string;
   } | null>(null);
   const [creating, setCreating] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
@@ -222,7 +241,12 @@ export function Workspace({
   >([]);
   const [sendError, setSendError] = useState<string>();
   const [uncertain, setUncertain] = useState<UncertainSend | null>(null);
-  const [taskId, setTaskId] = useState<string | null>(null);
+  const [taskId, setTaskIdState] = useState<string | null>(null);
+  const taskIdentity = useRef(taskId);
+  function setTaskId(id: string | null) {
+    taskIdentity.current = id;
+    setTaskIdState(id);
+  }
   const [proposalTaskId, setProposalTaskId] = useState<string | null>(null);
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [referenceTab, setReferenceTab] = useState<ReferenceTab>('history');
@@ -277,7 +301,6 @@ export function Workspace({
   const sidebarEpoch = useRef(0);
   const groupEpoch = useRef(0);
   const composition = useRef(false);
-  const sendDisclosureOpen = useRef(false);
   const input = useRef<HTMLTextAreaElement | null>(null);
   const uploadInput = useRef<HTMLInputElement | null>(null);
   const candidatesControl = useRef<WorkspaceInlineCandidatesHandle | null>(
@@ -314,7 +337,10 @@ export function Workspace({
     ),
   );
   const candidateOpen = Boolean(
-    mention && dismissedCandidate !== mentionKey && !codePrepared,
+    mention &&
+    (accessMode === 'full' || mention.symbol === '/') &&
+    dismissedCandidate !== mentionKey &&
+    !codePrepared,
   );
   const currentGroup = sidebar?.groups.find(
     (group) => group.requirementId === active?.requirementId,
@@ -570,6 +596,10 @@ export function Workspace({
   }, [activeId]);
   useEffect(() => {
     const changed = () => {
+      if (
+        window.location.hash.replace(/^#\/?/, '').split('?')[0] !== 'workspace'
+      )
+        return;
       const id = conversationFromUrl();
       if (id !== activeRef.current) {
         conversationNavigation.current += 1;
@@ -588,11 +618,11 @@ export function Workspace({
       detail?.conversation.id === activeId &&
       !conversationLoading
     )
-      drafts.current.set(activeId, { content, references });
+      saveWorkspaceDraft(drafts.current, activeId, { content, references });
     else if (!activeId) {
       const timer = window.setTimeout(() => {
         if (!activeRef.current && browseRef.current === targetProjectId)
-          drafts.current.set(newDraftKey(targetProjectId), {
+          saveWorkspaceDraft(drafts.current, newDraftKey(targetProjectId), {
             content,
             references,
           });
@@ -610,10 +640,14 @@ export function Workspace({
 
   function saveDraft() {
     if (currentIdentityOwner() !== me.user.id) return;
-    drafts.current.set(activeRef.current ?? newDraftKey(browseRef.current), {
-      content,
-      references,
-    });
+    saveWorkspaceDraft(
+      drafts.current,
+      activeRef.current ?? newDraftKey(browseRef.current),
+      {
+        content,
+        references,
+      },
+    );
   }
   function changeProject(id: string | null) {
     if (!activeRef.current) {
@@ -634,6 +668,7 @@ export function Workspace({
     window.location.hash = `workspace?conversationId=${id}`;
   }
   function openReferences(tab: ReferenceTab) {
+    if (accessMode === 'restricted') return;
     setReferenceTab(tab);
     setReferenceOpen(true);
     insertCandidateSymbol('@');
@@ -763,6 +798,7 @@ export function Workspace({
     );
   }
   async function prepareReferenceCode(text: string) {
+    if (accessMode === 'restricted') return;
     const codes = [
       ...new Set(text.match(/\bATHC1-[a-f0-9]{32}\b/gi) ?? []),
     ].slice(0, 30 - references.length);
@@ -1267,6 +1303,10 @@ export function Workspace({
     }
   }
   async function attach(file: File) {
+    if (accessMode === 'restricted') {
+      void message.info('切换完全访问后可添加文件或引用。');
+      return;
+    }
     const draftId = activeRef.current ?? newDraftKey(browseRef.current);
     const attachmentEpoch = identityContextEpoch();
     const id = crypto.randomUUID();
@@ -1320,16 +1360,51 @@ export function Workspace({
       );
     }
   }
+  useEffect(() => {
+    const accepted = (event: Event) => {
+      const parsed = z
+        .object({
+          ownerId: z.string(),
+          conversationId: z.string(),
+          receipt: z.object({ taskId: z.string() }),
+        })
+        .safeParse(event instanceof CustomEvent ? event.detail : undefined);
+      if (
+        !parsed.success ||
+        parsed.data.ownerId !== me.user.id ||
+        currentIdentityOwner() !== me.user.id ||
+        activeRef.current !== parsed.data.conversationId
+      )
+        return;
+      const id = parsed.data.conversationId;
+      setTaskId(parsed.data.receipt.taskId);
+      void api(`/me/conversations/${id}`, {}, conversationDetailSchema)
+        .then((result) => {
+          if (
+            mounted.current &&
+            activeRef.current === id &&
+            currentIdentityOwner() === me.user.id
+          )
+            setDetail(result);
+        })
+        .catch((error) => {
+          if (mounted.current) setSendError(describeError(error));
+        });
+      void loadSidebar(undefined, true);
+    };
+    window.addEventListener('aitesthub:queued-message-accepted', accepted);
+    return () =>
+      window.removeEventListener('aitesthub:queued-message-accepted', accepted);
+  }, [me.user.id]);
   async function submitMessage(
-    disclosureConfirmed = false,
     destination?: Conversation,
+    intent: 'normal' | 'interrupt' = 'normal',
   ) {
     const sendEpoch = identityContextEpoch();
     if (currentIdentityOwner() !== me.user.id) return;
     if (
       Boolean(targetProjectId && !targetProject) ||
       !content.trim() ||
-      inFlight ||
       sending ||
       uncertain ||
       creatingRef.current ||
@@ -1337,12 +1412,6 @@ export function Workspace({
       pending
     )
       return;
-    if (model && !model.allowedDataScopes.includes(dataScope)) {
-      setSendError(
-        '当前模型未开放所选资料范围，请选择允许的范围或联系管理员。',
-      );
-      return;
-    }
     if (model && effort && !model.effortValues.includes(effort)) {
       setSendError('所选模型不支持当前参数，请重新选择。');
       setModelPickerOpen(true);
@@ -1373,77 +1442,10 @@ export function Workspace({
       active.id !== activeRef.current
     )
       return;
-    if (!disclosureConfirmed) {
-      if (sendDisclosureOpen.current) return;
-      sendDisclosureOpen.current = true;
-      const disclosureEpoch = identityContextEpoch();
-      const disclosureNavigation = conversationNavigation.current;
-      const disclosureBrowsing = browseGeneration.current;
-      modal.confirm({
-        title: '确认本次模型资料发送',
-        className: 'ai-transmission-confirm',
-        width: 720,
-        centered: true,
-        icon: null,
-        content: (
-          <Space orientation="vertical">
-            <Typography.Text>
-              接收方：{modelServiceCaption(model)} · {model.baseUrl} ·{' '}
-              {model.modelId}
-            </Typography.Text>
-            <Typography.Text>
-              本次声明：
-              {dataScope === 'syntheticPublicOnly'
-                ? '仅合成或公开资料'
-                : '已获准的相关内部测试资料'}
-              。 业务目标：{targetProject?.name ?? '无新增业务目标'}；会话归属：
-              {active.projectId
-                ? (me.projects.find((entry) => entry.id === active.projectId)
-                    ?.name ?? '原关联项目')
-                : '个人会话'}
-              {active.requirementTitle ? ` / ${active.requirementTitle}` : ''}。
-            </Typography.Text>
-            <Typography.Text>
-              用途：继续当前 AI
-              对话。将发送当前消息、可用会话上下文、已选引用，以及所选目标和来源项目内的相关工具资料。
-            </Typography.Text>
-            <Typography.Text>
-              已选引用：
-              {references.map((entry) => entry.label).join('、') ||
-                '无新增引用'}
-              。请确认已获准向该接收方发送；凭据、无关公司源码和未经许可的资料仍不可发送。
-            </Typography.Text>
-          </Space>
-        ),
-        okText: '确认资料范围并发送',
-        cancelText: '返回检查',
-        afterClose: () => {
-          sendDisclosureOpen.current = false;
-        },
-        onOk: () => {
-          if (
-            identityContextEpoch() !== disclosureEpoch ||
-            currentIdentityOwner() !== me.user.id ||
-            activeRef.current !== active.id ||
-            browseRef.current !== targetProjectId ||
-            conversationNavigation.current !== disclosureNavigation ||
-            browseGeneration.current !== disclosureBrowsing
-          ) {
-            void message.warning(
-              '当前身份、会话或项目已变化，请重新核对资料发送范围。',
-            );
-            return;
-          }
-          return submitMessage(true, active);
-        },
-      });
-      return;
-    }
     if (sendDispatchInProgress.current) return;
     sendDispatchInProgress.current = true;
     setSending(true);
     setSendError(undefined);
-    setSendPreview({ conversationId: active.id, content, userMessageId: null });
     const commandId = crypto.randomUUID();
     const submittedDraft = { content, references };
     drafts.current.set(active.id, submittedDraft);
@@ -1458,18 +1460,64 @@ export function Workspace({
           effort,
         },
         dataScope,
-        references: references.map((entry) => ({
+        accessMode,
+        references: (accessMode === 'full' ? references : []).map((entry) => ({
           ...entry.reference,
           dataScope,
         })),
-        operationTarget: targetProjectId
-          ? {
-              projectId: targetProjectId,
-              ...(targetProjectId === active.projectId && active.requirementId
-                ? { requirementId: active.requirementId }
-                : {}),
-            }
-          : null,
+        operationTarget:
+          accessMode === 'full' && targetProjectId
+            ? {
+                projectId: targetProjectId,
+                ...(targetProjectId === active.projectId && active.requirementId
+                  ? { requirementId: active.requirementId }
+                  : {}),
+              }
+            : null,
+      });
+      if (inFlight || (pendingMessages.state?.items.length ?? 0) > 0) {
+        if (!pendingMessages.controller)
+          throw new Error(pendingMessages.error ?? '待发队列暂时不可用。');
+        const blockingTaskId =
+          taskIdentity.current ??
+          detail?.messages.find(
+            (entry) =>
+              entry.taskId &&
+              entry.taskStatus &&
+              ['accepted', 'running', 'cancelling'].includes(entry.taskStatus),
+          )?.taskId ??
+          null;
+        if (inFlight && !blockingTaskId)
+          throw new Error(
+            '正在核对当前回复的任务标识，草稿已保留，请稍后加入队列。',
+          );
+        pendingMessages.controller.enqueue(
+          active.id,
+          payload,
+          (targetProject?.name ?? '个人对话') +
+            ' · ' +
+            modelDisplayLabel(model) +
+            ' · ' +
+            (accessMode === 'full' ? '完全访问' : '受限访问'),
+          blockingTaskId,
+          intent === 'interrupt',
+        );
+        const clearComposer = clearSubmittedDraft(
+          drafts.current,
+          active.id,
+          submittedDraft,
+        );
+        if (clearComposer && activeRef.current === active.id) {
+          setContent('');
+          setReferences([]);
+        }
+        return;
+      }
+      setSendPreview({
+        conversationId: active.id,
+        content,
+        userMessageId: null,
+        createdAt: new Date().toISOString(),
       });
       const unresolved: UncertainSend = {
         conversationId: active.id,
@@ -1504,6 +1552,7 @@ export function Workspace({
             conversationId: active.id,
             content: payload.content,
             userMessageId: result.userMessageId,
+            createdAt: new Date().toISOString(),
           });
         }
         try {
@@ -1547,10 +1596,10 @@ export function Workspace({
     if (!uncertain) return;
     setSending(true);
     try {
-      const receipt = await api(
-        `/me/conversations/${uncertain.conversationId}/send-receipts/${encodeURIComponent(uncertain.commandId)}`,
-        {},
-        sendReceiptSchema,
+      const receipt = await readWorkspaceSendReceipt(
+        me.user.id,
+        uncertain.conversationId,
+        uncertain.commandId,
       );
       const clearComposer = clearSubmittedDraft(
         drafts.current,
@@ -1931,9 +1980,24 @@ export function Workspace({
                   className={`chat-message ${entry.role}`}
                   key={entry.id}
                 >
-                  <Typography.Text strong>
-                    {entry.role === 'user' ? me.user.displayName : 'AI 回复'}
-                  </Typography.Text>
+                  <header className="workspace-message-sender">
+                    <img src="/brand-f-color.png" alt="" />
+                    <strong>
+                      {entry.role === 'user' ? me.user.displayName : 'AI 回复'}
+                    </strong>
+                    <time
+                      dateTime={entry.createdAt}
+                      title={new Date(entry.createdAt).toLocaleString('zh-CN')}
+                    >
+                      {new Date(entry.createdAt).toLocaleString('zh-CN', {
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: false,
+                      })}
+                    </time>
+                  </header>
                   <MessageText text={entry.content} />
                   {!!entry.references.length && (
                     <details className="message-metadata">
@@ -1958,9 +2022,16 @@ export function Workspace({
                 (entry) => entry.id === sendPreview.userMessageId,
               ) && (
                 <article className="chat-message user pending-user-message">
-                  <Typography.Text strong>
-                    {me.user.displayName}
-                  </Typography.Text>
+                  <header className="workspace-message-sender">
+                    <img src="/brand-f-color.png" alt="" />
+                    <strong>{me.user.displayName}</strong>
+                    <time dateTime={sendPreview.createdAt}>
+                      {new Date(sendPreview.createdAt).toLocaleTimeString(
+                        'zh-CN',
+                        { hour: '2-digit', minute: '2-digit', hour12: false },
+                      )}
+                    </time>
+                  </header>
                   <MessageText text={sendPreview.content} />
                   <p className="caption" role="status">
                     {sendPreview.userMessageId
@@ -2041,6 +2112,37 @@ export function Workspace({
           }}
         >
           <div className="composer-context-bar">
+            <WorkspaceContextPicker
+              open={projectPickerOpen}
+              onOpenChange={setProjectPickerOpen}
+              selectedId={project?.id ?? ''}
+              placeholder="搜索项目"
+              options={[
+                { id: '', label: '不在项目中工作' },
+                ...me.projects.map((entry) => ({
+                  id: entry.id,
+                  label: entry.name,
+                })),
+              ]}
+              onChoose={(id) => {
+                changeProject(id || null);
+                setProjectPickerOpen(false);
+              }}
+            >
+              <Button
+                type="text"
+                className="composer-project-context"
+                disabled={creating || sending || Boolean(uncertain)}
+                title={project?.name ?? '不在项目'}
+                aria-label={'切换全站项目：' + (project?.name ?? '不在项目')}
+              >
+                <ProjectOutlined />
+                <span className="composer-project-name">
+                  {project?.name ?? '不在项目'}
+                </span>
+                <AppIcon name="down" />
+              </Button>
+            </WorkspaceContextPicker>
             <WorkspaceContextPicker
               open={associateOpen}
               onOpenChange={(value) => {
@@ -2124,56 +2226,35 @@ export function Workspace({
                 <AppIcon name="down" />
               </Button>
             </WorkspaceContextPicker>
-            <WorkspaceContextPicker
-              open={projectPickerOpen}
-              onOpenChange={setProjectPickerOpen}
-              selectedId={project?.id ?? ''}
-              placeholder="搜索项目"
-              options={[
-                { id: '', label: '不在项目中工作' },
-                ...me.projects.map((entry) => ({
-                  id: entry.id,
-                  label: entry.name,
-                })),
-              ]}
-              onChoose={(id) => {
-                changeProject(id || null);
-                setProjectPickerOpen(false);
-              }}
-            >
-              <Button
-                type="text"
-                className="composer-project-context"
-                disabled={creating || sending || Boolean(uncertain)}
-                title={project?.name ?? '不在项目'}
-                aria-label={'切换全站项目：' + (project?.name ?? '不在项目')}
-              >
-                <ProjectOutlined />
-                <span className="composer-project-name">
-                  {project?.name ?? '不在项目'}
-                </span>
-                <AppIcon name="down" />
-              </Button>
-            </WorkspaceContextPicker>
           </div>
           <div className="composer user-composer-anchor">
-            {candidateOpen && mention && (
-              <WorkspaceInlineCandidates
-                ref={candidatesControl}
-                trigger={mention.symbol}
-                query={mention.query}
-                projectId={project?.id ?? null}
-                projects={me.projects}
-                remaining={30 - references.length}
-                dataScope={dataScope}
-                {...(activeId ? { currentConversationId: activeId } : {})}
-                {...(referenceOpen ? { filter: referenceTab } : {})}
-                onAdd={selectReference}
-                onSkill={selectSkill}
-                onClose={closeCandidates}
-                onActiveDescendantChange={setActiveCandidateId}
-              />
+            {pendingMessages.error && (
+              <Alert type="warning" showIcon title={pendingMessages.error} />
             )}
+            <WorkspacePendingMessages
+              state={pendingMessages.state}
+              queue={pendingMessages.controller}
+              taskId={taskId}
+            />
+            {candidateOpen &&
+              mention &&
+              (accessMode === 'full' || mention.symbol === '/') && (
+                <WorkspaceInlineCandidates
+                  ref={candidatesControl}
+                  trigger={mention.symbol}
+                  query={mention.query}
+                  projectId={project?.id ?? null}
+                  projects={me.projects}
+                  remaining={30 - references.length}
+                  dataScope={dataScope}
+                  {...(activeId ? { currentConversationId: activeId } : {})}
+                  {...(referenceOpen ? { filter: referenceTab } : {})}
+                  onAdd={selectReference}
+                  onSkill={selectSkill}
+                  onClose={closeCandidates}
+                  onActiveDescendantChange={setActiveCandidateId}
+                />
+              )}
             {sendError && (
               <Alert
                 type="error"
@@ -2232,7 +2313,10 @@ export function Workspace({
               <Space wrap className="prepared-references">
                 {references.map((reference) => (
                   <Tag key={reference.id} title={reference.note}>
-                    {reference.label} · 待解析/权限校验
+                    {reference.label} ·{' '}
+                    {accessMode === 'restricted'
+                      ? '受限访问不发送'
+                      : '待解析/权限校验'}
                     <button
                       type="button"
                       className="reference-remove"
@@ -2361,230 +2445,158 @@ export function Workspace({
               }}
             />
             <div className="composer-toolbar">
-              <Dropdown
-                trigger={['click']}
-                placement="topLeft"
-                classNames={{
-                  root: 'user-composer-add-menu user-workspace-sidebar-menu',
-                }}
-                menu={{
-                  items: [
-                    {
-                      key: 'upload',
-                      label: '添加文件',
-                      icon: <PaperClipOutlined />,
-                      disabled: references.length + uploading.length >= 30,
-                    },
-                    { type: 'divider' },
-                    {
-                      key: 'history',
-                      label: '引用本人对话',
-                      icon: <CommentOutlined />,
-                    },
-                    {
-                      key: 'resources',
-                      label: '引用已有附件',
-                      icon: <FileSearchOutlined />,
-                    },
-                    {
-                      key: 'requirements',
-                      label: '引用需求版本',
-                      icon: <AppIcon name="file" />,
-                    },
-                    {
-                      key: 'knowledge',
-                      label: '引用项目知识',
-                      icon: <AppIcon name="book" />,
-                    },
-                    {
-                      key: 'external',
-                      label: '引用外部 MCP',
-                      icon: <ApiOutlined />,
-                    },
-                  ],
-                  onClick: ({ key }) => {
-                    if (key === 'upload') uploadInput.current?.click();
-                    else if (
-                      key === 'history' ||
-                      key === 'resources' ||
-                      key === 'requirements' ||
-                      key === 'knowledge' ||
-                      key === 'external'
-                    )
-                      openReferences(key);
-                  },
-                }}
-              >
-                <Button
-                  type="text"
-                  icon={<PlusOutlined />}
-                  aria-label="添加附件或引用"
-                  disabled={creating || sending}
-                />
-              </Dropdown>
-              <Space className="composer-model-controls">
+              <Space className="composer-primary-controls">
                 <Dropdown
                   trigger={['click']}
-                  placement="topRight"
-                  autoFocus
-                  classNames={{ root: 'workspace-model-picker-menu' }}
-                  open={modelPickerOpen}
-                  onOpenChange={setModelPickerOpen}
-                  disabled={creating || sending || Boolean(uncertain)}
+                  placement="topLeft"
+                  classNames={{
+                    root: 'user-composer-add-menu user-workspace-sidebar-menu',
+                  }}
                   menu={{
-                    selectable: true,
-                    selectedKeys: [
-                      selectedModelId ? 'model:' + selectedModelId : '',
-                      effort ? 'effort:' + effort : '',
-                      'scope:' + dataScope,
-                    ],
                     items: [
-                      ...(models.length
-                        ? models.map((entry) => ({
-                            key: 'model:' + entry.modelEntryId,
-                            disabled: !entry.available,
-                            label: (
-                              <span className="composer-model-option">
-                                <span>{modelDisplayLabel(entry)}</span>
-                                <small>
-                                  {modelServiceCaption(entry)}
-                                  {!entry.available ? ' · 缺少凭据' : ''}
-                                </small>
-                              </span>
-                            ),
-                            title:
-                              modelDisplayLabel(entry) +
-                              ' · ' +
-                              modelServiceCaption(entry),
-                          }))
-                        : [
-                            {
-                              key: 'empty',
-                              label: modelLoading
-                                ? '正在读取模型'
-                                : '没有可用模型',
-                              disabled: true,
-                            },
-                          ]),
-                      ...(model && model.effortValues.length
-                        ? [
-                            {
-                              key: 'efforts',
-                              label: '思考强度',
-                              children: [
-                                { key: 'effort:', label: '默认' },
-                                ...model.effortValues.map((value) => ({
-                                  key: 'effort:' + value,
-                                  label: value,
-                                })),
-                              ],
-                            },
-                          ]
-                        : []),
                       {
-                        key: 'scope',
-                        label: '资料范围',
-                        children: [
-                          {
-                            key: 'scope:syntheticPublicOnly',
-                            label: '仅合成 / 公开资料',
-                            disabled: !model?.allowedDataScopes.includes(
-                              'syntheticPublicOnly',
-                            ),
-                          },
-                          {
-                            key: 'scope:authorizedRelevantTestData',
-                            label: '已获准的相关测试资料',
-                            disabled: !model?.allowedDataScopes.includes(
-                              'authorizedRelevantTestData',
-                            ),
-                          },
-                        ],
+                        key: 'upload',
+                        label: '添加文件',
+                        icon: <PaperClipOutlined />,
+                        disabled: references.length + uploading.length >= 30,
                       },
                       { type: 'divider' },
                       {
-                        key: 'refresh',
-                        label: '刷新模型列表',
-                        icon: <ReloadOutlined />,
+                        key: 'history',
+                        label: '引用本人对话',
+                        icon: <CommentOutlined />,
+                      },
+                      {
+                        key: 'resources',
+                        label: '引用已有附件',
+                        icon: <FileSearchOutlined />,
+                      },
+                      {
+                        key: 'requirements',
+                        label: '引用需求版本',
+                        icon: <AppIcon name="file" />,
+                      },
+                      {
+                        key: 'knowledge',
+                        label: '引用项目知识',
+                        icon: <AppIcon name="book" />,
+                      },
+                      {
+                        key: 'external',
+                        label: '引用外部 MCP',
+                        icon: <ApiOutlined />,
                       },
                     ],
                     onClick: ({ key }) => {
-                      if (key === 'refresh') {
-                        void loadModels();
-                        return;
-                      }
-                      if (key.startsWith('model:')) {
-                        const selected = models.find(
-                          (entry) => entry.modelEntryId === key.slice(6),
-                        );
-                        if (selected) {
-                          setSelectedModelId(selected.modelEntryId);
-                          setSelectedRevision(selected.serviceRevision);
-                          setEffort(selected.defaultEffort);
-                          setModelPickerOpen(false);
-                        }
-                      } else if (key.startsWith('effort:')) {
-                        const value = key.slice(7);
-                        if (!value || model?.effortValues.includes(value))
-                          setEffort(value || null);
-                        setModelPickerOpen(false);
-                      } else if (
-                        key === 'scope:syntheticPublicOnly' ||
-                        key === 'scope:authorizedRelevantTestData'
-                      ) {
-                        const value =
-                          key === 'scope:syntheticPublicOnly'
-                            ? 'syntheticPublicOnly'
-                            : 'authorizedRelevantTestData';
-                        if (model?.allowedDataScopes.includes(value))
-                          setDataScope(value);
-                        setModelPickerOpen(false);
-                      }
+                      if (key === 'upload') uploadInput.current?.click();
+                      else if (
+                        key === 'history' ||
+                        key === 'resources' ||
+                        key === 'requirements' ||
+                        key === 'knowledge' ||
+                        key === 'external'
+                      )
+                        openReferences(key);
                     },
                   }}
                 >
                   <Button
                     type="text"
-                    className="composer-model-trigger"
-                    aria-label="本条消息模型与参数"
-                    title={model ? modelDisplayLabel(model) : '选择模型'}
-                  >
-                    <span>
-                      {model ? modelDisplayLabel(model) : '选择模型'}
-                      {model && effort ? ' · ' + effort : ''}
-                    </span>
-                    <AppIcon name="down" />
-                  </Button>
-                </Dropdown>
-                {inFlight ? (
-                  <Button
-                    className="send-message-button stop-message-button"
-                    shape="circle"
-                    type="primary"
-                    aria-label={
-                      taskMatches && stream.task?.status === 'cancelling'
-                        ? '正在停止回复'
-                        : '停止回复'
+                    icon={<PlusOutlined />}
+                    aria-label="添加附件或引用"
+                    disabled={
+                      creating || sending || accessMode === 'restricted'
                     }
-                    aria-disabled={
-                      sending ||
-                      (taskMatches && stream.task?.status === 'cancelling')
-                    }
-                    aria-busy={sending}
-                    icon={
-                      <span
-                        className="composer-stop-square"
-                        aria-hidden="true"
-                      />
-                    }
-                    onClick={() => {
-                      if (
-                        !sending &&
-                        !(taskMatches && stream.task?.status === 'cancelling')
-                      )
-                        void stopReply();
-                    }}
                   />
+                </Dropdown>
+                <WorkspaceAccessPicker
+                  mode={accessMode}
+                  disabled={creating || sending || Boolean(uncertain)}
+                  onChange={(mode) => {
+                    setAccessMode(mode);
+                    saveWorkspaceAccess(me.user.id, mode);
+                    setSendError(undefined);
+                    closeCandidates();
+                  }}
+                />
+              </Space>
+              <Space className="composer-model-controls">
+                <WorkspaceModelPicker
+                  models={models}
+                  model={model}
+                  effort={effort}
+                  open={modelPickerOpen}
+                  onOpenChange={setModelPickerOpen}
+                  loading={modelLoading}
+                  disabled={creating || sending || Boolean(uncertain)}
+                  onModel={(selected) => {
+                    setSelectedModelId(selected.modelEntryId);
+                    setSelectedRevision(selected.serviceRevision);
+                    setEffort(selected.defaultEffort);
+                  }}
+                  onEffort={setEffort}
+                />
+                {inFlight ? (
+                  <>
+                    <Button
+                      type="text"
+                      className="workspace-interrupt-send"
+                      disabled={
+                        sending ||
+                        !content.trim() ||
+                        !model ||
+                        !selectionCurrent ||
+                        Boolean(uncertain) ||
+                        Boolean(pendingMessages.error)
+                      }
+                      onClick={() => void submitMessage(undefined, 'interrupt')}
+                    >
+                      插队发送
+                    </Button>
+                    <Button
+                      shape="circle"
+                      aria-label="加入消息队列"
+                      title="加入消息队列"
+                      icon={<AppIcon name="send" />}
+                      disabled={
+                        sending ||
+                        !content.trim() ||
+                        !model ||
+                        !selectionCurrent ||
+                        Boolean(uncertain) ||
+                        Boolean(pendingMessages.error)
+                      }
+                      onClick={() => void submitMessage()}
+                    />
+                    <Button
+                      className="send-message-button stop-message-button"
+                      shape="circle"
+                      type="primary"
+                      aria-label={
+                        taskMatches && stream.task?.status === 'cancelling'
+                          ? '正在停止回复'
+                          : '停止回复'
+                      }
+                      aria-disabled={
+                        sending ||
+                        (taskMatches && stream.task?.status === 'cancelling')
+                      }
+                      aria-busy={sending}
+                      icon={
+                        <span
+                          className="composer-stop-square"
+                          aria-hidden="true"
+                        />
+                      }
+                      onClick={() => {
+                        if (
+                          !sending &&
+                          !(taskMatches && stream.task?.status === 'cancelling')
+                        )
+                          void stopReply();
+                      }}
+                    />
+                  </>
                 ) : (
                   <Button
                     className="send-message-button"
@@ -2608,7 +2620,6 @@ export function Workspace({
                       uploading.some((entry) => !entry.error) ||
                       !model ||
                       !selectionCurrent ||
-                      !model.allowedDataScopes.includes(dataScope) ||
                       Boolean(
                         model && effort && !model.effortValues.includes(effort),
                       )

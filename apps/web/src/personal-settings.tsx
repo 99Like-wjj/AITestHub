@@ -14,9 +14,15 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { CopyOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons';
+import {
+  CloseOutlined,
+  CopyOutlined,
+  DeleteOutlined,
+  PlusOutlined,
+} from '@ant-design/icons';
 import { api, describeError } from './api';
 import { uiLayers } from './ui-layers';
+import { registerNavigationBlocker } from './navigation-guard';
 import { passwordRules } from './auth';
 import { AvailableModelList } from './model-settings';
 import { ExternalMcpPersonalKeys } from './external-mcp-settings';
@@ -31,6 +37,7 @@ import {
   keysListSchema,
   personalKeyCreatedSchema,
 } from '../../../packages/contracts/src/identity';
+import './personal-settings-page.css';
 
 function KeySettings() {
   const { modal, message } = App.useApp();
@@ -235,26 +242,24 @@ function KeySettings() {
 
 export function PersonalSettings({
   initialTab,
+  onTabChange,
   user,
-  open,
   onClose,
   onRefresh,
   onPasswordChanged,
-  onAfterClose,
   onLogout,
   projects,
 }: {
   initialTab?: string;
+  onTabChange: (tab: string) => void;
   user: User;
-  open: boolean;
   onClose: () => void;
   onRefresh: () => Promise<void>;
   onPasswordChanged: () => void;
-  onAfterClose: () => void;
   onLogout: () => Promise<void>;
   projects: Project[];
 }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const tabOrder = [
     'profile',
     'security',
@@ -276,8 +281,8 @@ export function PersonalSettings({
   }, []);
   const [activeTab, setActiveTab] = useState(initialTab ?? 'profile');
   useEffect(() => {
-    if (open && initialTab) setActiveTab(initialTab);
-  }, [open, initialTab]);
+    if (initialTab) setActiveTab(initialTab);
+  }, [initialTab]);
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
   const [profileForm] = Form.useForm<{ displayName: string }>();
@@ -286,15 +291,56 @@ export function PersonalSettings({
     newPassword: string;
     confirmPassword: string;
   }>();
+  const displayName = Form.useWatch('displayName', {
+    form: profileForm,
+    preserve: true,
+  });
+  const currentPassword = Form.useWatch('currentPassword', {
+    form: passwordForm,
+    preserve: true,
+  });
+  const newPassword = Form.useWatch('newPassword', {
+    form: passwordForm,
+    preserve: true,
+  });
+  const confirmPassword = Form.useWatch('confirmPassword', {
+    form: passwordForm,
+    preserve: true,
+  });
+  const dirty =
+    (displayName !== undefined && displayName !== user.displayName) ||
+    Boolean(currentPassword || newPassword || confirmPassword);
 
   useEffect(() => {
-    if (open) {
-      profileForm.setFieldsValue({ displayName: user.displayName });
-      setError(undefined);
-    } else {
-      passwordForm.resetFields();
-    }
-  }, [open, user.displayName, profileForm, passwordForm]);
+    profileForm.setFieldsValue({ displayName: user.displayName });
+    setError(undefined);
+  }, [user.displayName, profileForm]);
+  useEffect(() => {
+    if (!pending && !dirty) return;
+    const unregister = registerNavigationBlocker((proceed) => {
+      if (pending) {
+        void message.info('个人设置正在提交，请先等待本次回执。');
+        return;
+      }
+      modal.confirm({
+        title: '放弃未保存的个人设置？',
+        content: '姓名或密码尚未保存，离开后需要重新填写。',
+        okText: '放弃并离开',
+        cancelText: '继续编辑',
+        zIndex: uiLayers.confirmation,
+        onOk: proceed,
+      });
+    });
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => {
+      unregister();
+      window.removeEventListener('beforeunload', warn);
+    };
+  }, [pending, dirty, message, modal]);
 
   async function updateProfile(body: {
     displayName?: string;
@@ -336,7 +382,6 @@ export function PersonalSettings({
         },
       });
       passwordForm.resetFields();
-      onClose();
       onPasswordChanged();
     } catch (err) {
       setError(describeError(err));
@@ -346,25 +391,38 @@ export function PersonalSettings({
   }
 
   return (
-    <Modal
-      title="个人设置"
-      className="personal-settings-modal"
-      zIndex={uiLayers.dialog}
-      open={open}
-      onCancel={onClose}
-      afterClose={onAfterClose}
-      width={1030}
-      footer={null}
-      destroyOnHidden
+    <section
+      className="personal-settings-page"
+      aria-labelledby="personal-settings-title"
     >
+      <header className="personal-settings-page-header">
+        <h1 id="personal-settings-title">个人设置</h1>
+        <Button
+          type="text"
+          className="personal-settings-close"
+          icon={<CloseOutlined />}
+          aria-label="关闭个人设置，返回 AI 工作台"
+          title="返回 AI 工作台"
+          disabled={pending}
+          onClick={onClose}
+        />
+      </header>
       {error && (
-        <Alert className="section-alert" type="error" title={error} showIcon />
+        <Alert
+          className="personal-settings-page-error section-alert"
+          type="error"
+          title={error}
+          showIcon
+        />
       )}
       <Tabs
-        className="personal-settings-tabs"
+        className="personal-settings-tabs personal-settings-page-body"
         tabPlacement={compactMenu ? 'top' : 'start'}
         activeKey={activeTab}
-        onChange={setActiveTab}
+        onChange={(tab) => {
+          setActiveTab(tab);
+          onTabChange(tab);
+        }}
         destroyOnHidden
         items={[
           {
@@ -560,6 +618,6 @@ export function PersonalSettings({
             tabOrder.indexOf(left.key) - tabOrder.indexOf(right.key),
         )}
       />
-    </Modal>
+    </section>
   );
 }

@@ -25,8 +25,12 @@ import { OperationService, canonicalJson } from '../operations/service.js';
 import { DomainError, stale } from '../errors.js';
 import { rejectMissingAcceptedReceipt } from '../recovery/receipts.js';
 import { audit } from '../events.js';
-import { assertSafeModelInput } from '../security/model-input.js';
-import { assertModelDataScope } from '../security/model-data-scope.js';
+import {
+  assertSafeModelInput,
+  assertModelInputStructure,
+  withWorkspaceModelAccess,
+} from '../security/model-input.js';
+import { assertConversationDataScope } from '../security/model-data-scope.js';
 import { exportConversationMarkdown } from './markdown-export.js';
 import {
   conversationDto,
@@ -923,13 +927,23 @@ export class ConversationsService {
   }
   async send(actor: ActorContext, conversationId: string, raw: unknown) {
     const input = sendMessageInputSchema.parse(raw);
-    assertSafeModelInput(input.content);
+    if (input.accessMode) assertModelInputStructure(input.content);
+    else assertSafeModelInput(input.content);
     // Resolve before enqueue and again in worker. No model request is made by this path.
     const selection = await this.configuration.resolveRuntimeSelection(
       actor,
       input.modelSelection,
     );
-    assertModelDataScope(selection, input.dataScope);
+    assertConversationDataScope(selection, input.dataScope, input.accessMode);
+    if (
+      input.accessMode === 'restricted' &&
+      (input.references.length > 0 || input.operationTarget !== null)
+    )
+      throw new DomainError(
+        'FORBIDDEN',
+        '受限访问不能读取项目引用或指定业务操作目标，请切换完全访问。',
+        403,
+      );
     if (
       input.dataScope === 'syntheticPublicOnly' &&
       input.references.some(
@@ -941,10 +955,9 @@ export class ConversationsService {
         '所选来源包含相关内部测试资料，请明确选择对应资料范围。',
         422,
       );
-    const frozenReferences = await this.references.freeze(
-      actor,
-      input.references,
-      conversationId,
+    const frozenReferences = await withWorkspaceModelAccess(
+      input.accessMode,
+      () => this.references.freeze(actor, input.references, conversationId),
     );
     return this.#operations.execute(
       actor,
@@ -954,6 +967,7 @@ export class ConversationsService {
       async (tx) => {
         await conversationRow(tx, actor, conversationId, true);
         if (
+          !input.accessMode &&
           input.dataScope === 'syntheticPublicOnly' &&
           (
             await tx.query(
@@ -1006,8 +1020,8 @@ export class ConversationsService {
         const userMessageId = randomUUID();
         const assistantMessageId = randomUUID();
         const taskId = randomUUID();
-        const snapshot =
-          'runtimeVersion' in selection
+        const snapshot = {
+          ...('runtimeVersion' in selection
             ? {
                 schemaVersion: 'ath.model-snapshot.v2',
                 modelServiceId: selection.modelServiceId,
@@ -1025,7 +1039,11 @@ export class ConversationsService {
                 provider: selection.provider,
                 modelId: selection.modelId,
                 effort: selection.effort,
-              };
+              }),
+          ...(input.accessMode
+            ? { workspaceAccessMode: input.accessMode }
+            : {}),
+        };
         for (const [id, role, content, refs] of [
           [userMessageId, 'user', input.content, frozenReferences],
           [assistantMessageId, 'assistant', '', []],

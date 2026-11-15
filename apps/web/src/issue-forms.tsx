@@ -1,5 +1,14 @@
-import { useEffect, useState } from 'react';
-import { Alert, Checkbox, Form, Input, Select, Typography } from 'antd';
+import { useEffect, useRef, useState } from 'react';
+import {
+  Alert,
+  Button,
+  Checkbox,
+  Form,
+  Input,
+  Select,
+  Space,
+  Typography,
+} from 'antd';
 import { z } from 'zod';
 import { issueSeveritySchema } from '../../../packages/contracts/src/domain';
 import {
@@ -16,12 +25,13 @@ import {
   manualVerificationInputSchema,
   manualVerificationReceiptSchema,
   singleIssueLifecycleInputSchema,
+  issueDetailSchema,
 } from '../../../packages/contracts/src/issues';
 import type { Issue, Problem } from '../../../packages/contracts/src/issues';
 import type { Project } from './types';
 import type { IssueNavigation, IssueMember } from './issue-context';
-import { severityLabels } from './issue-context';
-import { api } from './api';
+import { issueStateLabels, severityLabels } from './issue-context';
+import { api, describeError } from './api';
 import { CommandDialog, useBusinessCommand } from './business-command';
 import { ProjectAttachments } from './project-attachments';
 
@@ -485,8 +495,22 @@ export function IssueActionEditor({
   const command = useBusinessCommand(target?.session ?? null);
   const [dirty, setDirty] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [handlingBasis, setHandlingBasis] = useState<Issue | null>(null);
+  const [comparison, setComparison] = useState<Issue | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string>();
+  const currentTarget = useRef(target);
+  currentTarget.current = target;
+  const refreshController = useRef<AbortController | null>(null);
+  const staleHandling =
+    target?.kind === 'handling' && command.errorCode === 'STALE_BASE_REVISION';
   const outcome = Form.useWatch('outcome', form) as string | undefined;
   useEffect(() => {
+    refreshController.current?.abort();
+    setHandlingBasis(null);
+    setComparison(null);
+    setRefreshing(false);
+    setRefreshError(undefined);
     if (!target) return;
     form.resetFields();
     setDirty(false);
@@ -499,9 +523,40 @@ export function IssueActionEditor({
       returnToInProgress: false,
       resolution: 'fixed',
     });
+    return () => refreshController.current?.abort();
   }, [target, form]);
+  async function refreshHandling() {
+    if (target?.kind !== 'handling' || refreshing || command.pending) return;
+    const captured = target;
+    const controller = new AbortController();
+    refreshController.current?.abort();
+    refreshController.current = controller;
+    setRefreshing(true);
+    setRefreshError(undefined);
+    setComparison(null);
+    try {
+      const result = await api(
+        `/projects/${project.id}/issues/${target.issue.id}`,
+        { signal: controller.signal },
+        issueDetailSchema,
+      );
+      if (!controller.signal.aborted && currentTarget.current === captured)
+        setComparison(result.issue);
+    } catch (failure) {
+      if (!controller.signal.aborted && currentTarget.current === captured)
+        setRefreshError(describeError(failure));
+    } finally {
+      if (!controller.signal.aborted && currentTarget.current === captured)
+        setRefreshing(false);
+    }
+  }
+  function memberName(id: string | null) {
+    if (id === null) return '待认领';
+    const member = members.find((row) => row.id === id);
+    return member ? `${member.displayName}（${member.account}）` : id;
+  }
   async function save(values: IssueFields) {
-    if (!target || uploading) return;
+    if (!target || uploading || refreshing || staleHandling) return;
     const response = await command.run(async (commandId) => {
       if (target.kind === 'dismiss')
         return api(
@@ -516,7 +571,13 @@ export function IssueActionEditor({
           },
           problemDismissalReceiptSchema,
         );
-      const base = { commandId, rowVersion: target.issue.rowVersion };
+      const base = {
+        commandId,
+        rowVersion:
+          target.kind === 'handling'
+            ? (handlingBasis ?? target.issue).rowVersion
+            : target.issue.rowVersion,
+      };
       if (target.kind === 'handling')
         return api(
           `/projects/${project.id}/issues/${target.issue.id}/handling`,
@@ -600,11 +661,66 @@ export function IssueActionEditor({
       title={title}
       command={command}
       dirty={dirty}
-      busy={uploading}
+      busy={uploading || refreshing}
+      allowSave={!staleHandling}
       onClose={onClose}
       onSave={() => form.submit()}
       saveLabel={title}
     >
+      {staleHandling && (
+        <Alert
+          type="warning"
+          showIcon
+          className="section-alert"
+          title="指派基准已变化，当前负责人选择和说明草稿已保留"
+          description={
+            <Space direction="vertical">
+              <span>
+                请先只读刷新并比较最新状态，再明确采用新基准；不会自动覆盖或提交。
+              </span>
+              <Button
+                loading={refreshing}
+                disabled={command.pending || command.uncertain}
+                onClick={() => void refreshHandling()}
+              >
+                保留草稿并刷新最新状态
+              </Button>
+              {refreshError && (
+                <Typography.Text type="danger">{refreshError}</Typography.Text>
+              )}
+              {comparison && target?.kind === 'handling' && (
+                <>
+                  <span>
+                    编辑基准 v{(handlingBasis ?? target.issue).rowVersion}：
+                    {memberName((handlingBasis ?? target.issue).assigneeId)}
+                    ；最新 v{comparison.rowVersion}：
+                    {memberName(comparison.assigneeId)} ·{' '}
+                    {issueStateLabels[comparison.state]}
+                  </span>
+                  <Button
+                    onClick={() => {
+                      setHandlingBasis(comparison);
+                      setComparison(null);
+                      command.setError(undefined);
+                    }}
+                  >
+                    采用最新基准，保留草稿继续编辑
+                  </Button>
+                </>
+              )}
+            </Space>
+          }
+        />
+      )}
+      {!staleHandling && handlingBasis && (
+        <Alert
+          type="info"
+          showIcon
+          className="section-alert"
+          title={`已采用最新基准 v${handlingBasis.rowVersion}，原负责人选择和说明草稿保留`}
+          description="请核对草稿后再次明确保存；期间若又有修改，仍按并发版本校验。"
+        />
+      )}
       <Alert
         type="info"
         showIcon

@@ -15,6 +15,22 @@ export interface WorkspaceDraft {
   content: string;
   references: PreparedReference[];
 }
+/** Rendering/autosave of unchanged fields must not replace a dispatched draft.
+ * An actual edit still gets a distinct identity, including edit-then-undo. */
+export function saveWorkspaceDraft(
+  drafts: Map<string, WorkspaceDraft>,
+  key: string,
+  next: WorkspaceDraft,
+): WorkspaceDraft {
+  const current = drafts.get(key);
+  if (
+    current?.content === next.content &&
+    current.references === next.references
+  )
+    return current;
+  drafts.set(key, next);
+  return next;
+}
 export interface PendingWorkspaceSend {
   conversationId: string;
   commandId: string;

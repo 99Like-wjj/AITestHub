@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import { CheckOutlined, CopyOutlined } from '@ant-design/icons';
 import type { ReactNode } from 'react';
 import type {
   AiTaskEvent,
@@ -641,10 +642,12 @@ export function WorkspaceTurn({
         <div className="workspace-turn-footer">
           <button
             type="button"
-            className="workspace-turn-link"
+            className="workspace-turn-link workspace-copy-reply"
             onClick={copyMarkdown}
+            aria-label="复制 AI 回复内容"
+            title="复制 AI 回复内容"
           >
-            复制 Markdown
+            {copyState === 'copied' ? <CheckOutlined /> : <CopyOutlined />}
           </button>
           <span role="status">
             {copyState === 'copied'

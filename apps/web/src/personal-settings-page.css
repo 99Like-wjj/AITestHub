@@ -1,0 +1,101 @@
+.personal-settings-container {
+  min-width: 0;
+  background: var(--surface);
+}
+.personal-settings-page {
+  min-height: 100dvh;
+  color: var(--text);
+  background: var(--surface);
+}
+.personal-settings-page-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 76px;
+  padding: 16px 36px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.personal-settings-page-header h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+}
+.personal-settings-close.ant-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  color: var(--muted);
+  font-size: 16px;
+}
+.personal-settings-page-body {
+  width: 100%;
+  max-width: 1440px;
+  padding: 32px 36px 48px;
+}
+.personal-settings-page-error {
+  margin: 24px 36px 0;
+}
+.personal-settings-page .personal-settings-tabs.ant-tabs-left > .ant-tabs-nav {
+  width: 184px;
+  flex: 0 0 184px;
+  margin-right: 36px;
+}
+.personal-settings-page .personal-settings-tabs > .ant-tabs-content-holder,
+.personal-settings-page .personal-settings-tabs > .ant-tabs-body-holder {
+  min-width: 0;
+}
+.personal-settings-page .personal-settings-tabs .ant-tabs-tabpane {
+  min-width: 0;
+}
+.personal-settings-page .personal-settings-tabs .ant-tabs-tab {
+  padding: 11px 14px;
+  font-size: 13px;
+}
+.personal-settings-page .personal-logout {
+  margin-left: 10px;
+}
+.personal-settings-page .model-service-list {
+  width: 100%;
+}
+@media (max-width: 1000px) {
+  .personal-settings-page-header {
+    padding-inline: 24px;
+  }
+  .personal-settings-page-body {
+    padding: 24px;
+  }
+  .personal-settings-page-error {
+    margin: 20px 24px 0;
+  }
+  .personal-settings-page
+    .personal-settings-tabs.ant-tabs-left
+    > .ant-tabs-nav {
+    width: 160px;
+    flex-basis: 160px;
+    margin-right: 24px;
+  }
+}
+@media (max-width: 700px) {
+  .personal-settings-page-header {
+    min-height: 64px;
+    padding: 12px 16px;
+  }
+  .personal-settings-page-header h1 {
+    font-size: 18px;
+  }
+  .personal-settings-page-body {
+    padding: 16px;
+  }
+  .personal-settings-page-error {
+    margin: 16px 16px 0;
+  }
+  .personal-settings-page .personal-settings-tabs > .ant-tabs-nav {
+    margin-bottom: 20px;
+  }
+}

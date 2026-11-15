@@ -23,6 +23,8 @@ import { assertFrozenTaskSources } from '../conversations/task-sources.js';
 import type { BusinessToolRegistry, PreparedBusinessCall } from './registry.js';
 import { withHumanConfirmedExecution } from './human-confirmation.js';
 import { conversationRow } from '../conversations/common.js';
+import { workspaceAccessModeSchema } from '../../../contracts/src/workspace-access.js';
+import { withWorkspaceModelAccess } from '../security/model-input.js';
 
 interface ConfirmationRow {
   id: string;
@@ -450,10 +452,28 @@ export class BusinessConfirmations {
     );
     if (!receipt.rowCount) return this.get(actor, id);
     try {
-      const serviceActor: ActorContext =
-        row.origin === 'internal-ai'
-          ? { ...actor, entrypoint: 'internal-ai', requestId: row.task_id! }
-          : { ...actor };
+      let serviceActor: ActorContext;
+      if (row.origin === 'internal-ai' && row.task_id) {
+        serviceActor = {
+          ...actor,
+          entrypoint: 'internal-ai',
+          requestId: row.task_id,
+        };
+      } else if (row.origin === 'official-mcp' && row.key_id) {
+        // A Web accept is a human event, not a replacement for the original Key.
+        // Registry/service authorization rechecks this Key and its current scope.
+        serviceActor = {
+          ...actor,
+          entrypoint: 'official-mcp',
+          keyId: row.key_id,
+        };
+      } else {
+        throw new DomainError(
+          'STALE_BASE_REVISION',
+          '原提案的执行身份不完整，请重新比较；没有执行。',
+          412,
+        );
+      }
       const response = await withHumanConfirmedExecution(
         this.db,
         actor,
@@ -472,21 +492,37 @@ export class BusinessConfirmations {
           resolutionSource: source,
         },
         async () => {
-          const prepared = await this.registry.prepare(
-            serviceActor,
-            row.tool_name,
-            row.arguments,
+          const mode =
+            row.origin === 'internal-ai' && row.task_id
+              ? (
+                  await this.db.query<{ mode: unknown }>(
+                    `SELECT m.model_snapshot->>'workspaceAccessMode' mode FROM app.ai_tasks t
+                 JOIN app.ai_messages m ON m.id=t.user_message_id
+                 WHERE t.id=$1 AND t.owner_id=$2`,
+                    [row.task_id, row.owner_id],
+                  )
+                ).rows[0]?.mode
+              : undefined;
+          return withWorkspaceModelAccess(
+            workspaceAccessModeSchema.optional().parse(mode ?? undefined),
+            async () => {
+              const prepared = await this.registry.prepare(
+                serviceActor,
+                row.tool_name,
+                row.arguments,
+              );
+              if (
+                !prepared.confirmation ||
+                prepared.confirmation.digest !== row.scope_digest
+              )
+                throw new DomainError(
+                  'STALE_BASE_REVISION',
+                  '提案上下文已变化，请重新比较；没有执行。',
+                  412,
+                );
+              return prepared.execute();
+            },
           );
-          if (
-            !prepared.confirmation ||
-            prepared.confirmation.digest !== row.scope_digest
-          )
-            throw new DomainError(
-              'STALE_BASE_REVISION',
-              '提案上下文已变化，请重新比较；没有执行。',
-              412,
-            );
-          return prepared.execute();
         },
       );
       if (!(await this.finishClaim(row, 'completed', response)))

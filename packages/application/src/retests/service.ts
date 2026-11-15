@@ -202,13 +202,19 @@ export class RetestService {
             selected.contextLabel ??
             (sourceRunIds.length
               ? `原执行 ${sourceRunIds.join(',')}`
-              : `人工缺陷 ${issue.id}`);
+              : '人工缺陷复测');
           const key = semanticDigest({
             kind: selected.kind,
             versionId,
             environmentId: selected.environmentId,
+            environmentRevisionId: environment.environment.revisionId,
             productBuild: selected.productBuild,
-            contextLabel,
+            // A display fallback is not an execution-context distinction.
+            // Explicit contexts stay separate; otherwise preserve actual source runs.
+            context:
+              selected.contextLabel === undefined
+                ? { sourceRunIds }
+                : { label: selected.contextLabel },
           });
           let group = groups.get(key);
           if (!group) {

@@ -112,7 +112,18 @@ export class ProjectService {
 
   async members(actor: ActorContext, projectId: string) {
     return this.db.transaction(async (tx) => {
-      await requireProject(tx, actor, projectId, 'project.members.manage');
+      // The Web roster is readable by current project members; management and
+      // non-Web tools retain their separate authorization boundary.
+      const webUser =
+        actor.entrypoint === 'web' ? await currentUser(tx, actor) : null;
+      await requireProject(
+        tx,
+        actor,
+        projectId,
+        webUser && !webUser.is_platform_admin
+          ? 'project.read'
+          : 'project.members.manage',
+      );
       const result = await tx.query<MemberRow>(
         `SELECT m.user_id,u.account,u.display_account,u.display_name,u.active,m.is_admin,m.roles,m.row_version
          FROM app.project_members m JOIN app.users u ON u.id=m.user_id

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { modelConnectionObservationSchema } from './model-connections.js';
 import {
 commandIdSchema,
 idSchema,
@@ -176,6 +177,7 @@ export const modelServiceV2Schema = z.strictObject({
 });
 export const modelServiceV2ListSchema = z.strictObject({
   services: z.array(modelServiceV2Schema),
+  connections: z.array(modelConnectionObservationSchema).optional(),
 });
 export const modelServiceV2ReceiptSchema = z.strictObject({
   modelService: modelServiceV2Schema,

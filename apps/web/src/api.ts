@@ -1,5 +1,4 @@
 import type { z } from 'zod';
-import { webWireStatus } from './web-wire-status';
 import {
   announceIdentityChange,
   identityContextEpoch,
@@ -20,6 +19,7 @@ export class ApiError extends Error {
     readonly code: string,
     readonly requestId?: string,
     readonly retryAfter: string | null = null,
+    readonly details?: Readonly<Record<string, unknown>>,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -39,6 +39,7 @@ function errorObject(value: unknown): {
   code?: string;
   message?: string;
   requestId?: string;
+  details?: Record<string, unknown>;
 } {
   if (typeof value !== 'object' || value === null || !('error' in value))
     return {};
@@ -49,6 +50,12 @@ function errorObject(value: unknown): {
       ? value.meta
       : null;
   return {
+    ...('details' in error &&
+    typeof error.details === 'object' &&
+    error.details !== null &&
+    !Array.isArray(error.details)
+      ? { details: Object.fromEntries(Object.entries(error.details)) }
+      : {}),
     ...('code' in error && typeof error.code === 'string'
       ? { code: error.code }
       : {}),
@@ -157,7 +164,7 @@ export async function api(
       'NETWORK_UNCONFIRMED',
     );
   }
-  const responseStatus = webWireStatus(response);
+  const responseStatus = response.status;
   if (changesIdentity && (response.ok || responseStatus >= 500))
     announceIdentityChange();
   let value: unknown;
@@ -203,6 +210,7 @@ export async function api(
       error.code ?? 'HTTP_ERROR',
       error.requestId,
       response.headers?.get('Retry-After') ?? null,
+      error.details,
     );
     if (originalCommand) {
       if (isUncertainMutationError(failure))

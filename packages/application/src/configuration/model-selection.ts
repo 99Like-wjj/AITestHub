@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { workspaceAccessModeSchema } from '../../../contracts/src/workspace-access.js';
 import { modelSelectionInputSchema } from '../../../contracts/src/configuration.js';
 import { legacyMessageModelSnapshotSchema } from '../../../contracts/src/conversations.js';
 import {
@@ -44,18 +45,27 @@ export function readPersistedModelSelection(raw: unknown) {
 
 const legacyMessage = legacyMessageModelSnapshotSchema.extend({
   provenanceCaptured: z.boolean().optional(),
+  workspaceAccessMode: workspaceAccessModeSchema.optional(),
 });
 const v2Message = messageModelSnapshotV2Schema.extend({
   provenanceCaptured: z.boolean().optional(),
+  workspaceAccessMode: workspaceAccessModeSchema.optional(),
 });
 /** Explicit version readers: an old message is never joined to today's first model. */
 export function readMessageModelSnapshot(raw: unknown) {
   const v2 = v2Message.safeParse(raw);
   if (v2.success) {
-    const { provenanceCaptured: _private, ...snapshot } = v2.data;
+    const {
+      provenanceCaptured: _private,
+      workspaceAccessMode: _access,
+      ...snapshot
+    } = v2.data;
     return { kind: 'v2' as const, snapshot };
   }
-  const { provenanceCaptured: _private, ...snapshot } =
-    legacyMessage.parse(raw);
+  const {
+    provenanceCaptured: _private,
+    workspaceAccessMode: _access,
+    ...snapshot
+  } = legacyMessage.parse(raw);
   return { kind: 'legacy' as const, snapshot };
 }

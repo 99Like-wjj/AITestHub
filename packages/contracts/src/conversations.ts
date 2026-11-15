@@ -1,5 +1,6 @@
 import { modelDataScopeSchema } from './configuration.js';
 import { z } from 'zod';
+import { workspaceAccessModeSchema } from './workspace-access.js';
 import {
 commandIdSchema,
 idSchema,
@@ -153,6 +154,7 @@ export const legacySendMessageInputSchema = z.strictObject({
 });
 export const sendMessageInputSchema = legacySendMessageInputSchema.extend({
   modelSelection: modelSelectionV2Schema,
+  accessMode: workspaceAccessModeSchema.optional(),
 });
 export const taskStateSchema = z.enum([
   'accepted',

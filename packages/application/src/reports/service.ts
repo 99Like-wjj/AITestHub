@@ -447,6 +447,21 @@ export class ReportService {
           })[c] ?? c,
       );
     const facts = report.facts;
+    const scope = facts.scope;
+    // Resolve only the immutable revision identified by the saved report scope.
+    // Current configuration names must never fill a historical export.
+    const environmentName = await this.db.transaction(async (tx) => {
+      await requireProject(tx, actor, projectId, 'project.read');
+      const revision = (
+        await tx.query<{ name: string | null }>(
+          `SELECT content->>'name' name FROM app.test_configuration_revisions
+           WHERE id=$1 AND configuration_id=$2 AND project_id=$3 AND kind='environment'`,
+          [scope.environmentRevisionId, scope.environmentId, projectId],
+        )
+      ).rows[0];
+      return revision?.name ?? '未记录';
+    });
+    const contextHtml = `<h2>冻结的执行上下文</h2><dl><dt>运行</dt><dd>${escape(scope.runId)}</dd><dt>环境</dt><dd>${escape(environmentName)} · ${escape(scope.environmentId)}</dd><dt>环境修订</dt><dd>${escape(scope.environmentRevisionId)}</dd><dt>构建标识</dt><dd>${escape(scope.productBuild?.trim() ? scope.productBuild : '未登记')}</dd><dt>范围来源</dt><dd>${escape(scope.sourceType)} · ${escape(scope.sourceRevisionId)}</dd><dt>范围摘要</dt><dd>${escape(scope.snapshotDigest)}</dd></dl>`;
     const handling = report.handlingAtCapture;
     const handlingHtml = handling
       ? `<h2>导出时的人工处理</h2><p>截取时间 ${escape(handling.capturedAt)}；问题 ${handling.statistics.problemCount} 项（待确认 ${handling.statistics.pendingProblemCount}），关联缺陷记录 ${handling.statistics.issueCount} 条（未关闭 ${handling.statistics.openIssueCount}、已合并 ${handling.statistics.mergedIssueCount}）。这些数量不等同失败用例数或根因数。</p><ul>${handling.problems.map((p) => `<li>问题：${escape(p.title)} · ${escape(p.state)}</li>`).join('')}${handling.issues.map((i) => `<li>${escape(i.number)}：${escape(i.title)} · ${escape(i.state)} · ${escape(i.assignee?.displayName ?? '待认领')}${i.mergedIntoId ? ' · 已合并' : ''}${i.latestVerification ? ` · 最近复测 ${escape(i.latestVerification.method)}/${escape(i.latestVerification.outcome)}` : ''}</li>`).join('')}</ul>`
@@ -458,9 +473,9 @@ export class ReportService {
     const rows = facts.items
       .map(
         ({ scopeItem, result }) =>
-          `<tr><td>${escape(scopeItem.scenario.title)}</td><td>${escape(scopeItem.content.title)}</td><td>${escape(result?.initialOutcome ?? 'notReported')}</td><td>${escape(result?.reportedOutcome ?? 'notReported')}</td><td>${escape(result ? (result.finalOutcome ?? '尚无人工最终结论') : 'notReported')}</td><td><pre>${escape(result?.content.actualObservations)}</pre></td></tr>`,
+          `<tr><td>${escape(scopeItem.scenario.title)}</td><td>${escape(scopeItem.content.title)}<br>需求版本：${escape(scopeItem.requirementVersionId)}<br>批准快照：${escape(scopeItem.approvalSnapshotId)}</td><td>${escape(result?.initialOutcome ?? 'notReported')}</td><td>${escape(result?.reportedOutcome ?? 'notReported')}</td><td>${escape(result ? (result.finalOutcome ?? '尚无人工最终结论') : 'notReported')}</td><td><pre>${escape(result?.content.actualObservations)}</pre></td></tr>`,
       )
       .join('');
-    return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>AITestHub 执行报告</title><style>body{font:15px system-ui;margin:32px;color:#172b27;background:#fff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #b9c9c4;padding:9px;text-align:left}pre{white-space:pre-wrap;overflow-wrap:anywhere}h1{color:#14756b}</style><h1>AITestHub 执行报告</h1><p>报告 ${escape(id)} · 导出修订 ${escape(report.revisionId)} · 生成时间 ${escape(facts.capturedAt)}</p><p>来源 ${escape(provenance)} · 执行 ${escape(facts.executionState)} · 声明数据交付 ${escape(facts.deliveryStatus)}</p><p>固定范围 ${facts.statistics.denominator}，已报告 ${facts.statistics.reportedItems}，未报告 ${facts.statistics.reported.notReported}，待传文件 ${facts.missingFileIds.length}。人工结论不覆盖原始判断，不自动改变缺陷状态。</p><table><thead><tr><th>场景</th><th>用例</th><th>初始判断</th><th>当前上报判断</th><th>人工最终结论</th><th>实际观察</th></tr></thead><tbody>${rows}</tbody></table>${handlingHtml}<h2>文件清单</h2><ul>${facts.evidence.map((file) => `<li>${escape(file.originalName)} · ${escape(file.lastKnownFileStatus)} · ${escape(file.manifest.captureCompleteness)} · ${escape(file.fileId)}</li>`).join('')}</ul><p>此导出包含文本事实和文件标识，证据原件仍经平台当前授权下载；没有匿名分享。</p></html>`;
+    return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>AITestHub 执行报告</title><style>body{font:15px system-ui;margin:32px;color:#172b27;background:#fff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #b9c9c4;padding:9px;text-align:left}pre{white-space:pre-wrap;overflow-wrap:anywhere}h1{color:#14756b}</style><h1>AITestHub 执行报告</h1><p>报告 ${escape(id)} · 导出修订 ${escape(report.revisionId)} · 生成时间 ${escape(facts.capturedAt)}</p><p>来源 ${escape(provenance)} · 执行 ${escape(facts.executionState)} · 声明数据交付 ${escape(facts.deliveryStatus)}</p><p>固定范围 ${facts.statistics.denominator}，已报告 ${facts.statistics.reportedItems}，未报告 ${facts.statistics.reported.notReported}，待传文件 ${facts.missingFileIds.length}。人工结论不覆盖原始判断，不自动改变缺陷状态。</p>${contextHtml}<table><thead><tr><th>场景</th><th>用例</th><th>初始判断</th><th>当前上报判断</th><th>人工最终结论</th><th>实际观察</th></tr></thead><tbody>${rows}</tbody></table>${handlingHtml}<h2>文件清单</h2><ul>${facts.evidence.map((file) => `<li>${escape(file.originalName)} · ${escape(file.lastKnownFileStatus)} · ${escape(file.manifest.captureCompleteness)} · ${escape(file.fileId)}</li>`).join('')}</ul><p>此导出包含文本事实和文件标识，证据原件仍经平台当前授权下载；没有匿名分享。</p></html>`;
   }
 }
