@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createDeepAgent } from 'deepagents';
 import { createMiddleware, tool } from 'langchain';
 import {
   AIMessage,
+  HumanMessage,
   type BaseMessage,
   isAIMessage,
+  isToolMessage,
 } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { LLMResult } from '@langchain/core/outputs';
@@ -57,6 +60,12 @@ import {
   type SharedSkillRuleSnapshot,
   type SharedSkillRuleReadMetadata,
 } from '../../../packages/application/src/shared-skill-rules/index.js';
+import type { RetainedConversationHistory } from '../../../packages/application/src/conversations/retained-history.js';
+import {
+  recordedToolProvenanceSchema,
+  retainedHistoryMessage,
+} from './retained-history.js';
+import type { FrozenReference } from '../../../packages/application/src/conversations/references.js';
 
 export const AI_TOOL_ALLOWLIST = [
   AI_PROGRESS_TOOL_NAME,
@@ -75,6 +84,9 @@ export interface AiHostRequest {
   signal?: AbortSignal;
   onEvent?: (event: AiHostEvent) => void;
   contextRevision?: string;
+  contextSourcesChanged?: boolean;
+  readRetainedHistory?: () => Promise<RetainedConversationHistory>;
+  onRetainedSources?: (sources: readonly FrozenReference[]) => Promise<void>;
   dataScope?: 'syntheticPublicOnly' | 'authorizedRelevantTestData';
   accessMode?: WorkspaceAccessMode;
   allowedSourceProjectIds?: readonly string[];
@@ -246,18 +258,26 @@ export class RestrictedAiHost {
       accessMode
         ? `${input.contextRevision ?? 'workspace'}:access-${accessMode}`
         : input.contextRevision,
+      {
+        ...(accessMode ? { accessMode } : {}),
+        sourcesChanged: input.contextSourcesChanged === true,
+      },
     );
     const toolEvents: Extract<AiHostEvent, { type: 'tool' }>[] = [];
+    const toolCallFacts = new AsyncLocalStorage<
+      Extract<AiHostEvent, { type: 'tool' }>[]
+    >();
     const emit = (event: AiHostEvent) => {
-      if (event.type === 'tool') toolEvents.push(event);
+      if (event.type === 'tool') {
+        toolEvents.push(event);
+        toolCallFacts.getStore()?.push(event);
+      }
       try {
         input.onEvent?.(event);
       } catch {
         /* A disconnected display does not rewind accepted work. */
       }
     };
-    if (scope.contextReset)
-      emit({ type: 'contextReset', reason: 'authorization-changed' });
     let modelCalls = 0;
     let unknownUsageCalls = 0;
     let componentUnknownCalls = 0;
@@ -516,12 +536,12 @@ export class RestrictedAiHost {
             emit,
           },
         );
-    // Static, verified S01/S02 guidance is pinned once per run. It grants no
+    // Static, verified Skill guidance is pinned once per run. It grants no
     // business capability and exposes neither a path nor a version override.
     const ruleRegistry =
       this.options.sharedSkillRules ?? getSharedSkillRuleRegistry();
     const ruleSnapshot = ruleRegistry.pin();
-    const ruleCatalog = `${ruleRegistry.catalogText(ruleSnapshot)}\nTask rule release set: ${ruleSnapshot.releaseSetDigest}. For case-design or knowledge-curation tasks, read the relevant entry and needed sections before applying these Skill rules. Binding a release is not loading its body or proof of understanding. Earlier conversation rule receipts do not count as a read for this task. An unavailable rule is not a successful Skill invocation; report the limitation and continue independent authorized work.`;
+    const ruleCatalog = `${ruleRegistry.catalogText(ruleSnapshot)}\nTask rule release set: ${ruleSnapshot.releaseSetDigest}. For case-design, knowledge-curation or API automation tasks, read the relevant entry and needed sections before applying these Skill rules. The current bound catalog determines availability; a historical deferral note in another frozen release does not disable a currently available Skill. Binding a release is not loading its body or proof of understanding. Earlier conversation rule receipts do not count as a read for this task. An unavailable rule is not a successful Skill invocation; report the limitation and continue independent authorized work.`;
     const ruleTool = createSharedSkillRulesTool({
       registry: ruleRegistry,
       snapshot: ruleSnapshot,
@@ -682,9 +702,34 @@ export class RestrictedAiHost {
         )
           throw new DomainError('FORBIDDEN', '此工具未开放。', 403);
         await this.#access.assertActive(internalActor, scope);
-        return handler(request);
+        const facts: Extract<AiHostEvent, { type: 'tool' }>[] = [];
+        const result = await toolCallFacts.run(facts, () => handler(request));
+        const ids = [
+          ...new Set(
+            facts
+              .filter((fact) => fact.name === request.toolCall.name)
+              .map((fact) => fact.invocationId),
+          ),
+        ];
+        const proof = recordedToolProvenanceSchema.safeParse({
+          schemaVersion: 'ath.tool-provenance.v1',
+          taskId: input.taskId,
+          invocationId: ids[0],
+          name: request.toolCall.name,
+        });
+        if (isToolMessage(result) && ids.length === 1 && proof.success)
+          result.additional_kwargs = {
+            ...result.additional_kwargs,
+            ath_tool_provenance: proof.data,
+          };
+        return result;
       },
     });
+    const checkpointer = new ScopedPostgresCheckpointer(
+      this.db,
+      internalActor,
+      scope,
+    );
     const buildAgent = () =>
       createDeepAgent({
         model: this.model,
@@ -699,20 +744,52 @@ export class RestrictedAiHost {
           createMiddleware({ name: 'SummarizationMiddleware' }),
           isolation,
         ],
-        checkpointer: new ScopedPostgresCheckpointer(
-          this.db,
-          internalActor,
-          scope,
-        ),
+        checkpointer,
       });
     let text = '';
     try {
       await this.#access.assertActive(internalActor, scope);
       await input.authorizeContext?.();
       await input.onGuidanceBound?.(ruleSnapshot);
+      const messages: BaseMessage[] = [];
+      const checkpoint = await checkpointer.getTuple({
+        configurable: { thread_id: scope.threadKey },
+      });
+      let restored = false;
+      let unavailableHistoricalSource = false;
+      if (!checkpoint && input.taskId && input.readRetainedHistory) {
+        const history = await input.readRetainedHistory();
+        const previousMessages =
+          history.mayReadCheckpointTools && scope.mayReadRetainedToolHistory
+            ? await checkpointer.retainedMessages()
+            : [];
+        const retained = retainedHistoryMessage(
+          input.taskId,
+          history,
+          previousMessages,
+        );
+        if (retained) {
+          await input.onRetainedSources?.(retained.sources);
+          messages.push(retained.message);
+          restored = true;
+        }
+        unavailableHistoricalSource = history.unavailableToolSources;
+      }
+      if (scope.contextReset || restored)
+        emit({
+          type: 'contextReset',
+          reason:
+            unavailableHistoricalSource &&
+            scope.contextResetReason === 'run-recovery'
+              ? 'source-context-changed'
+              : (scope.contextResetReason ?? 'context-rebuilt'),
+        });
+      await this.#access.assertActive(internalActor, scope);
+      await input.authorizeContext?.();
+      messages.push(new HumanMessage(input.prompt));
       const agent = buildAgent();
       const events = await agent.stream(
-        { messages: [{ role: 'user', content: input.prompt }] },
+        { messages },
         {
           configurable: { thread_id: scope.threadKey },
           recursionLimit: 12,

@@ -49,58 +49,6 @@
 .workspace-copy-reply:hover {
   background: var(--hover);
 }
-.workspace-pending-messages {
-  margin: 0 0 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--hover);
-}
-.workspace-queue-heading {
-  margin-bottom: 7px;
-  font-size: 12px;
-}
-.workspace-queue-heading small {
-  color: var(--muted);
-  font-size: 11px;
-}
-.workspace-pending-messages ol {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.workspace-pending-messages li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 7px;
-}
-.workspace-queue-number {
-  color: var(--muted);
-  font-size: 11px;
-}
-.workspace-queue-text {
-  flex: 1;
-  min-width: 0;
-}
-.workspace-queue-text > span,
-.workspace-queue-text small {
-  display: block;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.workspace-queue-text > span {
-  font-size: 12px;
-}
-.workspace-queue-text small {
-  color: var(--muted);
-  font-size: 10px;
-}
-.user-composer .workspace-interrupt-send {
-  padding-inline: 4px;
-  font-size: 12px;
-}
 .workspace-access-menu .ant-dropdown-menu-item {
   gap: 7px;
   padding: 7px 9px;

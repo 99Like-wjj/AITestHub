@@ -55,28 +55,18 @@ export class ConversationsController {
       return res.json(
         skillGuidanceCatalogSchema.parse({
           guidanceOnly: true,
-          skills: [
-            ...getSharedSkillRuleRegistry()
-              .catalog()
-              .map((entry) => ({
-                skillId: entry.skillId,
-                name: entry.name,
-                description: entry.description,
-                version: entry.version,
-                availability: entry.availability,
-                releaseDigest: entry.releaseDigest,
-                unavailableCode: entry.unavailableCode,
-              })),
-            {
-              skillId: 'ath-api-regression',
-              name: '接口回归生成维护',
-              description: '配套 Skill 延期；平台常规接口回归功能保持可用。',
-              version: null,
-              availability: 'deferred',
-              releaseDigest: null,
-              unavailableCode: 'DEFERRED',
-            },
-          ],
+          skills: getSharedSkillRuleRegistry()
+            .catalog()
+            .filter((entry) => entry.availability !== 'localOnly')
+            .map((entry) => ({
+              skillId: entry.skillId,
+              name: entry.name,
+              description: entry.description,
+              version: entry.version,
+              availability: entry.availability,
+              releaseDigest: entry.releaseDigest,
+              unavailableCode: entry.unavailableCode,
+            })),
         }),
       );
     if (path === 'conversations' && req.method === 'GET')

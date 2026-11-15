@@ -24,10 +24,6 @@ import {
   defaultModelAuthScheme,
   modelEndpointConfigurationIssue,
 } from '../../../packages/contracts/src/model-protocol';
-import {
-  officialSensenovaSamplingProfile,
-  resolveModelSampling,
-} from '../../../packages/contracts/src/model-sampling';
 import { userSummarySchema } from '../../../packages/contracts/src/identity';
 import { api, describeError } from './api';
 import { describeModelDiscoveryError } from './model-discovery-error';
@@ -61,6 +57,7 @@ import {
   type ModelServiceDraft,
 } from './model-settings-values';
 import './model-settings-v2.css';
+import './model-confirmation.css';
 import {
   AuxiliaryReadbackGuard,
   reconcileAuxiliarySnapshot,
@@ -88,34 +85,6 @@ const scopesText = (scopes: string[]) =>
         : '已授权的相关内部测试资料',
     )
     .join('、');
-function SamplingDefaults({
-  baseUrl,
-  modelId,
-  protocol,
-}: {
-  baseUrl: string;
-  modelId: string;
-  protocol: string;
-}) {
-  if (protocol !== 'chatCompletions') return null;
-  const sampling = resolveModelSampling(baseUrl, modelId);
-  if (!sampling.profileId) return null;
-  return (
-    <details className="caption mt">
-      <summary>官方推荐默认采样</summary>
-      <p>{officialSensenovaSamplingProfile.label}</p>
-      <code>
-        {Object.entries(sampling.parameters)
-          .map(([name, value]) => `${name}=${value}`)
-          .join(' · ')}
-      </code>
-      <p>
-        对当前官方地址与此模型生效；明确传入的采样值优先。此默认不切换思考模式，
-        不改变最大输出或资料范围。
-      </p>
-    </details>
-  );
-}
 function Verification({
   model,
 }: {
@@ -260,11 +229,6 @@ export function AvailableModelList() {
                   <dd>{model.effortValues.join('、') || '未配置'}</dd>
                 </div>
               </dl>
-              <SamplingDefaults
-                baseUrl={model.baseUrl}
-                modelId={model.modelId}
-                protocol={model.protocol}
-              />
               <Verification model={model} />
             </article>
           ))}
@@ -532,6 +496,7 @@ function ServiceEditor({
           return;
         }
         modal.confirm({
+          className: 'model-confirmation',
           title: '有未保存的模型配置',
           content: '只丢弃本地表单，原命令回执仍保留。',
           okText: '放弃修改并离开',
@@ -549,6 +514,7 @@ function ServiceEditor({
     if (commands.pending || discovering) return;
     if (dirty)
       modal.confirm({
+        className: 'model-confirmation',
         title: '放弃未保存的配置？',
         content: '只丢弃本地表单。已提交的原命令仍保留，可从页面顶部只读查回。',
         okText: '放弃修改',
@@ -992,11 +958,6 @@ function ServiceEditor({
                     />
                   </label>
                 </div>
-                <SamplingDefaults
-                  baseUrl={draft.baseUrl}
-                  modelId={row.modelId}
-                  protocol={draft.protocol}
-                />
                 <details className="model-entry-metadata">
                   <summary>模型行标识</summary>
                   <code>{row.id}</code>
@@ -1410,6 +1371,7 @@ export function PlatformModelSettings() {
       if (commands.pending) return;
       if (credentialValue || auxiliaryDirty)
         modal.confirm({
+          className: 'model-confirmation',
           title: '放弃未保存的配置？',
           content:
             'API Key 输入只保存在当前表单，离开时清空；已发出的原命令标识仍保留。',
@@ -1616,6 +1578,7 @@ export function PlatformModelSettings() {
                                 }
                                 onClick={() =>
                                   modal.confirm({
+                                    className: 'model-confirmation',
                                     title: '撤销此服务的 API Key？',
                                     content:
                                       '后续请求因缺少凭据被拒绝。历史用量与配置保留。',
@@ -1633,6 +1596,7 @@ export function PlatformModelSettings() {
                                 disabled={commands.blocked}
                                 onClick={() =>
                                   modal.confirm({
+                                    className: 'model-confirmation',
                                     title: `移除服务「${service.name}」？`,
                                     content:
                                       '新任务不再可选择此服务；历史消息、任务模型快照与用量保留，不会切换到其他服务。',
@@ -1698,11 +1662,6 @@ export function PlatformModelSettings() {
                                           {row.effortValues.join(' / ') ||
                                             '未配置'}
                                         </span>
-                                        <SamplingDefaults
-                                          baseUrl={service.baseUrl}
-                                          modelId={row.modelId}
-                                          protocol={service.protocol}
-                                        />
                                       </td>
                                       <td>
                                         <ModelConnectionControl

@@ -8,6 +8,8 @@ import type {
 import { currentUser, requireProject } from '../access/policy.js';
 import { canonicalJson } from '../operations/service.js';
 import { DomainError } from '../errors.js';
+import type { WorkspaceAccessMode } from '../../../contracts/src/workspace-access.js';
+import type { AiContextResetReason } from '../../../contracts/src/ai-context.js';
 
 export interface AiCheckpointScope {
   ownerId: string;
@@ -18,6 +20,9 @@ export interface AiCheckpointScope {
   runId: string;
   contextReset: boolean;
   contextRevision?: string;
+  contextResetReason?: AiContextResetReason;
+  retainedThreadKey?: string;
+  mayReadRetainedToolHistory?: boolean;
 }
 interface RuntimeThread {
   owner_id: string;
@@ -35,11 +40,25 @@ export class AiRuntimeAccess {
     conversationId: string,
     projectId?: string,
     contextRevision?: string,
+    context: {
+      accessMode?: WorkspaceAccessMode;
+      sourcesChanged?: boolean;
+    } = {},
   ): Promise<AiCheckpointScope> {
     idSchema.parse(conversationId);
     if (projectId !== undefined) idSchema.parse(projectId);
     return this.db.transaction(async (tx) => {
-      const digest = await this.digest(tx, actor, contextRevision);
+      const facts = await this.authorizationFacts(tx, actor);
+      const digest = createHash('sha256')
+        .update(
+          canonicalJson({ ...facts, contextRevision: contextRevision ?? null }),
+        )
+        .digest('hex');
+      // Classification metadata only. The full access digest and its live
+      // authorization/fencing checks retain their existing authority.
+      const stamp = createHash('sha256')
+        .update(canonicalJson(facts))
+        .digest('hex');
       if (projectId) await requireProject(tx, actor, projectId, 'project.read');
       await tx.query(
         `INSERT INTO app.ai_runtime_threads(conversation_id,owner_id,project_id,access_digest)
@@ -70,6 +89,35 @@ export class AiRuntimeAccess {
           '此上下文已有未结束运行；请查询原运行，不自动接管或重放。',
           409,
         );
+      const previousBase = `ath:${actor.userId}:${conversationId}:${row.access_digest}`;
+      const previous = (
+        await tx.query<{ thread_key: string }>(
+          `SELECT thread_key FROM app.ai_runtime_checkpoints
+           WHERE conversation_id=$1 AND checkpoint_ns=''
+           AND (thread_key=$2 OR thread_key LIKE ($2 || ':auth-v2:%'))
+           ORDER BY checkpoint_id DESC LIMIT 1`,
+          [conversationId, previousBase],
+        )
+      ).rows[0]?.thread_key;
+      const mode = context.accessMode ?? 'legacy';
+      const threadKey = `ath:${actor.userId}:${conversationId}:${digest}:auth-v2:${stamp}:mode:${mode}`;
+      const previousStamp = previous
+        ?.slice(previousBase.length)
+        .match(/^:auth-v2:([a-f0-9]{64}):mode:(full|restricted|legacy)$/);
+      const sameAuthorization = previousStamp?.[1] === stamp;
+      const sameMode = previousStamp?.[2] === mode;
+      const contextReset =
+        row.access_digest !== digest ||
+        Boolean(previous && previous !== threadKey);
+      const resetReason: AiContextResetReason = !previousStamp
+        ? 'context-rebuilt'
+        : !sameAuthorization
+          ? 'authorization-scope-changed'
+          : !sameMode
+            ? 'access-mode-changed'
+            : context.sourcesChanged
+              ? 'source-context-changed'
+              : 'run-recovery';
       const runId = randomUUID();
       await tx.query(
         'UPDATE app.ai_runtime_threads SET access_digest=$2,active_run_id=$3,updated_at=clock_timestamp() WHERE conversation_id=$1',
@@ -80,9 +128,17 @@ export class AiRuntimeAccess {
         conversationId,
         projectId: projectId ?? null,
         accessDigest: digest,
-        threadKey: `ath:${actor.userId}:${conversationId}:${digest}`,
+        threadKey,
         runId,
-        contextReset: row.access_digest !== digest,
+        contextReset,
+        ...(contextReset ? { contextResetReason: resetReason } : {}),
+        ...(previous && previous !== threadKey
+          ? { retainedThreadKey: previous }
+          : {}),
+        mayReadRetainedToolHistory:
+          Boolean(previous && previous !== threadKey) &&
+          sameAuthorization &&
+          sameMode,
         ...(contextRevision ? { contextRevision } : {}),
       };
     });
@@ -155,6 +211,15 @@ export class AiRuntimeAccess {
     actor: ActorContext,
     contextRevision?: string,
   ): Promise<string> {
+    const facts = await this.authorizationFacts(tx, actor);
+    return createHash('sha256')
+      .update(
+        canonicalJson({ ...facts, contextRevision: contextRevision ?? null }),
+      )
+      .digest('hex');
+  }
+
+  private async authorizationFacts(tx: SqlExecutor, actor: ActorContext) {
     await currentUser(tx, actor);
     if (
       actor.allowedCapabilities &&
@@ -176,18 +241,13 @@ export class AiRuntimeAccess {
        WHERE m.user_id=$1 AND m.active AND p.active ORDER BY p.id FOR SHARE OF m,p`,
       [actor.userId],
     );
-    return createHash('sha256')
-      .update(
-        canonicalJson({
-          userId: actor.userId,
-          keyId: actor.keyId ?? null,
-          capabilities: actor.allowedCapabilities
-            ? [...actor.allowedCapabilities].sort()
-            : null,
-          projects: projects.rows,
-          contextRevision: contextRevision ?? null,
-        }),
-      )
-      .digest('hex');
+    return {
+      userId: actor.userId,
+      keyId: actor.keyId ?? null,
+      capabilities: actor.allowedCapabilities
+        ? [...actor.allowedCapabilities].sort()
+        : null,
+      projects: projects.rows,
+    };
   }
 }

@@ -129,7 +129,10 @@ for (const source of sources) {
           code: 'RULE_MANIFEST_HASH_MISMATCH',
         });
     }
-    if (source.skillId === 'ath-project-knowledge') {
+    if (
+      source.skillId === 'ath-project-knowledge' ||
+      source.skillId === 'ath-api-regression'
+    ) {
       const paths = Object.keys(first.files)
         .filter(
           (name) =>

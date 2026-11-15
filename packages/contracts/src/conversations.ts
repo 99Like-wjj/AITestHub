@@ -1,6 +1,7 @@
 import { modelDataScopeSchema } from './configuration.js';
 import { z } from 'zod';
 import { workspaceAccessModeSchema } from './workspace-access.js';
+import { aiContextResetReasonSchema } from './ai-context.js';
 import {
 commandIdSchema,
 idSchema,
@@ -437,6 +438,7 @@ export const aiTaskEventSchema = z.discriminatedUnion('type', [
       status: taskStateSchema,
       errorCode: z.string().max(100).nullable(),
       errorDetails: aiErrorDetailsSchema.nullable().optional(),
+      automaticTitleTaskId: idSchema.optional(),
     }),
   }),
   z.strictObject({
@@ -500,7 +502,7 @@ export const aiTaskEventSchema = z.discriminatedUnion('type', [
     type: z.literal('ai.contextReset'),
     payload: z.strictObject({
       type: z.literal('contextReset'),
-      reason: z.literal('authorization-changed'),
+      reason: aiContextResetReasonSchema,
     }),
   }),
 ]);

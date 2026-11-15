@@ -28,6 +28,7 @@ import type { ModelDataScope } from '../../../packages/contracts/src/configurati
 import type { PreparedReference, ReferenceTab } from './workspace-references';
 import {
   skillGuidanceCatalogSchema,
+  platformGuidanceSkillIdSchema,
   type PlatformGuidanceSkillId,
 } from '../../../packages/contracts/src/skill-guidance';
 import { api, describeError } from './api';
@@ -189,6 +190,7 @@ export const WorkspaceInlineCandidates = forwardRef<
               skillGuidanceCatalogSchema,
             );
             items = catalog.skills
+              .filter((entry) => entry.availability !== 'localOnly')
               .filter(
                 (entry) =>
                   !query.trim() ||
@@ -196,29 +198,30 @@ export const WorkspaceInlineCandidates = forwardRef<
                     normalized(query),
                   ),
               )
-              .map((entry) => ({
-                id: `skill:${entry.skillId}`,
-                label: entry.name,
-                description:
-                  entry.availability === 'available'
-                    ? '准备使用同版规则；发送后由 AI 按需读取，业务操作仍需当前权限。'
-                    : entry.description,
-                sourceLabel:
-                  entry.availability === 'available'
-                    ? `平台规则 v${entry.version}`
-                    : entry.availability === 'localOnly'
-                      ? '仅本地执行'
+              .map((entry) => {
+                const skill = platformGuidanceSkillIdSchema.safeParse(
+                  entry.skillId,
+                );
+                return {
+                  id: `skill:${entry.skillId}`,
+                  label: entry.name,
+                  description:
+                    entry.availability === 'available'
+                      ? '准备使用同版规则；发送后由 AI 按需读取，业务操作仍需当前权限。'
+                      : entry.description,
+                  sourceLabel:
+                    entry.availability === 'available'
+                      ? `平台规则 v${entry.version}`
                       : entry.availability === 'deferred'
                         ? '延期'
                         : '规则不可用',
-                icon: <AppstoreOutlined />,
-                disabled: entry.availability !== 'available',
-                ...(entry.availability === 'available' &&
-                (entry.skillId === 'ath-case-design' ||
-                  entry.skillId === 'ath-project-knowledge')
-                  ? { skillId: entry.skillId }
-                  : {}),
-              }));
+                  icon: <AppstoreOutlined />,
+                  disabled: entry.availability !== 'available',
+                  ...(entry.availability === 'available' && skill.success
+                    ? { skillId: skill.data }
+                    : {}),
+                };
+              });
           } else if (tab === 'history') {
             const result = await api(
               `/me/conversations/history-candidates?query=${encodeURIComponent(query)}`,

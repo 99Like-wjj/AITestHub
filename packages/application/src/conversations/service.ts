@@ -33,6 +33,10 @@ import {
 import { assertConversationDataScope } from '../security/model-data-scope.js';
 import { exportConversationMarkdown } from './markdown-export.js';
 import {
+  conversationFirstUserTitleSql,
+  fallbackConversationTitle,
+} from './title.js';
+import {
   conversationDto,
   conversationRow,
   conversationRequirementTitleSql,
@@ -221,7 +225,7 @@ export class ConversationsService {
     return this.db.transaction(async (tx) => {
       await personalActor(tx, actor);
       const rows = await tx.query<ConversationRow>(
-        `SELECT c.*,${conversationRequirementTitleSql},(SELECT t.state FROM app.ai_tasks t WHERE t.conversation_id=c.id AND t.owner_id=$1 AND t.state IN ('accepted','running','cancelling') ORDER BY t.created_at DESC,t.id DESC LIMIT 1) active_task_status
+        `SELECT c.*,${conversationRequirementTitleSql},${conversationFirstUserTitleSql},(SELECT t.state FROM app.ai_tasks t WHERE t.conversation_id=c.id AND t.owner_id=$1 AND t.state IN ('accepted','running','cancelling') ORDER BY t.created_at DESC,t.id DESC LIMIT 1) active_task_status
         FROM app.ai_conversations c WHERE c.owner_id=$1 AND c.deleted_at IS NULL
         AND (($2 AND c.archived_at IS NOT NULL) OR (NOT $2 AND c.archived_at IS NULL))
         AND (c.project_id IS NULL OR EXISTS(SELECT 1 FROM app.project_members m JOIN app.projects p ON p.id=m.project_id WHERE m.user_id=$1 AND m.project_id=c.project_id AND m.active AND p.active))
@@ -590,7 +594,7 @@ export class ConversationsService {
         : [];
       const conversations = (
         await tx.query<ConversationRow>(
-          `SELECT c.*,${conversationRequirementTitleSql},(SELECT t.state FROM app.ai_tasks t WHERE t.conversation_id=c.id AND t.owner_id=$1 AND t.state IN ('accepted','running','cancelling') ORDER BY t.created_at DESC,t.id DESC LIMIT 1) active_task_status
+          `SELECT c.*,${conversationRequirementTitleSql},${conversationFirstUserTitleSql},(SELECT t.state FROM app.ai_tasks t WHERE t.conversation_id=c.id AND t.owner_id=$1 AND t.state IN ('accepted','running','cancelling') ORDER BY t.created_at DESC,t.id DESC LIMIT 1) active_task_status
           FROM app.ai_conversations c WHERE c.owner_id=$1 AND c.deleted_at IS NULL AND c.archived_at IS NULL AND (c.project_id=$2 OR c.project_id IS NULL) ORDER BY c.pinned_at DESC NULLS LAST,c.updated_at DESC,c.id`,
           [actor.userId, projectId ?? null],
         )
@@ -720,7 +724,7 @@ export class ConversationsService {
     return this.db.transaction(async (tx) => {
       await personalActor(tx, actor);
       const rows = await tx.query<ConversationRow>(
-        `SELECT c.*,${conversationRequirementTitleSql},(SELECT t.state FROM app.ai_tasks t WHERE t.conversation_id=c.id AND t.owner_id=$1 AND t.state IN ('accepted','running','cancelling') ORDER BY t.created_at DESC,t.id DESC LIMIT 1) active_task_status
+        `SELECT c.*,${conversationRequirementTitleSql},${conversationFirstUserTitleSql},(SELECT t.state FROM app.ai_tasks t WHERE t.conversation_id=c.id AND t.owner_id=$1 AND t.state IN ('accepted','running','cancelling') ORDER BY t.created_at DESC,t.id DESC LIMIT 1) active_task_status
         FROM app.ai_conversations c WHERE c.owner_id=$1 AND c.deleted_at IS NULL
         AND (c.project_id IS NULL OR EXISTS(SELECT 1 FROM app.project_members m JOIN app.projects p ON p.id=m.project_id WHERE m.user_id=$1 AND m.project_id=c.project_id AND m.active AND p.active))
         AND ($2='' OR position(lower($2) in lower(COALESCE(c.alias,c.default_title)))>0 OR EXISTS(SELECT 1 FROM app.ai_messages m WHERE m.conversation_id=c.id AND m.deleted_at IS NULL AND position(lower($2) in lower(m.content))>0))
@@ -1020,6 +1024,12 @@ export class ConversationsService {
         const userMessageId = randomUUID();
         const assistantMessageId = randomUUID();
         const taskId = randomUUID();
+        const firstUserMessage = !(
+          await tx.query(
+            "SELECT 1 FROM app.ai_messages WHERE conversation_id=$1 AND role='user' LIMIT 1",
+            [conversationId],
+          )
+        ).rowCount;
         const snapshot = {
           ...('runtimeVersion' in selection
             ? {
@@ -1112,8 +1122,12 @@ export class ConversationsService {
           );
         }
         await tx.query(
-          'UPDATE app.ai_conversations SET updated_at=clock_timestamp(),row_version=row_version+1 WHERE id=$1',
-          [conversationId],
+          'UPDATE app.ai_conversations SET default_title=CASE WHEN $2 AND alias IS NULL THEN $3 ELSE default_title END,updated_at=clock_timestamp(),row_version=row_version+1 WHERE id=$1',
+          [
+            conversationId,
+            firstUserMessage,
+            fallbackConversationTitle(input.content),
+          ],
         );
         await tx.query(
           "INSERT INTO app.ai_task_events(task_id,event_type,payload) VALUES($1,'task.accepted',$2)",

@@ -33,7 +33,17 @@ import { ExecutionRecords } from './execution-records';
 import { ReportHandlingPanel } from './report-handling-panel';
 import { UiDeliveryPanel } from './ui-delivery-panel';
 import { uiLayers } from './ui-layers';
-import { identityContextEpoch } from './identity-context';
+import {
+  currentIdentityOwner,
+  identityContextEpoch,
+  subscribeIdentityChanges,
+} from './identity-context';
+import {
+  ReportRecoveryQueryGuard,
+  type ReportRecoveryKind,
+  type ReportRecoveryQuery,
+  type ReportRecoveryRequest,
+} from './report-recovery-query';
 
 type Report = z.infer<typeof reportDetailSchema>['report'];
 const executionLabels: Record<string, string> = {
@@ -122,19 +132,55 @@ export function ResultsPage({
     id: string;
     revisionId?: string;
     kind?: 'UI' | 'API';
+    lookupRequest?: ReportRecoveryRequest;
   } | null>(null);
   const [fileId, setFileId] = useState<string | null>(null);
   const [lookupForm] = Form.useForm<{
-    kind: 'run' | 'result' | 'submission';
+    kind: ReportRecoveryKind;
     id: string;
   }>();
-  const [lookupLoading, setLookupLoading] = useState(false);
-  const [lookupError, setLookupError] = useState<string>();
-  const [run, setRun] = useState<Run | null>(null);
-  const [receipt, setReceipt] = useState<Receipt | null>(null);
+  const [lookupFeedback, setLookupFeedback] = useState<{
+    request: ReportRecoveryRequest;
+    loading: boolean;
+    error?: string;
+    run?: Run;
+    receipt?: Receipt;
+  }>();
   const detailEpoch = useRef(0);
   const historyEpoch = useRef(0);
-  const lookupEpoch = useRef(0);
+  const lookupGuard = useRef(new ReportRecoveryQueryGuard());
+  const lookupContext = useRef({ ownerId: userId, projectId: project?.id });
+  lookupContext.current = { ownerId: userId, projectId: project?.id };
+  function currentLookupQuery(): ReportRecoveryQuery | null {
+    const { ownerId, projectId } = lookupContext.current;
+    if (!projectId || currentIdentityOwner() !== ownerId) return null;
+    const values = lookupForm.getFieldsValue(true);
+    return {
+      ownerId,
+      identityEpoch: identityContextEpoch(),
+      projectId,
+      kind: values.kind ?? 'run',
+      value: values.id ?? '',
+    };
+  }
+  function clearLookup() {
+    lookupGuard.current.invalidate();
+    setLookupFeedback(undefined);
+    setSelectedResult((value) => (value?.lookupRequest ? null : value));
+  }
+  const currentQuery = currentLookupQuery();
+  const feedback =
+    lookupFeedback &&
+    lookupGuard.current.accepts(lookupFeedback.request, currentQuery)
+      ? lookupFeedback
+      : undefined;
+  const run = feedback?.run;
+  const receipt = feedback?.receipt;
+  const visibleResult =
+    selectedResult?.lookupRequest &&
+    !lookupGuard.current.accepts(selectedResult.lookupRequest, currentQuery)
+      ? null
+      : selectedResult;
   const queryProject = new URLSearchParams(
     window.location.hash.split('?')[1],
   ).get('projectId');
@@ -167,15 +213,13 @@ export function ResultsPage({
     }
   }
   useEffect(() => {
-    const controller = new AbortController();
     setReport(null);
-    setRun(null);
-    setReceipt(null);
     setSelectedResult(null);
     setFileId(null);
-    setLookupError(undefined);
-    return () => controller.abort();
-  }, [project?.id]);
+    clearLookup();
+    return () => lookupGuard.current.invalidate();
+  }, [project?.id, userId]);
+  useEffect(() => subscribeIdentityChanges(clearLookup), []);
   useEffect(() => {
     function update() {
       setReportId(initialReportId());
@@ -238,46 +282,63 @@ export function ResultsPage({
     followLinkedRecord();
     window.addEventListener('hashchange', followLinkedRecord);
     return () => window.removeEventListener('hashchange', followLinkedRecord);
-  }, [project?.id]);
-  async function lookup(values: {
-    kind: 'run' | 'result' | 'submission';
-    id: string;
-  }) {
-    if (!project) return;
+  }, [project?.id, userId]);
+  async function lookup(values: { kind: ReportRecoveryKind; id: string }) {
+    if (!project || currentIdentityOwner() !== userId) return;
+    const request = lookupGuard.current.begin({
+      ownerId: userId,
+      identityEpoch: identityContextEpoch(),
+      projectId: project.id,
+      kind: values.kind,
+      value: values.id,
+    });
+    setLookupFeedback({ request, loading: false });
+    setSelectedResult((value) => (value?.lookupRequest ? null : value));
     const parsed = idSchema.safeParse(values.id);
     if (!parsed.success) {
-      setLookupError('请输入有效的原轮次、结果或提交UUID。');
+      setLookupFeedback({
+        request,
+        loading: false,
+        error: '请输入有效的原轮次、结果或提交UUID。',
+      });
       return;
     }
-    const epoch = ++lookupEpoch.current;
-    setLookupLoading(true);
-    setLookupError(undefined);
-    setRun(null);
-    setReceipt(null);
+    setLookupFeedback({ request, loading: true });
     try {
       if (values.kind === 'result') {
-        setSelectedResult({ id: parsed.data });
+        if (lookupGuard.current.accepts(request, currentLookupQuery()))
+          setSelectedResult({ id: parsed.data, lookupRequest: request });
         return;
       }
       if (values.kind === 'run') {
         const response = await api(
           `/projects/${project.id}/ui-executions/${parsed.data}`,
-          {},
+          { signal: request.signal },
           runStatusSchema,
         );
-        if (epoch === lookupEpoch.current) setRun(response);
+        if (lookupGuard.current.accepts(request, currentLookupQuery()))
+          setLookupFeedback({ request, loading: false, run: response });
       } else {
         const response = await api(
           `/projects/${project.id}/result-submissions/${parsed.data}`,
-          {},
+          { signal: request.signal },
           resultReceiptStatusSchema,
         );
-        if (epoch === lookupEpoch.current) setReceipt(response);
+        if (lookupGuard.current.accepts(request, currentLookupQuery()))
+          setLookupFeedback({ request, loading: false, receipt: response });
       }
     } catch (failure) {
-      if (epoch === lookupEpoch.current) setLookupError(describeError(failure));
+      if (lookupGuard.current.accepts(request, currentLookupQuery()))
+        setLookupFeedback({
+          request,
+          loading: false,
+          error: describeError(failure),
+        });
     } finally {
-      if (epoch === lookupEpoch.current) setLookupLoading(false);
+      if (lookupGuard.current.accepts(request, currentLookupQuery()))
+        setLookupFeedback((value) =>
+          value?.request === request ? { ...value, loading: false } : value,
+        );
     }
   }
   function openReport(id: string) {
@@ -387,6 +448,7 @@ export function ResultsPage({
                   form={lookupForm}
                   layout="inline"
                   initialValues={{ kind: 'run' }}
+                  onValuesChange={clearLookup}
                   onFinish={(values) => void lookup(values)}
                 >
                   <Form.Item name="kind" label="只读查询">
@@ -413,16 +475,16 @@ export function ResultsPage({
                     <Button
                       type="primary"
                       htmlType="submit"
-                      loading={lookupLoading}
+                      loading={feedback?.loading ?? false}
                     >
                       查询原记录
                     </Button>
                   </Form.Item>
                 </Form>
-                {lookupError && (
+                {feedback?.error && (
                   <Alert
                     type="error"
-                    title={lookupError}
+                    title={feedback.error}
                     showIcon
                     className="section-alert"
                   />
@@ -952,12 +1014,10 @@ export function ResultsPage({
       </Modal>
       <ResultDetailPanel
         project={project}
-        {...(selectedResult?.kind
-          ? { executionKind: selectedResult.kind }
-          : {})}
-        resultId={selectedResult?.id ?? null}
-        {...(selectedResult?.revisionId
-          ? { reportBasisRevisionId: selectedResult.revisionId }
+        {...(visibleResult?.kind ? { executionKind: visibleResult.kind } : {})}
+        resultId={visibleResult?.id ?? null}
+        {...(visibleResult?.revisionId
+          ? { reportBasisRevisionId: visibleResult.revisionId }
           : {})}
         onClose={() => setSelectedResult(null)}
         onChanged={async () => {

@@ -19,6 +19,11 @@ import {
 } from '../../../packages/contracts/src/conversations';
 import type { PersonalUsage } from '../../../packages/contracts/src/conversations';
 import { api, describeError } from './api';
+import {
+  usageHeatmapLegend,
+  usageHeatmapLevel,
+  type UsageHeatmapScope,
+} from './usage-heatmap';
 
 type Origin = z.infer<typeof usageOriginScopeSchema>;
 const originLabels = {
@@ -37,7 +42,13 @@ const count = (value: string | null | undefined) =>
     ? '未记录'
     : BigInt(value).toLocaleString('zh-CN');
 
-function Heatmap({ days }: { days: PersonalUsage['heatmap'] }) {
+function Heatmap({
+  days,
+  scope,
+}: {
+  days: PersonalUsage['heatmap'];
+  scope: UsageHeatmapScope;
+}) {
   const calendar = useRef<HTMLDivElement>(null);
   const [focusedDate, setFocusedDate] = useState<string | null>(null);
   const afterCalendar = useRef<HTMLParagraphElement>(null);
@@ -66,7 +77,7 @@ function Heatmap({ days }: { days: PersonalUsage['heatmap'] }) {
         ref={calendar}
         className="usage-calendar"
         role="group"
-        aria-label="最近365天Token年度热力图；上下键前后一天，左右键前后一周，Home/End到首末日期，Tab离开日期区"
+        aria-label={`${scope === 'platform' ? '平台' : '个人'}最近365天Token年度热力图；上下键前后一天，左右键前后一周，Home/End到首末日期，Tab离开日期区`}
       >
         <div className="usage-day-labels">
           <span />
@@ -96,17 +107,7 @@ function Heatmap({ days }: { days: PersonalUsage['heatmap'] }) {
                     aria-hidden="true"
                   />
                 );
-              const tokens = day.tokens === null ? null : BigInt(day.tokens);
-              const level =
-                tokens === null || tokens === 0n
-                  ? 0
-                  : tokens < 1000n
-                    ? 1
-                    : tokens < 10000n
-                      ? 2
-                      : tokens < 100000n
-                        ? 3
-                        : 4;
+              const level = usageHeatmapLevel(day.tokens, scope);
               const unknown =
                 BigInt(day.unknown_calls) > 0n ||
                 BigInt(day.unknown_request_intents) > 0n;
@@ -169,12 +170,14 @@ function Heatmap({ days }: { days: PersonalUsage['heatmap'] }) {
       </div>
       <Space wrap className="section-alert">
         <Typography.Text type="secondary">已记录 Token</Typography.Text>
-        {[0, 1, 2, 3, 4].map((level) => (
-          <span
-            className={`usage-cell level-${level}`}
-            key={level}
-            aria-label={`图例等级 ${level}`}
-          />
+        {usageHeatmapLegend(scope).map(({ level, label }) => (
+          <Tooltip key={level} title={label} trigger={['hover', 'focus']}>
+            <span
+              className={`usage-cell level-${level}`}
+              tabIndex={0}
+              aria-label={label}
+            />
+          </Tooltip>
         ))}
         <Typography.Text type="secondary">
           灰格为零/无已记录Token；描边表示总量或发送意图未知。范围外留白不计日期。
@@ -306,7 +309,7 @@ export function PersonalUsagePanel() {
             </Card>
           </div>
           <Card title="年度 Token 热力图" size="small">
-            <Heatmap days={data.heatmap} />
+            <Heatmap days={data.heatmap} scope="personal" />
           </Card>
           <Typography.Paragraph type="secondary">
             优先采用供应商 reported
@@ -484,7 +487,7 @@ export function PlatformUsagePanel() {
               title="平台年度 Token 热力图"
               className="section-alert"
             >
-              <Heatmap days={data.heatmap} />
+              <Heatmap days={data.heatmap} scope="platform" />
             </Card>
             <Table
               size="small"

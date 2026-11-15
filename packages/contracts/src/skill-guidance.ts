@@ -1,8 +1,12 @@
 import { z } from 'zod';
 
-export const platformGuidanceSkillIdSchema = z.enum([
+export const LEGACY_PLATFORM_GUIDANCE_SKILL_IDS = [
   'ath-case-design',
   'ath-project-knowledge',
+] as const;
+export const platformGuidanceSkillIdSchema = z.enum([
+  ...LEGACY_PLATFORM_GUIDANCE_SKILL_IDS,
+  'ath-api-regression',
 ]);
 export type PlatformGuidanceSkillId = z.infer<
   typeof platformGuidanceSkillIdSchema
@@ -21,6 +25,10 @@ export const sharedSkillRuleSectionSchema = z.enum([
   'content-and-sources',
   'platform-workflow',
   'runtime',
+  'generation',
+  'native-api',
+  'maintenance-and-recovery',
+  'platform-debug',
 ]);
 const ruleArchiveMetadataSchema = z.strictObject({
   kind: z.enum(['zip', 'tgz']),
@@ -28,24 +36,45 @@ const ruleArchiveMetadataSchema = z.strictObject({
   sha256: ruleDigestSchema,
   bytes: z.number().int().nonnegative(),
 });
-/** Same metadata contract used at task pinning and the authenticated event boundary. */
-export const sharedSkillRuleSnapshotSchema = z.strictObject({
-  schemaVersion: z.literal('ath.shared-skill-rule-snapshot.v1'),
-  releaseSetDigest: ruleDigestSchema,
-  releases: z
-    .array(
-      z.strictObject({
-        skillId: platformGuidanceSkillIdSchema,
-        version: ruleVersionSchema,
-        ruleVersion: ruleVersionSchema,
-        releaseDigest: ruleDigestSchema.nullable(),
-        manifestSha256: ruleDigestSchema.nullable(),
-        sourceArchiveHashes: z.array(ruleDigestSchema).max(2),
-        available: z.boolean(),
-      }),
-    )
-    .length(2),
+const ruleTaskReleaseSchema = z.strictObject({
+  skillId: platformGuidanceSkillIdSchema,
+  version: ruleVersionSchema,
+  ruleVersion: ruleVersionSchema,
+  releaseDigest: ruleDigestSchema.nullable(),
+  manifestSha256: ruleDigestSchema.nullable(),
+  sourceArchiveHashes: z.array(ruleDigestSchema).max(2),
+  available: z.boolean(),
 });
+function exactReleaseSet(ids: readonly PlatformGuidanceSkillId[]) {
+  return z
+    .array(ruleTaskReleaseSchema)
+    .length(ids.length)
+    .refine(
+      (releases) =>
+        ids.every(
+          (id) => releases.filter((release) => release.skillId === id).length === 1,
+        ),
+      '规则快照必须包含该版本支持的精确 Skill 集合。',
+    );
+}
+/** Historical two-Skill task bindings remain valid without changing their
+ * bytes or digest. New bindings use exactly the three currently supported IDs. */
+export const sharedSkillRuleSnapshotSchema = z.discriminatedUnion(
+  'schemaVersion',
+  [
+    z.strictObject({
+      schemaVersion: z.literal('ath.shared-skill-rule-snapshot.v1'),
+      releaseSetDigest: ruleDigestSchema,
+      releases: exactReleaseSet(LEGACY_PLATFORM_GUIDANCE_SKILL_IDS),
+    }),
+    z.strictObject({
+      schemaVersion: z.literal('ath.shared-skill-rule-snapshot.v2'),
+      releaseSetDigest: ruleDigestSchema,
+      releases: exactReleaseSet(platformGuidanceSkillIdSchema.options),
+    }),
+  ],
+);
+export type SharedSkillRuleSnapshot = z.infer<typeof sharedSkillRuleSnapshotSchema>;
 /** Strict metadata only: rule text, file paths and model reasoning have no fields. */
 export const sharedSkillRuleReadMetadataSchema = z.discriminatedUnion(
   'status',
@@ -85,7 +114,6 @@ export const skillGuidanceCatalogSchema = z.strictObject({
         skillId: z.enum([
           ...platformGuidanceSkillIdSchema.options,
           'ath-web-execute',
-          'ath-api-regression',
         ]),
         name: z.string().min(1).max(200),
         description: z.string().min(1).max(2000),

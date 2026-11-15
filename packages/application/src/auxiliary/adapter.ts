@@ -3,17 +3,18 @@ import type { ConfigurationService } from '../configuration/service.js';
 import type { SecretBroker } from '../configuration/secrets.js';
 import type { Database } from '../../../persistence/src/database.js';
 import type { AuxiliaryModelFactory } from './worker.js';
-import { resolveAcceptedAuxiliaryModel } from './model-snapshot.js';
+import { resolveAuxiliaryModelForTask } from './conversation-title.js';
 import { resolveModelOutputBudget } from '../ai/model-output-budget.js';
 /** One native request, no tools/retry/fallback. Only this code receives the broker credential. */
 export function createAuxiliaryModelFactory(
-  _db: Database,
+  db: Database,
   configuration: ConfigurationService,
   broker: SecretBroker,
 ): AuxiliaryModelFactory {
   const factory = async (...args: Parameters<AuxiliaryModelFactory>) => {
     const [model, actor, purpose, authorize, onDispatch] = args;
-    const selected = await resolveAcceptedAuxiliaryModel(
+    const { selected, automaticTitle } = await resolveAuxiliaryModelForTask(
+      db,
       configuration,
       actor,
       model,
@@ -29,11 +30,12 @@ export function createAuxiliaryModelFactory(
       model: model.modelId,
       authScheme: 'schemaVersion' in model ? model.authScheme : 'bearer',
       allowLocalHttp: new URL(model.baseUrl).protocol === 'http:',
-      timeoutMs: 60000,
+      timeoutMs: automaticTitle ? 15000 : 60000,
       onDispatch: (attempt) => onDispatch(attempt.clientRequestId),
       credential: async () => {
         await authorize();
-        const current = await resolveAcceptedAuxiliaryModel(
+        const { selected: current } = await resolveAuxiliaryModelForTask(
+          db,
           configuration,
           actor,
           model,

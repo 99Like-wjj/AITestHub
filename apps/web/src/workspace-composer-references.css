@@ -1,0 +1,177 @@
+.workspace-reference-preview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: var(--muted);
+}
+.workspace-reference-preview > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.workspace-composer-references {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 12px;
+}
+.workspace-composer-file-cards,
+.workspace-composer-reference-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  min-width: 0;
+}
+.workspace-composer-file-cards {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding: 7px 8px 4px 0;
+}
+.workspace-composer-file-card {
+  position: relative;
+  display: flex;
+  flex: 0 0 104px;
+  flex-direction: column;
+  width: 104px;
+  height: 104px;
+  overflow: visible;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.workspace-composer-file-card > .workspace-reference-preview {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border-radius: 11px 11px 0 0;
+  font-size: 29px;
+}
+.workspace-composer-file-name {
+  display: flex;
+  flex: 0 0 25px;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 25px;
+  padding: 0 7px;
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 11px 11px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 10px;
+}
+.workspace-composer-file-name > .anticon {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 12px;
+}
+.workspace-composer-file-name > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-reference-remove {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+}
+.workspace-composer-file-card > .workspace-reference-remove {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: 0 2px 6px #0002;
+}
+.workspace-reference-remove:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.workspace-reference-remove:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.workspace-reference-remove:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.workspace-reference-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 28px;
+  padding: 3px 6px 3px 9px;
+  border-radius: 8px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  vertical-align: middle;
+}
+.workspace-reference-brand-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+}
+.workspace-reference-brand-icon > img,
+.workspace-reference-brand-icon > svg {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.workspace-reference-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-composer-reference-chips > [role='listitem'] {
+  max-width: min(100%, 390px);
+  min-width: 0;
+}
+.workspace-composer-upload-state {
+  overflow: hidden;
+  padding: 0 5px 3px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-composer-upload.has-error {
+  border-color: var(--danger);
+}
+.workspace-composer-upload.has-error > .workspace-reference-preview,
+.workspace-composer-upload.has-error > .workspace-composer-upload-state {
+  color: var(--danger);
+}
+.workspace-composer-reference-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 18px;
+}

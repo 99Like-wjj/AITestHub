@@ -1,0 +1,143 @@
+.user-composer .workspace-pending-messages.workspace-queue-drawer {
+  position: relative;
+  width: calc(100% - 32px);
+  max-width: 788px;
+  margin: 0 auto -17px;
+  padding: 3px 8px 20px;
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  border-radius: 18px 18px 0 0;
+  background: var(--hover);
+  animation: workspace-queue-open 160ms ease-out;
+}
+.workspace-queue-drawer > .ant-alert {
+  margin: 5px 2px;
+}
+.workspace-queue-drawer .workspace-queue-list {
+  max-height: 176px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+.workspace-queue-drawer .workspace-queue-list > .workspace-queue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  margin: 0;
+  padding: 5px 4px;
+}
+.workspace-queue-drawer .workspace-queue-row + .workspace-queue-row {
+  border-top: 1px solid var(--line);
+}
+.workspace-queue-row > .workspace-queue-symbol {
+  flex: 0 0 17px;
+  width: 17px;
+  color: var(--muted);
+  font-size: 16px;
+}
+.workspace-queue-attachment {
+  display: inline-flex;
+  flex: 0 0 30px;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--surface);
+}
+.workspace-queue-attachment > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.workspace-queue-row > .workspace-reference-chip.workspace-queue-skill-chip {
+  flex: 0 1 auto;
+  max-width: min(180px, 30%);
+  min-width: 0;
+  min-height: 24px;
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 20px;
+}
+.workspace-queue-skill-chip > .workspace-reference-brand-icon {
+  width: 14px;
+  height: 14px;
+  font-size: 14px;
+}
+.workspace-queue-row > .workspace-queue-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-queue-row > .workspace-queue-status {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 10px;
+}
+.workspace-queue-row > .workspace-queue-steer.ant-btn,
+.workspace-queue-row > .workspace-queue-icon-button.ant-btn {
+  flex: 0 0 auto;
+  height: 28px;
+  color: var(--muted);
+}
+.workspace-queue-row > .workspace-queue-steer.ant-btn {
+  gap: 5px;
+  padding-inline: 6px;
+  font-size: 12px;
+}
+.workspace-queue-row > .workspace-queue-icon-button.ant-btn {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+  border-radius: 7px;
+}
+.workspace-queue-row > .ant-btn:disabled {
+  opacity: 0.4;
+}
+.workspace-queue-more-menu .ant-dropdown-menu {
+  min-width: 146px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.workspace-queue-more-menu .ant-dropdown-menu-item {
+  gap: 7px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+@keyframes workspace-queue-open {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .user-composer .workspace-pending-messages.workspace-queue-drawer {
+    animation: none;
+  }
+}
+@media (max-width: 700px) {
+  .user-composer .workspace-pending-messages.workspace-queue-drawer {
+    width: calc(100% - 16px);
+    padding-inline: 4px;
+  }
+  .workspace-queue-drawer .workspace-queue-list > .workspace-queue-row {
+    gap: 5px;
+  }
+}

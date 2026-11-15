@@ -17,6 +17,7 @@ import type { ActorContext } from '../../../contracts/src/identity.js';
 import type { Database } from '../../../persistence/src/database.js';
 import { DomainError } from '../errors.js';
 import { AiRuntimeAccess, type AiCheckpointScope } from './access.js';
+import { isBaseMessage, type BaseMessage } from '@langchain/core/messages';
 
 const checkpointSchema = z.object({
   v: z.number(),
@@ -148,6 +149,37 @@ export class ScopedPostgresCheckpointer extends BaseCheckpointSaver {
           : {}),
       };
     });
+  }
+  /** Read-only data extraction, never graph restoration. The caller additionally
+   * proves current source readability and alignment with retained user turns.
+   * Legacy/changed-auth/mode namespaces and pending writes are never loaded. */
+  async retainedMessages(): Promise<BaseMessage[]> {
+    if (!this.scope.mayReadRetainedToolHistory || !this.scope.retainedThreadKey)
+      return [];
+    return this.#access.withAccess(
+      this.actor,
+      this.scope,
+      async (tx) => {
+        const row = (
+          await tx.query<CheckpointRow>(
+            `SELECT * FROM app.ai_runtime_checkpoints
+             WHERE conversation_id=$1 AND thread_key=$2 AND checkpoint_ns=''
+             ORDER BY checkpoint_id DESC LIMIT 1`,
+            [this.scope.conversationId, this.scope.retainedThreadKey],
+          )
+        ).rows[0];
+        if (!row) return [];
+        const checkpoint = checkpointSchema.parse(
+          await this.serde.loadsTyped(row.checkpoint_type, row.checkpoint),
+        );
+        const messages = z
+          .array(z.unknown())
+          .safeParse(checkpoint.channel_values.messages);
+        if (!messages.success || !messages.data.every(isBaseMessage)) return [];
+        return messages.data.filter(isBaseMessage);
+      },
+      true,
+    );
   }
   async *list(
     config: RunnableConfig,

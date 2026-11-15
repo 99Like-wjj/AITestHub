@@ -54,7 +54,7 @@ export interface ModelRequest {
   messages: readonly ModelMessage[];
   maxTokens: number;
   reasoningEffort?: string;
-  /** Explicit ChatCompletions values override only the matching profile defaults. */
+  /** Optional bounded ChatCompletions parameters. Unset values are not inferred. */
   sampling?: ModelSamplingParameters;
   stream?: boolean;
   tools?: readonly ModelTool[];
@@ -395,11 +395,7 @@ export class OpenAiCompatibleAdapter {
     let serialized: string;
     let sampling: ModelSamplingMetadata = { profileId: null, parameters: {} };
     try {
-      sampling = resolveModelSampling(
-        this.#endpoint.href,
-        this.model,
-        request.sampling,
-      );
+      sampling = resolveModelSampling(request.sampling);
       Object.assign(body, sampling.parameters);
       if (request.reasoningEffort !== undefined)
         body.reasoning_effort = z

@@ -12,29 +12,15 @@ export const modelSamplingParametersSchema = z.strictObject({
 export type ModelSamplingParameters = z.infer<
   typeof modelSamplingParametersSchema
 >;
-export const officialSensenovaSamplingProfile = Object.freeze({
-  id: 'sensenova-6.8-flash-lite.general.v1' as const,
-  label: 'SenseNova 6.8 Flash Lite 官方推荐采样',
-  parameters: Object.freeze({
-    temperature: 1,
-    top_p: 0.95,
-    top_k: 20,
-    min_p: 0,
-    presence_penalty: 1.5,
-    repetition_penalty: 1,
-  }),
-});
 export const modelSamplingMetadataSchema = z.strictObject({
-  profileId: z.literal(officialSensenovaSamplingProfile.id).nullable(),
+  // Keep the identifier readable in immutable historical observations only.
+  // New requests never infer a profile from a model name or endpoint.
+  profileId: z.literal('sensenova-6.8-flash-lite.general.v1').nullable(),
   parameters: modelSamplingParametersSchema,
 });
 export type ModelSamplingMetadata = z.infer<
   typeof modelSamplingMetadataSchema
 >;
-const officialOrigins = new Set([
-  'https://token.sensenova.cn',
-  'https://token.sensetime.com',
-]);
 const parameterNames = [
   'temperature',
   'top_p',
@@ -44,34 +30,17 @@ const parameterNames = [
   'repetition_penalty',
 ] as const;
 
-/** Pure matching; callers gate ChatCompletions. Never changes an endpoint or model. */
+/** Only explicitly supplied values enter the wire. Omitted fields stay omitted;
+ * endpoint identity and model names do not authorize parameter injection. */
 export function resolveModelSampling(
-  baseUrl: string,
-  model: string,
   explicit: ModelSamplingParameters = {},
 ): ModelSamplingMetadata {
   const parsed = modelSamplingParametersSchema.parse(explicit);
   const parameters: ModelSamplingParameters = {};
-  let matches = false;
-  try {
-    const url = new URL(baseUrl);
-    matches =
-      model === 'sensenova-6.8-flash-lite' &&
-      url.protocol === 'https:' &&
-      !url.username &&
-      !url.password &&
-      !url.search &&
-      !url.hash &&
-      officialOrigins.has(url.origin);
-  } catch {
-    // A malformed configuration has no vendor defaults; the endpoint boundary
-    // remains responsible for rejecting it before any network operation.
-  }
-  if (matches) Object.assign(parameters, officialSensenovaSamplingProfile.parameters);
   for (const name of parameterNames)
     if (parsed[name] !== undefined) parameters[name] = parsed[name];
   return {
-    profileId: matches ? officialSensenovaSamplingProfile.id : null,
+    profileId: null,
     parameters,
   };
 }

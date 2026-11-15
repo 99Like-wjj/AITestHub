@@ -394,8 +394,8 @@ export function WorkspaceSidebar({
       <Button
         block
         className="newchat"
+        aria-label="新建对话"
         icon={<AppIcon name="compose" />}
-        disabled={pending}
         onClick={() => onCreate()}
       >
         新聊天

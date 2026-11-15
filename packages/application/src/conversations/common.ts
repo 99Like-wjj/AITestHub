@@ -2,6 +2,11 @@ import type { ActorContext } from '../../../contracts/src/identity.js';
 import type { SqlExecutor } from '../../../persistence/src/database.js';
 import { currentUser, requireProject } from '../access/policy.js';
 import { DomainError } from '../errors.js';
+import {
+  conversationFirstUserTitleSql,
+  fallbackConversationTitle,
+  isPlaceholderConversationTitle,
+} from './title.js';
 
 export interface ConversationRow {
   id: string;
@@ -19,6 +24,7 @@ export interface ConversationRow {
   created_at: Date;
   updated_at: Date;
   active_task_status?: 'accepted' | 'running' | 'cancelling' | null;
+  first_user_title_content?: string | null;
 }
 export function conversationDto(row: ConversationRow) {
   return {
@@ -26,7 +32,12 @@ export function conversationDto(row: ConversationRow) {
     projectId: row.project_id,
     requirementId: row.requirement_id,
     requirementTitle: row.requirement_title ?? null,
-    title: row.alias ?? row.default_title,
+    title:
+      row.alias ??
+      (isPlaceholderConversationTitle(row.default_title) &&
+      row.first_user_title_content
+        ? fallbackConversationTitle(row.first_user_title_content)
+        : row.default_title),
     alias: row.alias,
     pinnedAt: row.pinned_at?.toISOString() ?? null,
     archivedAt: row.archived_at?.toISOString() ?? null,
@@ -65,7 +76,7 @@ export async function conversationRow(
   await personalActor(tx, actor, internal);
   const row = (
     await tx.query<ConversationRow>(
-      `SELECT c.*,${conversationRequirementTitleSql},(SELECT t.state FROM app.ai_tasks t WHERE t.conversation_id=c.id AND t.owner_id=$2 AND t.state IN ('accepted','running','cancelling') ORDER BY t.created_at DESC,t.id DESC LIMIT 1) active_task_status
+      `SELECT c.*,${conversationRequirementTitleSql},${conversationFirstUserTitleSql},(SELECT t.state FROM app.ai_tasks t WHERE t.conversation_id=c.id AND t.owner_id=$2 AND t.state IN ('accepted','running','cancelling') ORDER BY t.created_at DESC,t.id DESC LIMIT 1) active_task_status
       FROM app.ai_conversations c WHERE c.id=$1 AND c.owner_id=$2 ${lock ? 'FOR UPDATE OF c' : 'FOR SHARE OF c'}`,
       [id, actor.userId],
     )

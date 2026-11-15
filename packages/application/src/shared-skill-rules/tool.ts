@@ -28,6 +28,17 @@ export const sharedSkillRulesReadInputSchema = z.discriminatedUnion('skillId', [
       'runtime',
     ]),
   }),
+  z.strictObject({
+    skillId: z.literal('ath-api-regression'),
+    section: z.enum([
+      'entry',
+      'generation',
+      'native-api',
+      'maintenance-and-recovery',
+      'platform-debug',
+      'platform-adapter',
+    ]),
+  }),
 ]);
 
 /** Host-local only: never register this in the official MCP or business tool registry. */
@@ -53,7 +64,7 @@ export function createSharedSkillRulesTool(options: {
     {
       name: SHARED_SKILL_RULE_TOOL_NAME,
       description:
-        '读取当前任务已固定版本的 S01/S02 指引 section。仅静态规则；不是业务操作、文件读取或权限授予。先读 entry，按需读取相关 section。',
+        '读取当前任务已固定版本的用例设计、项目知识或接口自动化 Skill 指引 section。仅静态规则；不是业务操作、文件读取或权限授予。先读 entry，按需读取相关 section。',
       schema: sharedSkillRulesReadInputSchema,
     },
   );

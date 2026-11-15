@@ -3,7 +3,12 @@ import {
   subscribeIdentityChanges,
 } from './identity-context';
 import type { PreparedReference } from './workspace-references';
-import type { SendMessageInput } from '../../../packages/contracts/src/conversations';
+import type {
+  OperationTarget,
+  SendMessageInput,
+} from '../../../packages/contracts/src/conversations';
+import type { WorkspaceAccessMode } from '../../../packages/contracts/src/workspace-access';
+import type { PlatformGuidanceSkillId } from '../../../packages/contracts/src/skill-guidance';
 
 export interface ComposerInsertion {
   start: number;
@@ -14,6 +19,21 @@ export interface ComposerInsertion {
 export interface WorkspaceDraft {
   content: string;
   references: PreparedReference[];
+  operationTarget?: OperationTarget | null;
+  skillIds?: PlatformGuidanceSkillId[];
+}
+
+/** An edited queued message keeps its original target, including a personal
+ * null target, until the user explicitly chooses a different context. */
+export function resolveWorkspaceDraftTarget(
+  draft: WorkspaceDraft | undefined,
+  accessMode: WorkspaceAccessMode,
+  currentTarget: OperationTarget | null,
+): OperationTarget | null {
+  if (accessMode === 'restricted') return null;
+  return draft?.operationTarget === undefined
+    ? currentTarget
+    : draft.operationTarget;
 }
 /** Rendering/autosave of unchanged fields must not replace a dispatched draft.
  * An actual edit still gets a distinct identity, including edit-then-undo. */
@@ -25,7 +45,9 @@ export function saveWorkspaceDraft(
   const current = drafts.get(key);
   if (
     current?.content === next.content &&
-    current.references === next.references
+    current.references === next.references &&
+    current.operationTarget === next.operationTarget &&
+    current.skillIds === next.skillIds
   )
     return current;
   drafts.set(key, next);
@@ -104,6 +126,26 @@ export function clearSubmittedDraft(
   if (drafts.get(key) !== expected) return false;
   drafts.delete(key);
   return true;
+}
+
+/** Move only the exact prepared draft into its accepted conversation. A late
+ * creation receipt cannot replace edits already made in either draft. */
+export function promoteWorkspaceDraft(
+  drafts: Map<string, WorkspaceDraft>,
+  conversationId: string,
+  expected: WorkspaceDraft,
+): string[] {
+  const current = drafts.get(conversationId);
+  if (current && current !== expected) return [];
+  drafts.set(conversationId, expected);
+  const consumed: string[] = [];
+  for (const [key, draft] of drafts) {
+    if (key.startsWith('new:') && draft === expected) {
+      drafts.delete(key);
+      consumed.push(key);
+    }
+  }
+  return consumed;
 }
 
 export const newDraftKey = (projectId: string | null) =>

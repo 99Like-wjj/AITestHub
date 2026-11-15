@@ -16,7 +16,13 @@ import {
   modelMessagePresentation,
 } from './workspace-model-retry';
 import { AiRetryStatus } from './ai-retry-status';
-import { taskGuidanceLabel } from './task-guidance';
+import { taskGuidanceEntries } from './task-guidance';
+import {
+  WorkspaceGuidanceRecord,
+  WorkspaceToolBadge,
+} from './workspace-process-references';
+import { WorkspaceReferenceChip } from './workspace-composer-references';
+import type { AiContextResetReason } from '../../../packages/contracts/src/ai-context';
 import './workspace-stream.css';
 
 type Task = AiTaskStatus['task'];
@@ -46,6 +52,8 @@ export interface WorkspaceToolRow {
   confirmationId: string | null;
   startedAt: string;
   updatedAt: string;
+  external: boolean;
+  knowledgeReferences: number;
 }
 
 /** A tool response is a transport fact, not a claim that its business operation succeeded. */
@@ -57,6 +65,9 @@ export function aggregateWorkspaceTools(
     if (event.type !== 'ai.tool') continue;
     const payload = event.payload;
     const previous = rows.get(payload.invocationId);
+    const knowledgeSources = payload.sourceRefs?.filter(
+      (source) => source.kind === 'knowledge',
+    );
     rows.set(payload.invocationId, {
       id: payload.invocationId,
       name: payload.name,
@@ -66,6 +77,20 @@ export function aggregateWorkspaceTools(
         payload.confirmationId ?? previous?.confirmationId ?? null,
       startedAt: previous?.startedAt ?? event.createdAt,
       updatedAt: event.createdAt,
+      external:
+        payload.name.startsWith('ext_') ||
+        payload.externalInvocationId !== undefined ||
+        payload.sourceRefs?.some(
+          (source) => source.kind === 'externalMcpInvocation',
+        ) === true ||
+        previous?.external === true,
+      knowledgeReferences: knowledgeSources
+        ? new Set(
+            knowledgeSources.map(
+              (source) => `${source.entryId}:${source.revisionId}`,
+            ),
+          ).size
+        : (previous?.knowledgeReferences ?? 0),
     });
   }
   return [...rows.values()];
@@ -153,6 +178,19 @@ const progressLabels = {
   in_progress: '进行中',
   completed: '已完成',
 };
+const contextNotices = {
+  'authorization-changed':
+    '历史运行上下文曾按当时范围重新整理；旧记录未区分具体原因。',
+  'authorization-scope-changed':
+    '来源资料或授权范围已变化，已按当前权限重新整理可用历史。',
+  'access-mode-changed': '访问模式已切换，已按当前模式整理可用上下文。',
+  'source-context-changed':
+    '引用资料状态已变化，已按当前权限重新整理可用上下文。',
+  'run-recovery':
+    '上一轮未完整结束，已恢复当前授权下可用的历史；原操作以原回执为准。',
+  'context-rebuilt':
+    '运行上下文已重建，已恢复当前授权下可用的历史；原操作以原回执为准。',
+} satisfies Record<AiContextResetReason, string>;
 
 export function WorkspaceTurn({
   taskId,
@@ -262,21 +300,35 @@ export function WorkspaceTurn({
   const modelRunning = task?.presentation?.segments.some(
     (segment) => segment.state === 'streaming',
   );
-  const label = task
-    ? task.status === 'running'
-      ? activeTool
-        ? `正在调用 ${activeTool.name}`
-        : modelRunning
-          ? '正在生成回复'
-          : taskStateLabels.running
-      : taskStateLabels[task.status]
-    : current
-      ? messageStatus === 'queued'
-        ? '已受理，等待状态同步'
-        : messageStatus === 'streaming'
-          ? '正在读取处理状态'
-          : '处理过程'
-      : '查看已保存的处理过程';
+  const label = task ? (
+    task.status === 'running' ? (
+      activeTool ? (
+        <>
+          正在调用{' '}
+          <WorkspaceToolBadge
+            name={activeTool.name}
+            external={activeTool.external}
+          />
+        </>
+      ) : modelRunning ? (
+        '正在生成回复'
+      ) : (
+        taskStateLabels.running
+      )
+    ) : (
+      taskStateLabels[task.status]
+    )
+  ) : current ? (
+    messageStatus === 'queued' ? (
+      '已受理，等待状态同步'
+    ) : messageStatus === 'streaming' ? (
+      '正在读取处理状态'
+    ) : (
+      '处理过程'
+    )
+  ) : (
+    '查看已保存的处理过程'
+  );
   const elapsed =
     task && (task.finishedAt || running)
       ? workspaceElapsed(
@@ -284,17 +336,24 @@ export function WorkspaceTurn({
           task.finishedAt ?? now,
         )
       : null;
-  const guidance = events.flatMap((event) => {
-    const text = taskGuidanceLabel(event);
-    return text ? [{ sequence: event.sequence, text }] : [];
-  });
+  const guidance = events.flatMap((event) =>
+    taskGuidanceEntries(event).map((entry) => ({
+      key: `${event.sequence}:${entry.skillId}`,
+      entry,
+    })),
+  );
   const decisions = tools.filter((tool) => tool.confirmationId !== null);
   const failedTools = tools.filter(
     (tool) => tool.state === 'failed' || tool.unknownEffect,
   );
-  const permissionChanged =
-    events.some((event) => event.type === 'ai.contextReset') ||
-    taskNotices?.hasContextReset === true;
+  const contextReset = events.findLast(
+    (event) => event.type === 'ai.contextReset',
+  );
+  const contextNotice = contextReset
+    ? contextNotices[contextReset.payload.reason]
+    : taskNotices?.hasContextReset
+      ? '此任务的运行上下文已重新整理；展开过程可核对原记录。'
+      : null;
   const hasUnknownToolEffects =
     failedTools.some((tool) => tool.unknownEffect) ||
     taskNotices?.hasUnknownToolEffects === true;
@@ -410,7 +469,10 @@ export function WorkspaceTurn({
                       key={tool.id}
                       data-state={tool.unknownEffect ? 'unknown' : tool.state}
                     >
-                      <code>{tool.name}</code>
+                      <WorkspaceToolBadge
+                        name={tool.name}
+                        external={tool.external}
+                      />
                       <span>
                         {tool.unknownEffect
                           ? '结果未知，查原回执'
@@ -418,6 +480,15 @@ export function WorkspaceTurn({
                       </span>
                       {duration && (
                         <span className="workspace-tool-time">{duration}</span>
+                      )}
+                      {tool.knowledgeReferences > 0 && (
+                        <span className="workspace-tool-sources">
+                          <WorkspaceReferenceChip
+                            kind="knowledge"
+                            label={`知识来源 · ${tool.knowledgeReferences} 项`}
+                            className="workspace-process-reference"
+                          />
+                        </span>
                       )}
                     </li>
                   );
@@ -431,10 +502,12 @@ export function WorkspaceTurn({
             )}
             {!!guidance.length && (
               <details className="workspace-guidance-detail">
-                <summary>平台指引读取记录</summary>
+                <summary>Skill 指引记录</summary>
                 <ul>
                   {guidance.map((item) => (
-                    <li key={item.sequence}>{item.text}</li>
+                    <li key={item.key}>
+                      <WorkspaceGuidanceRecord entry={item.entry} />
+                    </li>
                   ))}
                 </ul>
               </details>
@@ -612,9 +685,9 @@ export function WorkspaceTurn({
           </button>
         </div>
       )}
-      {permissionChanged && (
+      {contextNotice && (
         <p className="workspace-turn-notice" role="status">
-          来源权限已变化，模型上下文已按当前授权重新整理。
+          {contextNotice}
         </p>
       )}
 

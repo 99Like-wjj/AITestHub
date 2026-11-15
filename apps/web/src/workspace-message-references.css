@@ -1,0 +1,21 @@
+.workspace-message-references {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 12px;
+}
+.workspace-message-reference-cards,
+.workspace-message-reference-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.workspace-message-reference-chips > [role='listitem'] {
+  min-width: 0;
+  max-width: 100%;
+}
+.workspace-message-file-card {
+  color: var(--muted);
+}

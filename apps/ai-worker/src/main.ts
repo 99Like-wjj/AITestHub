@@ -35,15 +35,27 @@ async function main() {
   );
   const tasks = new AiTasksService(database, configuration, fileReader);
   const admission = new AiTaskAdmission();
+  const auxiliaryService = new AuxiliaryService(
+    database,
+    configuration,
+    broker,
+    fileReader,
+  );
   const worker = new AiTaskWorker(
     tasks,
     createConversationRunnerFactory(database, configuration, broker, {
       fileReader,
     }),
     admission,
+    (tx, ownerId, taskId) =>
+      auxiliaryService.enqueueConversationTitleInTransaction(
+        tx,
+        ownerId,
+        taskId,
+      ),
   );
   const auxiliary = new AuxiliaryWorker(
-    new AuxiliaryService(database, configuration, broker, fileReader),
+    auxiliaryService,
     createAuxiliaryModelFactory(database, configuration, broker),
     admission,
   );

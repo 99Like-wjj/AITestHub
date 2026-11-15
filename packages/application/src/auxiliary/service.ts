@@ -2,7 +2,6 @@ import { finishAutomaticAuxiliaryTask } from './automatic-common.js';
 import {
   auxiliaryModelSnapshot,
   auxiliarySnapshotRevision,
-  resolveAcceptedAuxiliaryModel,
   resolveNewAuxiliarySelection,
 } from './model-snapshot.js';
 import { humanConfirmationExecutionInTransaction } from '../tool-registry/human-confirmation.js';
@@ -49,6 +48,12 @@ import {
 import { conversationRow } from '../conversations/common.js';
 import { assertNewWorkAllowed } from '../recovery/maintenance.js';
 import {
+  enqueueConversationTitle,
+  isAutomaticConversationTitle,
+  assertConversationTitleSource,
+  resolveAuxiliaryModelForTask,
+} from './conversation-title.js';
+import {
   captureTaskSources,
   assertFrozenTaskSources,
 } from '../conversations/task-sources.js';
@@ -60,6 +65,7 @@ export interface AuxiliaryTaskRow {
   project_id: string | null;
   conversation_id: string | null;
   purpose: string;
+  command_id: string;
   origin: 'web' | 'internal-ai' | 'official-mcp';
   origin_key_id: string | null;
   parent_task_id: string | null;
@@ -491,7 +497,8 @@ export class AuxiliaryService {
         422,
       );
     }
-    const selected = await resolveAcceptedAuxiliaryModel(
+    const { selected } = await resolveAuxiliaryModelForTask(
+      this.db,
       this.configuration,
       actor,
       model,
@@ -571,7 +578,31 @@ export class AuxiliaryService {
         );
       await assertFrozenTaskSources(tx, actor, source.parentSources);
     }
+    if (isAutomaticConversationTitle(row))
+      await assertConversationTitleSource(tx, row);
     return row;
+  }
+  /** Trusted worker-only composition port; no Web/MCP request route or flag. */
+  async enqueueConversationTitleInTransaction(
+    tx: SqlExecutor,
+    ownerId: string,
+    parentTaskId: string,
+  ): Promise<string | null> {
+    try {
+      return await enqueueConversationTitle(
+        tx,
+        this.configuration,
+        ownerId,
+        parentTaskId,
+        (selected, value, transaction) =>
+          this.credentialAbsent(selected, value, transaction),
+      );
+    } catch (error) {
+      // Expected permission/configuration loss cannot fail the public answer.
+      // Database/commit uncertainty is never converted into a successful skip.
+      if (!(error instanceof DomainError)) throw error;
+      return null;
+    }
   }
   async dto(row: AuxiliaryTaskRow, tx: SqlExecutor = this.db) {
     const source = auxiliarySourceSnapshotSchema.parse(row.source_snapshot);

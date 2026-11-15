@@ -25,6 +25,7 @@ import {
 } from '@ant-design/icons';
 import { z } from 'zod';
 import { idSchema } from '../../../packages/contracts/src/base';
+import { auxiliaryTaskReceiptSchema } from '../../../packages/contracts/src/auxiliary';
 import { availableModelV2ListSchema } from '../../../packages/contracts/src/model-configuration-v2';
 import type { AvailableModelV2 } from '../../../packages/contracts/src/model-configuration-v2';
 import {
@@ -43,6 +44,7 @@ import type {
   ConversationSidebar,
   ConversationMessage,
   SendMessageInput,
+  OperationTarget,
 } from '../../../packages/contracts/src/conversations';
 import { api, ApiError, describeError, isUncertainMutationError } from './api';
 import { modelDisplayLabel, modelServiceCaption } from './model-display-label';
@@ -84,11 +86,7 @@ import {
   WorkspaceInlineCandidates,
   type WorkspaceInlineCandidatesHandle,
 } from './workspace-inline-candidates';
-import {
-  composerTrigger,
-  insertComposerReference,
-  insertComposerSkill,
-} from './workspace-trigger';
+import { composerTrigger } from './workspace-trigger';
 import type { PlatformGuidanceSkillId } from '../../../packages/contracts/src/skill-guidance';
 import './workspace-composer.css';
 import './workspace-ai-controls.css';
@@ -99,6 +97,27 @@ import {
   saveWorkspaceAccess,
 } from './workspace-access';
 import { WorkspaceModelPicker } from './workspace-model-picker';
+import { WorkspaceContextDrawer } from './workspace-context-drawer';
+import { WorkspaceSendButton } from './workspace-send-button';
+import { WorkspaceJumpLatest } from './workspace-jump-latest';
+import {
+  WorkspaceComposerReferences,
+  WorkspaceReferenceChip,
+} from './workspace-composer-references';
+import { WorkspaceMessageReferences } from './workspace-message-references';
+import {
+  serializeComposerSkills,
+  splitComposerSkills,
+  workspaceSkillLabel,
+} from './workspace-composer-skills';
+import {
+  readWorkspaceSendMode,
+  saveWorkspaceSendMode,
+  workspaceSendModeStorageKey,
+  WORKSPACE_SEND_MODE_CHANGED_EVENT,
+  type WorkspaceSendMode,
+} from './workspace-queue-preference';
+import type { WorkspaceQueuedMessage } from './workspace-send-queue';
 import {
   chooseWorkspaceModel,
   rememberWorkspaceModelSelection,
@@ -117,7 +136,9 @@ import {
   pendingWorkspaceSends,
   pendingCreationDrafts,
   clearSubmittedDraft,
+  promoteWorkspaceDraft,
   saveWorkspaceDraft,
+  resolveWorkspaceDraftTarget,
   newDraftKey,
   moveInsertion,
   removeInsertions,
@@ -154,8 +175,37 @@ function conversationFromUrl() {
   const result = idSchema.safeParse(query.get('conversationId'));
   return result.success ? result.data : null;
 }
+function operationTargetFor(
+  projectId: string | null,
+  conversation: Conversation | null,
+): OperationTarget | null {
+  return projectId
+    ? {
+        projectId,
+        ...(projectId === conversation?.projectId && conversation.requirementId
+          ? { requirementId: conversation.requirementId }
+          : {}),
+      }
+    : null;
+}
 function MessageText({ text }: { text: string }) {
-  return <WorkspaceMarkdown text={text} />;
+  const parsed = splitComposerSkills(text);
+  return (
+    <>
+      {parsed.skillIds.length > 0 && (
+        <div className="workspace-selected-skills">
+          {parsed.skillIds.map((id) => (
+            <WorkspaceReferenceChip
+              key={id}
+              kind="skill"
+              label={workspaceSkillLabel(id)}
+            />
+          ))}
+        </div>
+      )}
+      <WorkspaceMarkdown text={parsed.text} />
+    </>
+  );
 }
 function ModelCaption({ message }: { message: ConversationMessage }) {
   return (
@@ -222,6 +272,14 @@ export function Workspace({
   const [conversationLoading, setConversationLoading] = useState(false);
   const [conversationError, setConversationError] = useState<string>();
   const [content, setContent] = useState('');
+  const [composerSkills, setComposerSkills] = useState<
+    PlatformGuidanceSkillId[]
+  >([]);
+  const [draftTarget, setDraftTarget] = useState<{
+    ownerId: string;
+    scope: string;
+    value: OperationTarget | null;
+  } | null>(null);
   const [accessMode, setAccessMode] = useState(() =>
     readWorkspaceAccess(me.user.id),
   );
@@ -232,11 +290,50 @@ export function Workspace({
   const [references, setReferences] = useState<PreparedReference[]>([]);
   const targetProjectId = project?.id ?? null;
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [sendModePreference, setSendModePreference] = useState<{
+    ownerId: string;
+    mode: WorkspaceSendMode;
+  } | null>(null);
+  const sendMode =
+    sendModePreference?.ownerId === me.user.id
+      ? sendModePreference.mode
+      : 'queue';
+  const [sendModeError, setSendModeError] = useState<string>();
+  useEffect(() => {
+    const load = () => {
+      if (currentIdentityOwner() !== me.user.id) return;
+      try {
+        setSendModePreference({
+          ownerId: me.user.id,
+          mode: readWorkspaceSendMode(me.user.id),
+        });
+        setSendModeError(undefined);
+      } catch {
+        setSendModeError('发送偏好暂时无法读取，当前使用排队模式。');
+        setSendModePreference(null);
+      }
+    };
+    const changed = (event: StorageEvent) => {
+      if (
+        event.key === null ||
+        event.key === workspaceSendModeStorageKey(me.user.id)
+      )
+        load();
+    };
+    load();
+    window.addEventListener('storage', changed);
+    window.addEventListener(WORKSPACE_SEND_MODE_CHANGED_EVENT, load);
+    return () => {
+      window.removeEventListener('storage', changed);
+      window.removeEventListener(WORKSPACE_SEND_MODE_CHANGED_EVENT, load);
+    };
+  }, [me.user.id]);
   const [pending, setPending] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendPreview, setSendPreview] = useState<{
     conversationId: string;
     content: string;
+    references: ConversationMessage['references'];
     userMessageId: string | null;
     createdAt: string;
   } | null>(null);
@@ -317,6 +414,7 @@ export function Workspace({
     null,
   );
   const codeReads = useRef(new Set<string>());
+  const draftGenerations = useRef(new Map<string, number>());
   const stream = useAiTask(taskId);
   const sendTimings = useRef(
     new Map<string, { submittedAt: number; acceptedAt: number }>(),
@@ -324,6 +422,9 @@ export function Workspace({
   const currentSendTiming = taskId
     ? sendTimings.current.get(taskId)
     : undefined;
+  const automaticTitleTaskId = stream.events.findLast(
+    (event) => event.type === 'task.finished',
+  )?.payload.automaticTitleTaskId;
   const pendingRefreshCount = stream.events.filter(
     (event) =>
       event.type === 'ai.tool' &&
@@ -377,11 +478,53 @@ export function Workspace({
         ? ['queued', 'streaming'].includes(messageForTask.status)
         : true),
   );
+  const contextCollapsible = Boolean(
+    activeId &&
+    (conversationLoading ||
+      !active ||
+      active.id !== activeId ||
+      taskId ||
+      detail?.messages.length ||
+      (sendPreview?.conversationId === activeId && sendPreview.userMessageId)),
+  );
+  useEffect(() => {
+    if (contextCollapsible) {
+      setProjectPickerOpen(false);
+      setAssociateOpen(false);
+    }
+  }, [contextCollapsible]);
+  const latestAssistant = detail?.messages.findLast(
+    (entry) => entry.role === 'assistant',
+  );
+  const replyCompleted = taskMatches
+    ? stream.task?.status === 'completed' &&
+      stream.task.messageStatus === 'completed'
+    : taskId
+      ? messageForTask?.status === 'completed'
+      : latestAssistant?.status === 'completed';
+  const jumpMode =
+    creating || sending || uncertain || conversationLoading || inFlight
+      ? 'generating'
+      : replyCompleted
+        ? 'completed'
+        : 'idle';
   const selectionCurrent = Boolean(
     model?.available && model.serviceRevision === selectedRevision,
   );
   const targetProject = me.projects.find(
     (entry) => entry.id === targetProjectId,
+  );
+  const composerScope = activeId ?? newDraftKey(targetProjectId);
+  const restoredTarget =
+    draftTarget?.ownerId === me.user.id && draftTarget.scope === composerScope
+      ? draftTarget
+      : null;
+  const currentOperationTarget: OperationTarget | null =
+    accessMode === 'full' ? operationTargetFor(targetProjectId, active) : null;
+  const hasRestoredTargetDifference = Boolean(
+    restoredTarget &&
+    JSON.stringify(restoredTarget.value) !==
+      JSON.stringify(currentOperationTarget),
   );
   const unresolvedCreates = createAttempts.filter(
     (attempt) => attempt.state === 'unknown',
@@ -421,6 +564,21 @@ export function Workspace({
         requestedProjectId === browseRef.current
       ) {
         setSidebar(response);
+        const listed = [
+          ...response.recent,
+          ...response.pinned.map(
+            ({ parentHidden: _parentHidden, ...entry }) => entry,
+          ),
+          ...response.groups.flatMap((group) => group.conversations),
+        ].find((entry) => entry.id === activeRef.current);
+        if (listed)
+          setDetail((previous) =>
+            previous?.conversation.id === listed.id &&
+            BigInt(listed.rowVersion) >=
+              BigInt(previous.conversation.rowVersion)
+              ? { ...previous, conversation: listed }
+              : previous,
+          );
         setSideError(undefined);
       }
     } catch (error) {
@@ -458,6 +616,44 @@ export function Workspace({
   useEffect(() => {
     if (taskMatches) void loadSidebar(undefined, true);
   }, [stream.task?.id, stream.task?.status, taskMatches]);
+  useEffect(() => {
+    if (!automaticTitleTaskId) return;
+    const controller = new AbortController();
+    const deadline = Date.now() + 120_000;
+    let timer: number | undefined;
+    const poll = async () => {
+      if (controller.signal.aborted || currentIdentityOwner() !== me.user.id)
+        return;
+      if (Date.now() >= deadline) {
+        void loadSidebar(controller.signal, true);
+        return;
+      }
+      if (document.visibilityState === 'hidden') {
+        timer = window.setTimeout(() => void poll(), 1500);
+        return;
+      }
+      try {
+        const { task } = await api(
+          `/me/auxiliary-tasks/${automaticTitleTaskId}`,
+          { signal: controller.signal },
+          auxiliaryTaskReceiptSchema,
+        );
+        if (controller.signal.aborted || currentIdentityOwner() !== me.user.id)
+          return;
+        if (['accepted', 'running', 'cancelling'].includes(task.state))
+          timer = window.setTimeout(() => void poll(), 1000);
+        else await loadSidebar(controller.signal, true);
+      } catch {
+        if (!controller.signal.aborted && currentIdentityOwner() === me.user.id)
+          setSideError('自动标题状态暂未读到，当前名称已保留。');
+      }
+    };
+    void poll();
+    return () => {
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [automaticTitleTaskId, me.user.id]);
   async function loadModels(signal?: AbortSignal) {
     const ownerId = me.user.id;
     setModelLoading(true);
@@ -504,6 +700,7 @@ export function Workspace({
         );
         setTaskId(last?.taskId ?? null);
         const draft = drafts.current.get(id);
+        restoreDraftTarget(id, draft);
         if (draft) {
           setContent(draft.content);
           setReferences(draft.references);
@@ -591,6 +788,8 @@ export function Workspace({
   );
   useEffect(() => {
     activeRef.current = activeId;
+    setProjectPickerOpen(false);
+    setAssociateOpen(false);
     candidateInsertion.current = null;
     setDismissedCandidate(null);
     setReferenceOpen(false);
@@ -603,6 +802,7 @@ export function Workspace({
       setTaskId(null);
       setConversationError(undefined);
       const draft = drafts.current.get(newDraftKey(browseRef.current));
+      restoreDraftTarget(newDraftKey(browseRef.current), draft);
       setContent(draft?.content ?? '');
       setReferences(draft?.references ?? []);
       return;
@@ -630,7 +830,7 @@ export function Workspace({
     };
     window.addEventListener('hashchange', changed);
     return () => window.removeEventListener('hashchange', changed);
-  }, [content, references]);
+  }, [content, references, draftTarget, composerSkills]);
   useEffect(() => {
     if (currentIdentityOwner() !== me.user.id) return;
     if (
@@ -638,14 +838,15 @@ export function Workspace({
       detail?.conversation.id === activeId &&
       !conversationLoading
     )
-      saveWorkspaceDraft(drafts.current, activeId, { content, references });
+      saveWorkspaceDraft(drafts.current, activeId, composerDraft());
     else if (!activeId) {
       const timer = window.setTimeout(() => {
         if (!activeRef.current && browseRef.current === targetProjectId)
-          saveWorkspaceDraft(drafts.current, newDraftKey(targetProjectId), {
-            content,
-            references,
-          });
+          saveWorkspaceDraft(
+            drafts.current,
+            newDraftKey(targetProjectId),
+            composerDraft(),
+          );
       }, 0);
       return () => window.clearTimeout(timer);
     }
@@ -656,23 +857,54 @@ export function Workspace({
     detail?.conversation.id,
     conversationLoading,
     targetProjectId,
+    draftTarget,
+    composerSkills,
   ]);
 
+  function composerDraft(): Draft {
+    return {
+      content,
+      references,
+      ...(restoredTarget ? { operationTarget: restoredTarget.value } : {}),
+      ...(composerSkills.length ? { skillIds: composerSkills } : {}),
+    };
+  }
+  function restoreDraftTarget(scope: string, draft: Draft | undefined) {
+    setComposerSkills(draft?.skillIds ?? []);
+    setDraftTarget(
+      draft && 'operationTarget' in draft
+        ? { ownerId: me.user.id, scope, value: draft.operationTarget ?? null }
+        : null,
+    );
+  }
+  function replaceDraftGeneration(scope: string) {
+    draftGenerations.current.set(
+      scope,
+      (draftGenerations.current.get(scope) ?? 0) + 1,
+    );
+  }
+  function promoteCreatedDraft(conversationId: string, draft: Draft) {
+    for (const scope of promoteWorkspaceDraft(
+      drafts.current,
+      conversationId,
+      draft,
+    ))
+      replaceDraftGeneration(scope);
+  }
   function saveDraft() {
     if (currentIdentityOwner() !== me.user.id) return;
     saveWorkspaceDraft(
       drafts.current,
       activeRef.current ?? newDraftKey(browseRef.current),
-      {
-        content,
-        references,
-      },
+      composerDraft(),
     );
   }
   function changeProject(id: string | null) {
+    setDraftTarget(null);
     if (!activeRef.current) {
       saveDraft();
       const next = drafts.current.get(newDraftKey(id));
+      restoreDraftTarget(newDraftKey(id), next);
       setContent(next?.content ?? '');
       setReferences(next?.references ?? []);
       candidateInsertion.current = null;
@@ -686,6 +918,46 @@ export function Workspace({
     activeRef.current = id;
     setActiveId(id);
     window.location.hash = `workspace?conversationId=${id}`;
+  }
+  function currentConversationIsEmpty() {
+    return Boolean(
+      !conversationLoading &&
+      detail?.conversation.id === activeRef.current &&
+      detail.messages.length === 0 &&
+      !detail.conversation.activeTaskStatus &&
+      !taskIdentity.current &&
+      !(
+        sendPreview?.conversationId === activeRef.current &&
+        sendPreview.userMessageId
+      ),
+    );
+  }
+  function openNewDraft() {
+    if (!activeRef.current || currentConversationIsEmpty()) return;
+    if (detail?.conversation.id === activeRef.current && !conversationLoading)
+      saveDraft();
+    conversationNavigation.current += 1;
+    conversationEpoch.current += 1;
+    activeRef.current = null;
+    setActiveId(null);
+    setDetail(null);
+    setTaskId(null);
+    setConversationLoading(false);
+    setConversationError(undefined);
+    setSendError(undefined);
+    setUncertain(null);
+    setSendPreview(null);
+    candidateInsertion.current = null;
+    setDismissedCandidate(null);
+    setReferenceOpen(false);
+    setActiveCandidateId(undefined);
+    const scope = newDraftKey(browseRef.current);
+    const draft = drafts.current.get(scope);
+    setContent(draft?.content ?? '');
+    setReferences(draft?.references ?? []);
+    restoreDraftTarget(scope, draft);
+    setCaret(draft?.content.length ?? 0);
+    window.location.hash = 'workspace';
   }
   function openReferences(tab: ReferenceTab) {
     if (accessMode === 'restricted') return;
@@ -739,28 +1011,15 @@ export function Workspace({
   }
   function selectReference(reference: PreparedReference) {
     if (references.length >= 30) return;
-    let prepared = reference;
+    const prepared = reference;
     if (mention) {
-      const inserted = insertComposerReference(
-        content,
-        mention,
-        reference.label,
-      );
-      updateComposerContent(inserted.text);
-      prepared = {
-        ...reference,
-        insertions: [
-          {
-            start: mention.start,
-            end: inserted.caret,
-            text: inserted.text.slice(mention.start, inserted.caret),
-          },
-        ],
-      };
-      setCaret(inserted.caret);
+      const text = content.slice(0, mention.start) + content.slice(mention.end);
+      const nextCaret = mention.start;
+      updateComposerContent(text);
+      setCaret(nextCaret);
       window.requestAnimationFrame(() => {
         input.current?.focus();
-        input.current?.setSelectionRange(inserted.caret, inserted.caret);
+        input.current?.setSelectionRange(nextCaret, nextCaret);
       });
     }
     setReferences((previous) => {
@@ -786,12 +1045,16 @@ export function Workspace({
   }
   function selectSkill(skillId: PlatformGuidanceSkillId) {
     if (!mention || mention.symbol !== '/') return;
-    const inserted = insertComposerSkill(content, mention, skillId);
-    updateComposerContent(inserted.text);
-    setCaret(inserted.caret);
+    const text = content.slice(0, mention.start) + content.slice(mention.end);
+    const nextCaret = mention.start;
+    updateComposerContent(text);
+    setComposerSkills((previous) =>
+      previous.includes(skillId) ? previous : [...previous, skillId],
+    );
+    setCaret(nextCaret);
     window.requestAnimationFrame(() => {
       input.current?.focus();
-      input.current?.setSelectionRange(inserted.caret, inserted.caret);
+      input.current?.setSelectionRange(nextCaret, nextCaret);
     });
     closeCandidates(true);
   }
@@ -823,11 +1086,12 @@ export function Workspace({
       ...new Set(text.match(/\bATHC1-[a-f0-9]{32}\b/gi) ?? []),
     ].slice(0, 30 - references.length);
     const draftId = activeRef.current ?? newDraftKey(browseRef.current),
-      epoch = identityContextEpoch();
+      epoch = identityContextEpoch(),
+      generation = draftGenerations.current.get(draftId) ?? 0;
     for (const code of codes) {
       const decoded = decodeConversationReference(code);
       if (!decoded || decoded.conversationId === activeRef.current) continue;
-      const key = `${draftId}:${code.toLowerCase()}`;
+      const key = `${draftId}:${generation}:${code.toLowerCase()}`;
       if (codeReads.current.has(key)) continue;
       codeReads.current.add(key);
       try {
@@ -836,7 +1100,11 @@ export function Workspace({
           {},
           conversationMutationSchema,
         );
-        if (epoch !== identityContextEpoch()) return;
+        if (
+          epoch !== identityContextEpoch() ||
+          generation !== (draftGenerations.current.get(draftId) ?? 0)
+        )
+          return;
         const prepared: PreparedReference = {
           id: crypto.randomUUID(),
           label: response.conversation.alias ?? response.conversation.title,
@@ -880,7 +1148,10 @@ export function Workspace({
             });
         }
       } catch (error) {
-        if (epoch === identityContextEpoch())
+        if (
+          epoch === identityContextEpoch() &&
+          generation === (draftGenerations.current.get(draftId) ?? 0)
+        )
           setSendError(`会话引用未准备：${describeError(error)}`);
       }
     }
@@ -917,7 +1188,14 @@ export function Workspace({
     try {
       attempt = prepareConversationCreate(me.user.id);
       if (!previousId)
-        creationDrafts.current.set(attempt.commandId, { content, references });
+        creationDrafts.current.set(
+          attempt.commandId,
+          saveWorkspaceDraft(
+            drafts.current,
+            newDraftKey(browseRef.current),
+            composerDraft(),
+          ),
+        );
       const response = await dispatchConversationCreate(attempt, {
         useDefaultTarget: !group,
         ...(group
@@ -925,15 +1203,20 @@ export function Workspace({
           : {}),
       });
       const draft = creationDrafts.current.get(attempt.commandId);
-      if (current() && draft)
+      if (current() && draft && !drafts.current.has(response.conversation.id))
         drafts.current.set(response.conversation.id, draft);
       creationDrafts.current.delete(attempt.commandId);
-      if (!currentView()) return null;
+      if (!currentView()) {
+        if (current() && draft)
+          promoteCreatedDraft(response.conversation.id, draft);
+        return null;
+      }
       if (response.notice)
         void message.info(
           '最近使用的需求已不可用，已建立个人对话；请重新核对归属和操作目标。',
         );
       openConversation(response.conversation.id);
+      if (draft) promoteCreatedDraft(response.conversation.id, draft);
       const openedNavigation = conversationNavigation.current;
       await loadSidebar();
       if (
@@ -974,13 +1257,15 @@ export function Workspace({
       )
         return;
       const draft = creationDrafts.current.get(attempt.commandId);
-      if (draft) drafts.current.set(response.conversation.id, draft);
+      if (draft && !drafts.current.has(response.conversation.id))
+        drafts.current.set(response.conversation.id, draft);
       creationDrafts.current.delete(attempt.commandId);
       if (
         navigation === conversationNavigation.current &&
         browsing === browseGeneration.current
       ) {
         openConversation(response.conversation.id);
+        if (draft) promoteCreatedDraft(response.conversation.id, draft);
         setSendError('原对话已找回；本条消息尚未发送，请重新检查并确认发送。');
       }
       await loadSidebar();
@@ -1418,13 +1703,15 @@ export function Workspace({
   }, [me.user.id]);
   async function submitMessage(
     destination?: Conversation,
-    intent: 'normal' | 'interrupt' = 'normal',
+    intent: 'normal' | 'interrupt' = sendMode === 'steer'
+      ? 'interrupt'
+      : 'normal',
   ) {
     const sendEpoch = identityContextEpoch();
     if (currentIdentityOwner() !== me.user.id) return;
     if (
       Boolean(targetProjectId && !targetProject) ||
-      !content.trim() ||
+      (!content.trim() && !composerSkills.length) ||
       sending ||
       uncertain ||
       creatingRef.current ||
@@ -1467,12 +1754,12 @@ export function Workspace({
     setSending(true);
     setSendError(undefined);
     const commandId = crypto.randomUUID();
-    const submittedDraft = { content, references };
+    const submittedDraft = composerDraft();
     drafts.current.set(active.id, submittedDraft);
     try {
       const payload = sendMessageInputSchema.parse({
         commandId,
-        content,
+        content: serializeComposerSkills(composerSkills, content),
         modelSelection: {
           modelServiceId: model.modelServiceId,
           modelEntryId: model.modelEntryId,
@@ -1485,15 +1772,11 @@ export function Workspace({
           ...entry.reference,
           dataScope,
         })),
-        operationTarget:
-          accessMode === 'full' && targetProjectId
-            ? {
-                projectId: targetProjectId,
-                ...(targetProjectId === active.projectId && active.requirementId
-                  ? { requirementId: active.requirementId }
-                  : {}),
-              }
-            : null,
+        operationTarget: resolveWorkspaceDraftTarget(
+          submittedDraft,
+          accessMode,
+          operationTargetFor(targetProjectId, active),
+        ),
       });
       if (inFlight || (pendingMessages.state?.items.length ?? 0) > 0) {
         if (!pendingMessages.controller)
@@ -1521,21 +1804,26 @@ export function Workspace({
             (accessMode === 'full' ? '完全访问' : '受限访问'),
           blockingTaskId,
           intent === 'interrupt',
+          { references: accessMode === 'full' ? references : [] },
         );
         const clearComposer = clearSubmittedDraft(
           drafts.current,
           active.id,
           submittedDraft,
         );
+        if (clearComposer) replaceDraftGeneration(active.id);
         if (clearComposer && activeRef.current === active.id) {
+          setDraftTarget(null);
           setContent('');
           setReferences([]);
+          setComposerSkills([]);
         }
         return;
       }
       setSendPreview({
         conversationId: active.id,
-        content,
+        content: payload.content,
+        references: payload.references.map((reference) => ({ reference })),
         userMessageId: null,
         createdAt: new Date().toISOString(),
       });
@@ -1566,16 +1854,20 @@ export function Workspace({
           active.id,
           submittedDraft,
         );
+        if (clearComposer) replaceDraftGeneration(active.id);
         uncertainSends.current.delete(active.id);
         if (mounted.current && activeRef.current === active.id) {
           if (clearComposer) {
+            setDraftTarget(null);
             setContent('');
             setReferences([]);
+            setComposerSkills([]);
           }
           setTaskId(result.taskId);
           setSendPreview({
             conversationId: active.id,
             content: payload.content,
+            references: payload.references.map((reference) => ({ reference })),
             userMessageId: result.userMessageId,
             createdAt: new Date().toISOString(),
           });
@@ -1617,6 +1909,111 @@ export function Workspace({
       setSending(false);
     }
   }
+  function changeSendMode(mode: WorkspaceSendMode) {
+    try {
+      saveWorkspaceSendMode(me.user.id, mode);
+      setSendModePreference({ ownerId: me.user.id, mode });
+      setSendModeError(undefined);
+    } catch {
+      setSendModeError('发送偏好未能保存，原发送模式保持不变。');
+    }
+  }
+  function editQueuedMessage(item: WorkspaceQueuedMessage) {
+    const conversationId = activeRef.current;
+    const epoch = identityContextEpoch();
+    const restore = () => {
+      if (
+        !conversationId ||
+        activeRef.current !== conversationId ||
+        currentIdentityOwner() !== me.user.id ||
+        identityContextEpoch() !== epoch ||
+        creatingRef.current ||
+        sendDispatchInProgress.current ||
+        sending ||
+        uncertain ||
+        uploading.some((entry) => !entry.error)
+      )
+        throw new Error('当前草稿或身份已变化，请保留原队列并稍后重试。');
+      const originalTarget = item.input.operationTarget?.projectId ?? null;
+      if (
+        originalTarget &&
+        !me.projects.some((entry) => entry.id === originalTarget)
+      )
+        throw new Error('原消息的目标项目已不可访问，队列和当前草稿已保留。');
+      const restored = pendingMessages.controller?.takeForEditing(
+        conversationId,
+        item.input.commandId,
+      );
+      if (!restored)
+        throw new Error('这条消息已开始受理或不在队列中，请核对原回执。');
+      const restoredReferences =
+        restored.display?.references ??
+        restored.input.references.map((reference, index) => ({
+          id: `queued:${restored.input.commandId}:${index}`,
+          label: reference.kind === 'resource' ? '已选附件' : '已选引用',
+          note: '从排队消息恢复，发送时重新校验当前权限。',
+          reference,
+        }));
+      const parsed = splitComposerSkills(restored.input.content);
+      const draft = {
+        content: parsed.text,
+        references: restoredReferences,
+        operationTarget: restored.input.operationTarget,
+        ...(parsed.skillIds.length ? { skillIds: parsed.skillIds } : {}),
+      };
+      replaceDraftGeneration(conversationId);
+      saveWorkspaceDraft(drafts.current, conversationId, draft);
+      restoreDraftTarget(conversationId, draft);
+      setContent(draft.content);
+      setReferences(draft.references);
+      const restoredAccess = restored.input.accessMode ?? 'restricted';
+      setAccessMode(restoredAccess);
+      saveWorkspaceAccess(me.user.id, restoredAccess);
+      setModelPreference({
+        schemaVersion: 'ath.workspace-model-preference.v1',
+        ownerId: me.user.id,
+        ...restored.input.modelSelection,
+        effort: restored.input.modelSelection.effort ?? null,
+      });
+      if (restoredAccess === 'full') onProjectChange(originalTarget);
+      candidateInsertion.current = null;
+      closeCandidates();
+      setCaret(draft.content.length);
+      setSendError(undefined);
+      requestAnimationFrame(() => {
+        if (
+          activeRef.current === conversationId &&
+          currentIdentityOwner() === me.user.id &&
+          identityContextEpoch() === epoch
+        )
+          input.current?.focus();
+      });
+    };
+    if (
+      content ||
+      composerSkills.length ||
+      references.length ||
+      uploading.length
+    ) {
+      modal.confirm({
+        className: 'workspace-queue-edit-confirm',
+        title: '替换当前输入并编辑排队消息？',
+        content:
+          '输入框中已有未发送草稿。确认后会用这条排队消息的文字、附件和发送设置替换；取消将保留当前草稿和原队列。',
+        okText: '替换并编辑',
+        cancelText: '保留当前草稿',
+        zIndex: uiLayers.confirmation,
+        onOk: () => {
+          try {
+            restore();
+          } catch (error) {
+            void message.warning(describeError(error));
+            return Promise.reject(error);
+          }
+        },
+      });
+    } else restore();
+  }
   async function recoverSend() {
     if (!uncertain) return;
     const sendEpoch = identityContextEpoch();
@@ -1640,12 +2037,15 @@ export function Workspace({
         uncertain.conversationId,
         uncertain.draft,
       );
+      if (clearComposer) replaceDraftGeneration(uncertain.conversationId);
       uncertainSends.current.delete(uncertain.conversationId);
       if (activeRef.current === uncertain.conversationId) {
         setTaskId(receipt.receipt.taskId);
         if (clearComposer) {
+          setDraftTarget(null);
           setContent('');
           setReferences([]);
+          setComposerSkills([]);
         }
         setUncertain(null);
         const result = await api(
@@ -1715,12 +2115,14 @@ export function Workspace({
         },
         conversationMutationSchema,
       );
-      if (isCurrentConversation())
+      if (isCurrentConversation()) {
+        setDraftTarget(null);
         setDetail((previous) =>
           previous?.conversation.id === active.id
             ? { ...previous, conversation: response.conversation }
             : previous,
         );
+      }
       if (isCurrentPicker()) setAssociateOpen(false);
       await loadSidebar();
     } catch (error) {
@@ -1791,7 +2193,13 @@ export function Workspace({
       selectedId={activeId}
       onCreate={(group) => {
         setNavigationOpen(false);
-        void createConversation(group);
+        if (!group) openNewDraft();
+        else if (!(
+          currentConversationIsEmpty() &&
+          active?.requirementId === group.requirementId &&
+          active.projectId === group.projectId
+        ))
+          void createConversation(group);
       }}
       onOpen={(id) => {
         setNavigationOpen(false);
@@ -1890,7 +2298,7 @@ export function Workspace({
                     },
                   ],
                   onClick: ({ key }) => {
-                    if (key === 'new') void createConversation();
+                    if (key === 'new') openNewDraft();
                     else onSettings();
                   },
                 }}
@@ -2032,21 +2440,8 @@ export function Workspace({
                       })}
                     </time>
                   </header>
+                  <WorkspaceMessageReferences references={entry.references} />
                   <MessageText text={entry.content} />
-                  {!!entry.references.length && (
-                    <details className="message-metadata">
-                      <summary>发送时引用</summary>
-                      <Space wrap>
-                        {entry.references.map((reference, index) => (
-                          <Tag key={index}>
-                            {reference.reference.kind === 'projectAccess'
-                              ? '工具来源项目'
-                              : reference.reference.kind}
-                          </Tag>
-                        ))}
-                      </Space>
-                    </details>
-                  )}
                 </article>
               );
             })}
@@ -2066,6 +2461,9 @@ export function Workspace({
                       )}
                     </time>
                   </header>
+                  <WorkspaceMessageReferences
+                    references={sendPreview.references}
+                  />
                   <MessageText text={sendPreview.content} />
                   <p className="caption" role="status">
                     {sendPreview.userMessageId
@@ -2122,14 +2520,7 @@ export function Workspace({
             />
           </div>
           {scroll.away && (
-            <button
-              className="jump-latest"
-              type="button"
-              onClick={scroll.jump}
-              aria-label="回到最新回复"
-            >
-              ↓ 最新回复
-            </button>
+            <WorkspaceJumpLatest mode={jumpMode} onJump={scroll.jump} />
           )}
         </div>
         <div
@@ -2145,131 +2536,153 @@ export function Workspace({
             }
           }}
         >
-          <div className="composer-context-bar">
-            <WorkspaceContextPicker
-              open={projectPickerOpen}
-              onOpenChange={setProjectPickerOpen}
-              selectedId={project?.id ?? ''}
-              placeholder="搜索项目"
-              options={[
-                { id: '', label: '不在项目中工作' },
-                ...me.projects.map((entry) => ({
-                  id: entry.id,
-                  label: entry.name,
-                })),
-              ]}
-              onChoose={(id) => {
-                changeProject(id || null);
-                setProjectPickerOpen(false);
-              }}
-            >
-              <Button
-                type="text"
-                className="composer-project-context"
-                disabled={creating || sending || Boolean(uncertain)}
-                title={project?.name ?? '不在项目'}
-                aria-label={'切换全站项目：' + (project?.name ?? '不在项目')}
+          <WorkspaceContextDrawer expanded={!contextCollapsible}>
+            <div className="composer-context-bar">
+              <WorkspaceContextPicker
+                open={projectPickerOpen}
+                onOpenChange={setProjectPickerOpen}
+                selectedId={project?.id ?? ''}
+                placeholder="搜索项目"
+                options={[
+                  { id: '', label: '不在项目中工作' },
+                  ...me.projects.map((entry) => ({
+                    id: entry.id,
+                    label: entry.name,
+                  })),
+                ]}
+                onChoose={(id) => {
+                  changeProject(id || null);
+                  setProjectPickerOpen(false);
+                }}
               >
-                <ProjectOutlined />
-                <span className="composer-project-name">
-                  {project?.name ?? '不在项目'}
-                </span>
-                <AppIcon name="down" />
-              </Button>
-            </WorkspaceContextPicker>
-            <WorkspaceContextPicker
-              open={associateOpen}
-              onOpenChange={(value) => {
-                setAssociateOpen(value);
-                if (value) {
-                  setAssociationError(undefined);
-                  void restoreCandidates(false);
+                <Button
+                  type="text"
+                  className="composer-project-context"
+                  disabled={creating || sending || Boolean(uncertain)}
+                  title={project?.name ?? '不在项目'}
+                  aria-label={'切换全站项目：' + (project?.name ?? '不在项目')}
+                >
+                  <ProjectOutlined />
+                  <span className="composer-project-name">
+                    {project?.name ?? '不在项目'}
+                  </span>
+                  <AppIcon name="down" />
+                </Button>
+              </WorkspaceContextPicker>
+              <WorkspaceContextPicker
+                open={associateOpen}
+                onOpenChange={(value) => {
+                  setAssociateOpen(value);
+                  if (value) {
+                    setAssociationError(undefined);
+                    void restoreCandidates(false);
+                  }
+                }}
+                selectedId={active?.requirementId ?? ''}
+                placeholder="搜索需求"
+                loading={groupLoading}
+                error={associationError ?? groupError}
+                emptyText={
+                  project ? '当前没有本人参与的需求' : '先选择这个项目'
                 }
-              }}
-              selectedId={active?.requirementId ?? ''}
-              placeholder="搜索需求"
-              loading={groupLoading}
-              error={associationError ?? groupError}
-              emptyText={project ? '当前没有本人参与的需求' : '先选择这个项目'}
-              caption={
-                active?.requirementId
-                  ? '当前对话已关联，既有归属保持不变。'
-                  : '选择后关联本对话；不会改动已发任务。'
-              }
-              options={[
-                {
-                  id: '',
-                  label: '不关联需求',
-                  disabled: Boolean(active?.requirementId),
-                },
-                ...(active?.requirementId &&
-                !groupCandidates.some(
-                  (group) => group.requirementId === active.requirementId,
-                )
-                  ? [
-                      {
-                        id: active.requirementId,
-                        label: active.requirementTitle ?? '当前需求',
-                      },
-                    ]
-                  : []),
-                ...groupCandidates.map((group) => ({
-                  id: group.requirementId,
-                  label:
-                    group.alias ?? group.generatedName ?? group.formalTitle,
-                  description: group.formalTitle,
-                  disabled: Boolean(
-                    active?.requirementId &&
-                    active.requirementId !== group.requirementId,
-                  ),
-                })),
-              ]}
-              onChoose={(id) => {
-                if (!id || id === active?.requirementId) {
-                  setAssociateOpen(false);
-                  return;
+                caption={
+                  active?.requirementId
+                    ? '当前对话已关联，既有归属保持不变。'
+                    : '选择后关联本对话；不会改动已发任务。'
                 }
-                const selected = groupCandidates.find(
-                  (group) => group.requirementId === id,
-                );
-                if (!selected) return;
-                if (!active) {
-                  void createConversation(selected).then((created) => {
-                    if (created) setAssociateOpen(false);
-                  });
-                } else void associate(id);
-              }}
-            >
-              <Button
-                type="text"
-                className="composer-requirement-context"
-                icon={<AppIcon name="folder-closed" />}
-                disabled={pending || sending || conversationLoading}
-                title={
-                  currentGroup?.formalTitle ??
-                  active?.requirementTitle ??
-                  '选择需求'
-                }
-                aria-label="选择当前对话需求"
+                options={[
+                  {
+                    id: '',
+                    label: '不关联需求',
+                    disabled: Boolean(active?.requirementId),
+                  },
+                  ...(active?.requirementId &&
+                  !groupCandidates.some(
+                    (group) => group.requirementId === active.requirementId,
+                  )
+                    ? [
+                        {
+                          id: active.requirementId,
+                          label: active.requirementTitle ?? '当前需求',
+                        },
+                      ]
+                    : []),
+                  ...groupCandidates.map((group) => ({
+                    id: group.requirementId,
+                    label:
+                      group.alias ?? group.generatedName ?? group.formalTitle,
+                    description: group.formalTitle,
+                    disabled: Boolean(
+                      active?.requirementId &&
+                      active.requirementId !== group.requirementId,
+                    ),
+                  })),
+                ]}
+                onChoose={(id) => {
+                  if (!id || id === active?.requirementId) {
+                    setAssociateOpen(false);
+                    return;
+                  }
+                  const selected = groupCandidates.find(
+                    (group) => group.requirementId === id,
+                  );
+                  if (!selected) return;
+                  if (!active) {
+                    void createConversation(selected).then((created) => {
+                      if (created) setAssociateOpen(false);
+                    });
+                  } else void associate(id);
+                }}
               >
-                {currentGroup?.alias ??
-                  currentGroup?.generatedName ??
-                  currentGroup?.formalTitle ??
-                  active?.requirementTitle ??
-                  '未关联需求'}
-                <AppIcon name="down" />
-              </Button>
-            </WorkspaceContextPicker>
-          </div>
+                <Button
+                  type="text"
+                  className="composer-requirement-context"
+                  icon={<AppIcon name="folder-closed" />}
+                  disabled={pending || sending || conversationLoading}
+                  title={
+                    currentGroup?.formalTitle ??
+                    active?.requirementTitle ??
+                    '选择需求'
+                  }
+                  aria-label="选择当前对话需求"
+                >
+                  {currentGroup?.alias ??
+                    currentGroup?.generatedName ??
+                    currentGroup?.formalTitle ??
+                    active?.requirementTitle ??
+                    '未关联需求'}
+                  <AppIcon name="down" />
+                </Button>
+              </WorkspaceContextPicker>
+            </div>
+          </WorkspaceContextDrawer>
+          <WorkspacePendingMessages
+            state={pendingMessages.state}
+            queue={pendingMessages.controller}
+            taskId={taskId}
+            mode={sendMode}
+            onModeChange={changeSendMode}
+            onEdit={editQueuedMessage}
+          />
           <div className="composer user-composer-anchor">
             {pendingMessages.error && (
               <Alert type="warning" showIcon title={pendingMessages.error} />
             )}
-            <WorkspacePendingMessages
-              state={pendingMessages.state}
-              queue={pendingMessages.controller}
-              taskId={taskId}
-            />
+            {sendModeError && (
+              <Alert type="warning" showIcon title={sendModeError} />
+            )}
+            {hasRestoredTargetDifference && (
+              <p className="caption composer-restored-target" role="status">
+                本条消息沿用排队时的项目与需求范围。
+                <Button
+                  type="link"
+                  size="small"
+                  onClick={() => setDraftTarget(null)}
+                >
+                  使用当前项目与需求
+                </Button>
+              </p>
+            )}
             {candidateOpen &&
               mention &&
               (accessMode === 'full' || mention.symbol === '/') && (
@@ -2343,36 +2756,42 @@ export function Workspace({
                 showIcon
               />
             )}
-            {(references.length > 0 || uploading.length > 0) && (
-              <Space wrap className="prepared-references">
-                {references.map((reference) => (
-                  <Tag key={reference.id} title={reference.note}>
-                    {reference.label} ·{' '}
-                    {accessMode === 'restricted'
-                      ? '受限访问不发送'
-                      : '待解析/权限校验'}
-                    <button
-                      type="button"
-                      className="reference-remove"
-                      aria-label={`移除引用：${reference.label}`}
-                      title={`移除引用：${reference.label}`}
-                      disabled={creating || sending}
-                      onClick={() => removeReference(reference)}
-                    >
-                      ×
-                    </button>
-                  </Tag>
+            <WorkspaceComposerReferences
+              refs={references}
+              uploading={uploading}
+              disabled={creating || sending}
+              accessMode={accessMode}
+              onRemove={removeReference}
+            />
+            {composerSkills.length > 0 && (
+              <div
+                className="workspace-selected-skills"
+                aria-label="已选 Skill"
+              >
+                {composerSkills.map((id) => (
+                  <WorkspaceReferenceChip
+                    key={id}
+                    kind="skill"
+                    label={workspaceSkillLabel(id)}
+                    trailing={
+                      <button
+                        type="button"
+                        className="workspace-skill-remove"
+                        aria-label={`移除 Skill：${workspaceSkillLabel(id)}`}
+                        disabled={creating || sending}
+                        onClick={() => {
+                          setComposerSkills((previous) =>
+                            previous.filter((entry) => entry !== id),
+                          );
+                          input.current?.focus();
+                        }}
+                      >
+                        ×
+                      </button>
+                    }
+                  />
                 ))}
-                {uploading.map((upload) => (
-                  <Tag
-                    key={upload.id}
-                    color={upload.error ? 'red' : 'default'}
-                    title={upload.error}
-                  >
-                    {upload.name} · {upload.state}
-                  </Tag>
-                ))}
-              </Space>
+              </div>
             )}
             <Input.TextArea
               ref={(value) => {
@@ -2444,15 +2863,14 @@ export function Workspace({
                   event.preventDefault();
                   return;
                 }
-                if (
-                  event.key === 'Enter' &&
-                  !event.shiftKey &&
-                  !event.ctrlKey &&
-                  !event.altKey &&
-                  !event.metaKey
-                ) {
+                if (event.key === 'Enter' && !event.shiftKey && !event.altKey) {
                   event.preventDefault();
-                  void submitMessage();
+                  void submitMessage(
+                    undefined,
+                    event.ctrlKey || event.metaKey || sendMode === 'steer'
+                      ? 'interrupt'
+                      : 'normal',
+                  );
                 }
                 if (event.key === '@' || event.key === '/') {
                   setReferenceOpen(false);
@@ -2460,7 +2878,9 @@ export function Workspace({
                 }
               }}
               autoSize={{ minRows: 3, maxRows: 8 }}
-              maxLength={100000}
+              maxLength={
+                100000 - serializeComposerSkills(composerSkills, '').length
+              }
               placeholder={
                 active
                   ? '输入消息，@ 引用，/ 选择 Skill'
@@ -2547,6 +2967,7 @@ export function Workspace({
                   mode={accessMode}
                   disabled={creating || sending || Boolean(uncertain)}
                   onChange={(mode) => {
+                    setDraftTarget(null);
                     setAccessMode(mode);
                     saveWorkspaceAccess(me.user.id, mode);
                     setSendError(undefined);
@@ -2578,97 +2999,44 @@ export function Workspace({
                     );
                   }}
                 />
-                {inFlight ? (
-                  <>
-                    <Button
-                      type="text"
-                      className="workspace-interrupt-send"
-                      disabled={
-                        sending ||
-                        !content.trim() ||
-                        !model ||
-                        !selectionCurrent ||
-                        Boolean(uncertain) ||
-                        Boolean(pendingMessages.error)
-                      }
-                      onClick={() => void submitMessage(undefined, 'interrupt')}
-                    >
-                      插队发送
-                    </Button>
-                    <Button
-                      shape="circle"
-                      aria-label="加入消息队列"
-                      title="加入消息队列"
-                      icon={<AppIcon name="send" />}
-                      disabled={
-                        sending ||
-                        !content.trim() ||
-                        !model ||
-                        !selectionCurrent ||
-                        Boolean(uncertain) ||
-                        Boolean(pendingMessages.error)
-                      }
-                      onClick={() => void submitMessage()}
-                    />
-                    <Button
-                      className="send-message-button stop-message-button"
-                      shape="circle"
-                      type="primary"
-                      aria-label={
-                        taskMatches && stream.task?.status === 'cancelling'
-                          ? '正在停止回复'
-                          : '停止回复'
-                      }
-                      aria-disabled={
-                        sending ||
-                        (taskMatches && stream.task?.status === 'cancelling')
-                      }
-                      aria-busy={sending}
-                      icon={
-                        <span
-                          className="composer-stop-square"
-                          aria-hidden="true"
-                        />
-                      }
-                      onClick={() => {
-                        if (
-                          !sending &&
-                          !(taskMatches && stream.task?.status === 'cancelling')
-                        )
-                          void stopReply();
-                      }}
-                    />
-                  </>
-                ) : (
-                  <Button
-                    className="send-message-button"
-                    shape="circle"
-                    aria-label="发送消息"
-                    type="primary"
-                    icon={<AppIcon name="send" />}
-                    loading={creating || sending}
-                    disabled={
-                      pending ||
-                      conversationLoading ||
-                      Boolean(activeId && !active) ||
-                      Boolean(targetProjectId && !targetProject) ||
-                      !content.trim() ||
-                      Boolean(active?.archivedAt) ||
-                      Boolean(uncertain) ||
-                      Boolean(
-                        !activeId &&
-                        (unresolvedCreates.length || createRecoveryError),
-                      ) ||
-                      uploading.some((entry) => !entry.error) ||
-                      !model ||
-                      !selectionCurrent ||
-                      Boolean(
-                        model && effort && !model.effortValues.includes(effort),
-                      )
-                    }
-                    onClick={() => void submitMessage()}
-                  />
-                )}
+                <WorkspaceSendButton
+                  generating={inFlight}
+                  hasContent={Boolean(content.trim() || composerSkills.length)}
+                  stopping={taskMatches && stream.task?.status === 'cancelling'}
+                  mode={sendMode}
+                  loading={creating || sending}
+                  stopDisabled={
+                    sending ||
+                    (taskMatches && stream.task?.status === 'cancelling')
+                  }
+                  sendDisabled={
+                    pending ||
+                    creating ||
+                    sending ||
+                    conversationLoading ||
+                    Boolean(activeId && !active) ||
+                    Boolean(targetProjectId && !targetProject) ||
+                    (!content.trim() && !composerSkills.length) ||
+                    Boolean(active?.archivedAt) ||
+                    Boolean(uncertain) ||
+                    Boolean(
+                      !activeId &&
+                      (unresolvedCreates.length || createRecoveryError),
+                    ) ||
+                    uploading.some((entry) => !entry.error) ||
+                    !model ||
+                    !selectionCurrent ||
+                    Boolean(
+                      (inFlight || pendingMessages.state?.items.length) &&
+                      pendingMessages.error,
+                    ) ||
+                    Boolean(
+                      model && effort && !model.effortValues.includes(effort),
+                    )
+                  }
+                  onSend={() => void submitMessage()}
+                  onStop={() => void stopReply()}
+                />
               </Space>
             </div>
           </div>

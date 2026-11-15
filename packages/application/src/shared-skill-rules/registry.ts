@@ -43,6 +43,10 @@ const section = z.enum([
   'content-and-sources',
   'platform-workflow',
   'runtime',
+  'generation',
+  'native-api',
+  'maintenance-and-recovery',
+  'platform-debug',
 ]);
 const archive = z.strictObject({
   kind: z.enum(['zip', 'tgz']),
@@ -100,10 +104,19 @@ const sections: Record<SharedSkillId, readonly RuleSection[]> = {
     'platform-workflow',
     'runtime',
   ],
+  'ath-api-regression': [
+    'entry',
+    'generation',
+    'native-api',
+    'maintenance-and-recovery',
+    'platform-debug',
+    'platform-adapter',
+  ],
 };
 const names: Record<SharedSkillId, string> = {
   'ath-case-design': '用例设计与优化',
   'ath-project-knowledge': '项目知识管理',
+  'ath-api-regression': '接口自动化测试',
 };
 type Slot = {
   configured: boolean;
@@ -296,7 +309,7 @@ export class SharedSkillRuleRegistry {
       };
     });
     const metadata = {
-      schemaVersion: 'ath.shared-skill-rule-snapshot.v1' as const,
+      schemaVersion: 'ath.shared-skill-rule-snapshot.v2' as const,
       releases,
     };
     return freeze({
@@ -325,14 +338,7 @@ export class SharedSkillRuleRegistry {
     });
     if (!parsed.success) return fail('RULE_SNAPSHOT_INVALID');
     const { releaseSetDigest, ...metadata } = parsed.data;
-    if (
-      ruleSha256(canonicalRuleJson(metadata)) !== releaseSetDigest ||
-      SHARED_SKILL_IDS.some(
-        (id) =>
-          parsed.data.releases.filter((item) => item.skillId === id).length !==
-          1,
-      )
-    )
+    if (ruleSha256(canonicalRuleJson(metadata)) !== releaseSetDigest)
       return fail('RULE_SNAPSHOT_INVALID');
     const pinned = parsed.data.releases.find(
       (item) => item.skillId === input.skillId,
@@ -374,7 +380,7 @@ export class SharedSkillRuleRegistry {
   }
   catalogText(snapshot: SharedSkillRuleSnapshot): string {
     if (!sharedSkillRuleSnapshotSchema.safeParse(snapshot).success) {
-      return '当前任务的 Skill 规则绑定元数据无效，S01/S02 指引不可用。不得猜测、换版或授予能力；其他获准平台业务可继续。ath-web-execute 仅本地执行。';
+      return '当前任务的 Skill 规则绑定元数据无效，平台 Skill 指引不可用。不得猜测、换版或授予能力；其他获准平台业务可继续。ath-web-execute 仅本地执行。';
     }
     const entries = this.catalog()
       .filter((entry) => entry.skillId !== 'ath-web-execute')

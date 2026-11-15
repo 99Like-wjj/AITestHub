@@ -1,0 +1,40 @@
+.workspace-process-reference.workspace-reference-chip {
+  min-height: 22px;
+  max-width: min(100%, 360px);
+  padding: 1px 7px;
+  gap: 5px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 20px;
+  vertical-align: middle;
+}
+.workspace-process-reference .workspace-reference-brand-icon {
+  width: 14px;
+  height: 14px;
+  font-size: 14px;
+}
+.workspace-process-trigger .workspace-process-reference {
+  max-width: min(340px, 55vw);
+}
+.workspace-guidance-record {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  margin-block: 3px;
+}
+.workspace-guidance-record-meta {
+  color: var(--muted);
+  line-height: 1.7;
+}
+.workspace-guidance-record[data-guidance-state='unavailable']
+  .workspace-guidance-record-meta {
+  color: var(--warning);
+}
+.workspace-guidance-detail ul {
+  padding-left: 18px;
+}
+.workspace-tool-sources {
+  display: inline-flex;
+  align-items: center;
+}

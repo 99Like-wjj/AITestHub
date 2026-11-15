@@ -1,6 +1,21 @@
 import { useEffect, useState } from 'react';
-import { Alert, Button } from 'antd';
+import { Alert, Button, Dropdown, Tooltip } from 'antd';
+import {
+  DeleteOutlined,
+  EditOutlined,
+  EllipsisOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
+  PaperClipOutlined,
+  RollbackOutlined,
+} from '@ant-design/icons';
 import { api, describeError, isUncertainMutationError } from './api';
+import { WorkspaceReferencePreview } from './workspace-reference-preview';
+import { WorkspaceReferenceChip } from './workspace-composer-references';
+import {
+  splitComposerSkills,
+  workspaceSkillLabel,
+} from './workspace-composer-skills';
 import {
   currentIdentityOwner,
   identityContextEpoch,
@@ -18,7 +33,9 @@ import {
   WorkspaceSendQueue,
   savedWorkspaceQueueSchema,
   type WorkspaceConversationQueue,
+  type WorkspaceQueuedMessage,
 } from './workspace-send-queue';
+import './workspace-queue.css';
 
 const controllers = new Map<
   string,
@@ -152,33 +169,53 @@ export function useWorkspaceSendQueue(
   };
 }
 
+function QueueAttachment({ item }: { item: WorkspaceQueuedMessage }) {
+  const reference = item.display?.references[0];
+  if (!item.input.references.length) return null;
+  const label = reference?.label ?? `${item.input.references.length} 个引用`;
+  return (
+    <WorkspaceReferencePreview
+      fileId={
+        reference?.reference.kind === 'resource'
+          ? reference.reference.resourceId
+          : null
+      }
+      label={label}
+      className="workspace-queue-attachment"
+      fallback={<PaperClipOutlined aria-label={label} />}
+    />
+  );
+}
+
 export function WorkspacePendingMessages({
   state,
   queue,
   taskId,
+  mode,
+  onModeChange,
+  onEdit,
 }: {
   state: WorkspaceConversationQueue | undefined;
   queue: WorkspaceSendQueue | null;
   taskId: string | null;
+  mode: 'queue' | 'steer';
+  onModeChange: (mode: 'queue' | 'steer') => void | Promise<void>;
+  onEdit: (item: WorkspaceQueuedMessage) => void | Promise<void>;
 }) {
   const [actionError, setActionError] = useState<string>();
+  useEffect(() => setActionError(undefined), [state?.conversationId]);
   const act = (work: () => void | Promise<void>) => {
     setActionError(undefined);
     void Promise.resolve()
       .then(work)
-      .catch(() => {
-        setActionError(
-          '队列状态未能保存，请保留原消息并核对浏览器存储后再操作。',
-        );
-      });
+      .catch((failure: unknown) => setActionError(describeError(failure)));
   };
   if (!queue || !state?.items.length) return null;
   return (
-    <section className="workspace-pending-messages" aria-label="待发送消息队列">
-      <div className="workspace-queue-heading">
-        待发送 · {state.items.length}/10{' '}
-        <small>按入队时的模型、访问模式和项目发送</small>
-      </div>
+    <section
+      className="workspace-pending-messages workspace-queue-drawer"
+      aria-label={`待发送消息队列，共 ${state.items.length} 条`}
+    >
       {actionError && <Alert type="warning" showIcon title={actionError} />}
       {state.paused && (
         <Alert
@@ -195,56 +232,122 @@ export function WorkspacePendingMessages({
           }
         />
       )}
-      <ol>
-        {state.items.map((item, index) => (
-          <li key={item.input.commandId}>
-            <span className="workspace-queue-number">{index + 1}</span>
-            <div className="workspace-queue-text">
-              <span>{item.input.content}</span>
-              <small>
-                {item.label} ·{' '}
-                {item.state === 'queued'
-                  ? '等待发送'
-                  : item.state === 'dispatching'
-                    ? '正在受理'
-                    : item.state === 'unknown'
-                      ? '受理待核对'
-                      : '未受理'}
-              </small>
-            </div>
-            {item.state === 'queued' && (
-              <Button
-                size="small"
-                type="text"
-                onClick={() =>
-                  act(() =>
-                    queue.prioritize(
-                      state.conversationId,
-                      item.input.commandId,
-                      taskId,
-                    ),
-                  )
-                }
+      <ol className="workspace-queue-list">
+        {state.items.map((item, index) => {
+          const prepared = splitComposerSkills(item.input.content);
+          const firstSkill = prepared.skillIds[0];
+          const editable = item.state === 'queued' || item.state === 'failed';
+          const canSteer =
+            !state.paused &&
+            state.items.every((entry) => entry.state === 'queued');
+          const summary = prepared.text
+            .trim()
+            .replace(/\s+/g, ' ')
+            .slice(0, 500);
+          const status =
+            item.state === 'queued'
+              ? '等待发送'
+              : item.state === 'dispatching'
+                ? '正在受理'
+                : item.state === 'unknown'
+                  ? '受理待核对'
+                  : '未受理';
+          return (
+            <li className="workspace-queue-row" key={item.input.commandId}>
+              <MenuUnfoldOutlined
+                className="workspace-queue-symbol"
+                aria-label={`待发消息 ${index + 1}，${status}`}
+              />
+              <QueueAttachment item={item} />
+              {firstSkill && (
+                <WorkspaceReferenceChip
+                  kind="skill"
+                  className="workspace-queue-skill-chip"
+                  label={`${workspaceSkillLabel(firstSkill)}${prepared.skillIds.length > 1 ? ` +${prepared.skillIds.length - 1}` : ''}`}
+                  title={prepared.skillIds.map(workspaceSkillLabel).join('、')}
+                />
+              )}
+              <span
+                className="workspace-queue-summary"
+                title={`${summary}\n${item.label}；${status}`}
               >
-                插队
-              </Button>
-            )}
-            {(item.state === 'queued' || item.state === 'failed') && (
-              <Button
-                size="small"
-                type="text"
-                aria-label={`移除待发消息 ${index + 1}`}
-                onClick={() =>
-                  act(() =>
-                    queue.remove(state.conversationId, item.input.commandId),
-                  )
-                }
+                {summary}
+              </span>
+              {item.state !== 'queued' && (
+                <small className="workspace-queue-status">{status}</small>
+              )}
+              <Tooltip title="停止当前回复，优先发送此消息；已发生的操作与回执保留">
+                <Button
+                  className="workspace-queue-steer"
+                  size="small"
+                  type="text"
+                  icon={<RollbackOutlined rotate={180} />}
+                  disabled={!canSteer}
+                  onClick={() =>
+                    act(() =>
+                      queue.prioritize(
+                        state.conversationId,
+                        item.input.commandId,
+                        taskId,
+                      ),
+                    )
+                  }
+                >
+                  引导
+                </Button>
+              </Tooltip>
+              <Tooltip title="删除待发消息">
+                <Button
+                  className="workspace-queue-icon-button"
+                  size="small"
+                  type="text"
+                  icon={<DeleteOutlined />}
+                  disabled={!editable}
+                  aria-label={`删除待发消息 ${index + 1}`}
+                  onClick={() =>
+                    act(() =>
+                      queue.remove(state.conversationId, item.input.commandId),
+                    )
+                  }
+                />
+              </Tooltip>
+              <Dropdown
+                trigger={['click']}
+                classNames={{ root: 'workspace-queue-more-menu' }}
+                menu={{
+                  items: [
+                    {
+                      key: 'edit',
+                      label: '编辑消息',
+                      icon: <EditOutlined />,
+                      disabled: !editable,
+                    },
+                    {
+                      key: 'mode',
+                      label: mode === 'queue' ? '关闭排队' : '关闭引导',
+                      icon: <MenuFoldOutlined />,
+                    },
+                  ],
+                  onClick: ({ key }) => {
+                    if (key === 'edit' && editable) act(() => onEdit(item));
+                    if (key === 'mode')
+                      act(() =>
+                        onModeChange(mode === 'queue' ? 'steer' : 'queue'),
+                      );
+                  },
+                }}
               >
-                ×
-              </Button>
-            )}
-          </li>
-        ))}
+                <Button
+                  className="workspace-queue-icon-button"
+                  size="small"
+                  type="text"
+                  icon={<EllipsisOutlined />}
+                  aria-label={`待发消息 ${index + 1} 更多操作`}
+                />
+              </Dropdown>
+            </li>
+          );
+        })}
       </ol>
     </section>
   );

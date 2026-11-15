@@ -11,13 +11,17 @@ export function validateSkillRuleSources(value) {
   };
   if (
     !value ||
-    value.schemaVersion !== 'aitesthub.skill-rule-sources.v1' ||
+    value.schemaVersion !== 'aitesthub.skill-rule-sources.v2' ||
     Object.keys(value).sort().join('|') !== 'schemaVersion|sources' ||
     !Array.isArray(value.sources) ||
-    value.sources.length !== 2
+    value.sources.length !== 3
   )
     reject();
-  const expected = new Set(['ath-case-design', 'ath-project-knowledge']);
+  const expected = new Set([
+    'ath-case-design',
+    'ath-project-knowledge',
+    'ath-api-regression',
+  ]);
   for (const source of value.sources) {
     if (
       !source ||

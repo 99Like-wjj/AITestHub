@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "aitesthub.skill-rule-sources.v1",
+  "schemaVersion": "aitesthub.skill-rule-sources.v2",
   "sources": [
     {
       "skillId": "ath-case-design",
@@ -44,6 +44,27 @@
         "content-and-sources": "references/content-and-sources.md",
         "platform-workflow": "references/platform-workflow.md",
         "runtime": "references/runtime.md"
+      }
+    },
+    {
+      "skillId": "ath-api-regression",
+      "version": "0.1.1",
+      "ruleVersion": "0.1.1",
+      "name": "接口自动化测试",
+      "archives": [
+        {
+          "kind": "zip",
+          "path": "/absolute/path/ath-api-regression-0.1.1.zip",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "sections": {
+        "entry": "SKILL.md",
+        "generation": "references/generation.md",
+        "native-api": "references/native-api.md",
+        "maintenance-and-recovery": "references/maintenance-and-recovery.md",
+        "platform-debug": "references/platform-debug.md",
+        "platform-adapter": "host-adapters/platform.md"
       }
     }
   ]

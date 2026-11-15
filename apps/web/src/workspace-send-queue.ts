@@ -1,17 +1,64 @@
 import { z } from 'zod';
 import {
+  conversationReferenceInputSchema,
   sendMessageInputSchema,
   taskAcceptedSchema,
   type SendMessageInput,
 } from '../../../packages/contracts/src/conversations';
 
-const itemSchema = z.strictObject({
-  input: sendMessageInputSchema,
+const preparedReferenceSchema = z.strictObject({
+  id: z.string().min(1).max(2000),
   label: z.string().max(1000),
-  createdAt: z.string(),
-  state: z.enum(['queued', 'dispatching', 'unknown', 'failed']),
-  error: z.string().nullable(),
+  reference: conversationReferenceInputSchema,
+  note: z.string().max(10_000),
+  insertions: z
+    .array(
+      z
+        .strictObject({
+          start: z.number().int().min(0).max(100_000),
+          end: z.number().int().min(0).max(100_000),
+          text: z.string().max(100_000),
+          restoreText: z.string().max(100_000).optional(),
+        })
+        .refine((insertion) => insertion.end >= insertion.start),
+    )
+    .max(1000)
+    .optional(),
 });
+export const workspaceQueueDisplaySchema = z.strictObject({
+  references: z.array(preparedReferenceSchema).max(30),
+});
+const itemSchema = z
+  .strictObject({
+    input: sendMessageInputSchema,
+    label: z.string().max(1000),
+    createdAt: z.string(),
+    state: z.enum(['queued', 'dispatching', 'unknown', 'failed']),
+    error: z.string().nullable(),
+    display: workspaceQueueDisplaySchema.optional(),
+  })
+  .superRefine((item, context) => {
+    for (const [index, prepared] of (
+      item.display?.references ?? []
+    ).entries()) {
+      if (
+        item.input.accessMode === 'restricted' ||
+        !item.input.references.some(
+          (reference) =>
+            JSON.stringify(reference) ===
+            JSON.stringify({
+              ...prepared.reference,
+              dataScope: reference.dataScope,
+            }),
+        )
+      )
+        context.addIssue({
+          code: 'custom',
+          path: ['display', 'references', index],
+          message: '待发消息展示引用必须属于原发送快照。',
+        });
+    }
+  });
 const queueSchema = z.strictObject({
   conversationId: z.uuid(),
   items: z.array(itemSchema).max(10),
@@ -27,6 +74,7 @@ const queueSchema = z.strictObject({
 });
 export const savedWorkspaceQueueSchema = z.array(queueSchema).max(100);
 export type WorkspaceQueuedMessage = z.infer<typeof itemSchema>;
+export type WorkspaceQueueDisplay = z.infer<typeof workspaceQueueDisplaySchema>;
 export type WorkspaceConversationQueue = z.infer<typeof queueSchema>;
 type Accepted = Pick<
   z.infer<typeof taskAcceptedSchema>,
@@ -86,6 +134,7 @@ export class WorkspaceSendQueue {
     label: string,
     blockingTaskId: string | null,
     interrupt = false,
+    display?: WorkspaceQueueDisplay,
   ) {
     z.uuid().parse(conversationId);
     const queue = this.queues.get(conversationId) ?? {
@@ -109,6 +158,7 @@ export class WorkspaceSendQueue {
       createdAt: new Date().toISOString(),
       state: 'queued',
       error: null,
+      ...(display ? { display } : {}),
     });
     if (!queue.items.length) {
       queue.blockingTaskId = blockingTaskId;
@@ -118,7 +168,11 @@ export class WorkspaceSendQueue {
     if (interrupt) queue.items.unshift(item);
     else queue.items.push(item);
     queue.blockingTaskId ??= blockingTaskId;
-    if (interrupt && queue.blockingTaskId)
+    if (
+      interrupt &&
+      queue.blockingTaskId &&
+      queue.cancel?.taskId !== queue.blockingTaskId
+    )
       queue.cancel = {
         taskId: queue.blockingTaskId,
         commandId: crypto.randomUUID(),
@@ -155,6 +209,19 @@ export class WorkspaceSendQueue {
       throw error;
     }
   }
+  takeForEditing(conversationId: string, commandId: string) {
+    if (!this.ports.active())
+      throw new Error('当前身份已变化，旧待发消息未移出。');
+    const item = this.queues
+      .get(conversationId)
+      ?.items.find((entry) => entry.input.commandId === commandId);
+    if (!item) return undefined;
+    if (item.state !== 'queued' && item.state !== 'failed')
+      throw new Error('原提交受理情况尚未确认，请先查回执。');
+    const snapshot = itemSchema.parse(item);
+    this.remove(conversationId, commandId);
+    return snapshot;
+  }
   prioritize(conversationId: string, commandId: string, taskId: string | null) {
     const queue = this.queues.get(conversationId);
     if (!queue || queue.items.some((item) => item.state !== 'queued')) return;
@@ -165,7 +232,7 @@ export class WorkspaceSendQueue {
     const previous = { ...queue, items: [...queue.items] };
     queue.items = [item, ...queue.items.filter((entry) => entry !== item)];
     queue.blockingTaskId ??= taskId;
-    if (queue.blockingTaskId)
+    if (queue.blockingTaskId && queue.cancel?.taskId !== queue.blockingTaskId)
       queue.cancel = {
         taskId: queue.blockingTaskId,
         commandId: crypto.randomUUID(),

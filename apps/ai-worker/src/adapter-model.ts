@@ -34,6 +34,7 @@ import {
   type ModelToolResult,
 } from '../../../packages/model-adapters/src/index.js';
 import { assertSafeModelInput } from '../../../packages/application/src/security/model-input.js';
+import { normalizeFunctionParameters } from './tool-parameters.js';
 
 interface AdapterCallOptions extends BaseChatModelCallOptions {
   tools?: ModelTool[];
@@ -109,11 +110,14 @@ export class NativeAdapterChatModel extends BaseChatModel<AdapterCallOptions> {
       return {
         name: converted.function.name,
         description: converted.function.description ?? '',
-        parameters: z
-          .record(z.string(), z.json())
-          .parse(
-            converted.function.parameters ?? { type: 'object', properties: {} },
+        parameters: normalizeFunctionParameters(
+          z.record(z.string(), z.json()).parse(
+            converted.function.parameters ?? {
+              type: 'object',
+              properties: {},
+            },
           ),
+        ),
       };
     });
     return this.withConfig({ ...kwargs, tools: mapped });
@@ -165,11 +169,27 @@ export class NativeAdapterChatModel extends BaseChatModel<AdapterCallOptions> {
         randomUUID(),
       );
     }
+    const recordedToolIds = new Set(
+      messages.filter(isToolMessage).map((message) => message.tool_call_id),
+    );
+    const canonicalHistory = messages.filter(
+      (message, index) =>
+        !(
+          index < lastAssistant &&
+          isAIMessage(message) &&
+          message.tool_calls?.length &&
+          text(message).trim().length === 0 &&
+          message.tool_calls.every(
+            (call) =>
+              typeof call.id === 'string' && recordedToolIds.has(call.id),
+          )
+        ),
+    );
     const prepared: ModelRequest = {
       ...this.#defaults,
       messages: continuation
         ? after.filter((message) => !isToolMessage(message)).map(convert)
-        : messages.map(convert),
+        : canonicalHistory.map(convert),
       ...(continuation ? { continuation, toolResults } : {}),
       ...(options.tools ? { tools: options.tools } : {}),
       ...(options.signal ? { signal: options.signal } : {}),

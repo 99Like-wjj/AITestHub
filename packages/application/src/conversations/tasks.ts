@@ -19,6 +19,11 @@ import {
   type PersonalFileReader,
 } from './references.js';
 import { OperationService, canonicalJson } from '../operations/service.js';
+import type { AiContextResetReason } from '../../../contracts/src/ai-context.js';
+import {
+  readRetainedConversationHistory,
+  type RetainedConversationHistory,
+} from './retained-history.js';
 import { DomainError } from '../errors.js';
 import { assertNewWorkAllowed } from '../recovery/maintenance.js';
 import { hasDispatchFence, recordDispatchFence } from '../recovery/fences.js';
@@ -99,7 +104,7 @@ export type RunnerEvent =
       sourceRefs?: AiToolSourceReference[];
       unknownEffect?: boolean;
     }
-  | { type: 'contextReset'; reason: 'authorization-changed' };
+  | { type: 'contextReset'; reason: AiContextResetReason };
 export interface ConversationRunner {
   readonly executionOrigin?: 'fixture' | 'liveProvider' | 'legacyUnknown';
   run(
@@ -112,6 +117,11 @@ export interface ConversationRunner {
       prompt: string;
       signal: AbortSignal;
       contextRevision: string;
+      contextSourcesChanged?: boolean;
+      readRetainedHistory?: () => Promise<RetainedConversationHistory>;
+      onRetainedSources?: (
+        sources: readonly z.infer<typeof frozenConversationReferenceSchema>[],
+      ) => Promise<void>;
       dataScope?: 'syntheticPublicOnly' | 'authorizedRelevantTestData';
       accessMode?: WorkspaceAccessMode;
       allowedSourceProjectIds?: readonly string[];
@@ -396,6 +406,11 @@ export class AiTaskWorker {
     readonly tasks: AiTasksService,
     readonly factory: ConversationRunnerFactory,
     readonly admission: AiTaskAdmissionPort = new AiTaskAdmission(),
+    private readonly onConversationCompleted?: (
+      transaction: SqlExecutor,
+      ownerId: string,
+      taskId: string,
+    ) => Promise<string | null>,
   ) {}
   async heartbeat(): Promise<void> {
     await this.tasks.db.query(
@@ -773,7 +788,7 @@ export class AiTaskWorker {
           reference.fingerprint,
         ]),
       );
-      const contextRevision = await this.tasks.db.transaction(async (tx) => {
+      const resolvedContext = await this.tasks.db.transaction(async (tx) => {
         await conversationRow(tx, actor, task.conversation_id, true, true);
         const row = (
           await tx.query<{
@@ -796,7 +811,10 @@ export class AiTaskWorker {
           'UPDATE app.ai_conversations SET context_revision=$2,source_fingerprints=$3 WHERE id=$1',
           [task.conversation_id, revision, fingerprints],
         );
-        return `explicit-ref-context-${revision}${accessMode ? ':' + accessMode : ''}`;
+        return {
+          revision: `explicit-ref-context-${revision}${accessMode ? ':' + accessMode : ''}`,
+          sourcesChanged: changed,
+        };
       });
       const sourceDigest = createHash('sha256')
         .update(
@@ -849,6 +867,20 @@ export class AiTaskWorker {
             422,
           );
       };
+      const registerRetainedSources = async (
+        restored: readonly z.infer<typeof frozenConversationReferenceSchema>[],
+      ) => {
+        for (const raw of restored) {
+          const source = frozenConversationReferenceSchema.parse(raw);
+          if (!(await this.tasks.references.readable(actor, source)))
+            throw new DomainError(
+              'PRECONDITIONS_MISSING',
+              '恢复历史的来源当前不可读，未继续发送旧资料。',
+              422,
+            );
+          usedProvenance.set(canonicalJson(source), source);
+        }
+      };
       const referenceText = resolved
         .filter((reference) => !reference.identity.startsWith('projectAccess:'))
         .map(
@@ -893,7 +925,24 @@ export class AiTaskWorker {
           : {}),
         prompt,
         signal: controller.signal,
-        contextRevision,
+        contextRevision: resolvedContext.revision,
+        contextSourcesChanged: resolvedContext.sourcesChanged,
+        readRetainedHistory: async () => {
+          const history = await readRetainedConversationHistory(
+            this.tasks.db,
+            this.tasks.references,
+            actor,
+            {
+              conversationId: task.conversation_id,
+              taskId: task.id,
+              dataScope,
+              ...(accessMode ? { accessMode } : {}),
+            },
+          );
+          await registerRetainedSources(history.sources);
+          return history;
+        },
+        onRetainedSources: registerRetainedSources,
         dataScope,
         ...(accessMode ? { accessMode } : {}),
         ...(!accessMode && dataScope === 'syntheticPublicOnly'
@@ -1216,9 +1265,21 @@ export class AiTaskWorker {
         "UPDATE app.ai_messages SET content=CASE WHEN $2='' AND $4<>'completed' THEN content ELSE $2 END,status=$3 WHERE id=$1 AND deleted_at IS NULL",
         [task.assistant_message_id, text, messageStatus, state],
       );
+      const automaticTitleTaskId =
+        state === 'completed'
+          ? await this.onConversationCompleted?.(tx, task.owner_id, task.id)
+          : null;
       await tx.query(
         "INSERT INTO app.ai_task_events(task_id,event_type,payload,created_at) SELECT t.id,'task.finished',$2,t.finished_at FROM app.ai_tasks t JOIN app.ai_conversations c ON c.id=t.conversation_id WHERE t.id=$1 AND c.deleted_at IS NULL",
-        [task.id, { status: state, errorCode, errorDetails }],
+        [
+          task.id,
+          {
+            status: state,
+            errorCode,
+            errorDetails,
+            ...(automaticTitleTaskId ? { automaticTitleTaskId } : {}),
+          },
+        ],
       );
       await tx.query(
         "UPDATE app.model_call_ledger SET status='unknown',finished_at=COALESCE(finished_at,clock_timestamp()) WHERE task_id=$1 AND status='dispatchIntent'",

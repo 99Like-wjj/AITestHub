@@ -1,6 +1,7 @@
 export const SHARED_SKILL_IDS = [
   'ath-case-design',
   'ath-project-knowledge',
+  'ath-api-regression',
 ] as const;
 export type SharedSkillId = (typeof SHARED_SKILL_IDS)[number];
 export const SHARED_SKILL_RULE_TOOL_NAME = 'ath_skill_rules_read' as const;
@@ -13,7 +14,11 @@ export type RuleSection =
   | 'platform-adapter'
   | 'content-and-sources'
   | 'platform-workflow'
-  | 'runtime';
+  | 'runtime'
+  | 'generation'
+  | 'native-api'
+  | 'maintenance-and-recovery'
+  | 'platform-debug';
 export interface RuleDocument {
   section: RuleSection;
   path: string;
@@ -68,11 +73,7 @@ export interface RuleTaskRelease {
   sourceArchiveHashes: string[];
   available: boolean;
 }
-export interface SharedSkillRuleSnapshot {
-  schemaVersion: 'ath.shared-skill-rule-snapshot.v1';
-  releaseSetDigest: string;
-  releases: RuleTaskRelease[];
-}
+export type { SharedSkillRuleSnapshot } from '../../../contracts/src/skill-guidance.js';
 export interface RuleCatalogEntry {
   skillId: SharedSkillId | 'ath-web-execute';
   version: string | null;
