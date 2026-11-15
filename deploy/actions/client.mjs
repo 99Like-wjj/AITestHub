@@ -108,8 +108,14 @@ export async function sendRequest(
 ) {
   const key = join(workDirectory, 'identity');
   const hosts = join(workDirectory, 'known_hosts');
-  await writeFile(key, config.privateKey, { mode: 0o600, flag: 'wx' });
-  await writeFile(hosts, config.knownHosts, { mode: 0o600, flag: 'wx' });
+  await writeFile(key, normalizeSshText(config.privateKey), {
+    mode: 0o600,
+    flag: 'wx',
+  });
+  await writeFile(hosts, normalizeSshText(config.knownHosts), {
+    mode: 0o600,
+    flag: 'wx',
+  });
   const options = [
     '-T',
     '-o',
@@ -245,13 +251,15 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     phase = 'request-send';
     result = await sendRequest(config, request, scratch.path, env);
     if (!result.ok) process.exitCode = 1;
-  } catch {
+  } catch (error) {
     result = {
       ok: false,
       operationId,
       action: options.action,
       phase,
-      error: 'ACTIONS_REQUEST_FAILED',
+      error: /^ACTIONS_[A-Z_]+$/.test(error.code ?? '')
+        ? error.code
+        : 'ACTIONS_REQUEST_FAILED',
       recovery:
         'Inspect this operationId using status. Do not automatically repeat a deploy request.',
     };
@@ -271,6 +279,10 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       );
     process.stdout.write(JSON.stringify(result) + '\n');
   }
+}
+
+export function normalizeSshText(value) {
+  return value.replaceAll('\r\n', '\n').trimEnd() + '\n';
 }
 
 if (

@@ -29,7 +29,7 @@ export function command(
         windowsHide: true,
         ...(env ? { env } : {}),
       },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
         if (!error) return done(stdout);
         if (allowFailureJson && error.code === 1) {
           try {
@@ -37,7 +37,26 @@ export function command(
             if (result?.ok === false) return done(stdout);
           } catch {}
         }
-        reject(new Error('ACTIONS_FIXED_COMMAND_FAILED'));
+        let code = 'ACTIONS_FIXED_COMMAND_FAILED';
+        if (allowFailureJson) {
+          if (/error in libcrypto|invalid format/i.test(stderr))
+            code = 'ACTIONS_SSH_IDENTITY_FORMAT';
+          else if (
+            /host key verification failed|remote host identification has changed/i.test(
+              stderr,
+            )
+          )
+            code = 'ACTIONS_SSH_HOST_KEY_REJECTED';
+          else if (/permission denied/i.test(stderr))
+            code = 'ACTIONS_SSH_AUTHENTICATION_FAILED';
+          else if (
+            /connection timed out|connection refused|network is unreachable|could not resolve hostname/i.test(
+              stderr,
+            )
+          )
+            code = 'ACTIONS_SSH_CONNECTION_FAILED';
+        }
+        reject(Object.assign(new Error(code), { code }));
       },
     );
     child.stdin.on('error', () => {});
