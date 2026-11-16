@@ -17,7 +17,6 @@ import {
 import {
   PaperClipOutlined,
   PlusOutlined,
-  ReloadOutlined,
   CommentOutlined,
   ProjectOutlined,
   ApiOutlined,
@@ -59,6 +58,7 @@ import {
 import type { ConversationCreateAttempt } from './workspace-create';
 import { uiLayers } from './ui-layers';
 import { AppIcon } from './app-icon';
+import { AppearanceToggle } from './appearance-toggle';
 import { BusinessConfirmationsPanel } from './business-confirmations';
 import { ExternalMcpInvocationsPanel } from './external-mcp-settings';
 import { AiRetryStatus } from './ai-retry-status';
@@ -232,6 +232,7 @@ function ModelCaption({ message }: { message: ConversationMessage }) {
 export function Workspace({
   dark,
   onAppearance,
+  appearancePending,
   notificationBell,
   me,
   project,
@@ -240,6 +241,7 @@ export function Workspace({
 }: {
   dark: boolean;
   onAppearance: () => void;
+  appearancePending: boolean;
   notificationBell: ReactNode;
   me: Me;
   project: Project | null;
@@ -2255,35 +2257,20 @@ export function Workspace({
             </div>
           </div>
           <Space className="chat-head-actions">
-            <Button
-              type="text"
-              className="iconbtn"
-              aria-label="全平台外观"
-              icon={<AppIcon name={dark ? 'moon' : 'sun'} />}
-              onClick={onAppearance}
+            <AppearanceToggle
+              dark={dark}
+              pending={appearancePending}
+              onToggle={onAppearance}
             />
             {active ? (
-              <>
-                <Button
-                  type="text"
-                  className="iconbtn"
-                  icon={<ReloadOutlined />}
-                  aria-label="刷新当前对话"
-                  onClick={() => {
-                    saveDraft();
-                    void loadConversation(active.id);
-                    stream.reconnect();
-                  }}
-                />
-                <ConversationMenu
-                  conversation={active}
-                  onAction={(conversation, action, trigger) =>
-                    void conversationAction(conversation, action, trigger)
-                  }
-                  disabled={pending}
-                  label="当前对话更多"
-                />
-              </>
+              <ConversationMenu
+                conversation={active}
+                onAction={(conversation, action, trigger) =>
+                  void conversationAction(conversation, action, trigger)
+                }
+                disabled={pending}
+                label="当前对话更多"
+              />
             ) : (
               <Dropdown
                 trigger={['click']}

@@ -59,6 +59,7 @@ import type { Me, Project } from './types';
 import type { CaseScope } from './requirements';
 import { NotificationBell, NotificationPanel } from './notifications';
 import { AppIcon } from './app-icon';
+import { AppearanceToggle } from './appearance-toggle';
 import { v3Theme } from './v3-theme';
 import { hasNavigationBlocker, requestNavigation } from './navigation-guard';
 
@@ -302,6 +303,8 @@ function SignedIn({
     null,
   );
   const [loggingOut, setLoggingOut] = useState(false);
+  const [appearancePending, setAppearancePending] = useState(false);
+  const appearanceSaving = useRef(false);
   const [caseScope, setCaseScope] = useState<CaseScope | null>(readCaseScope);
   const { message } = AntApp.useApp();
   const isWorkspace = page === 'workspace';
@@ -434,6 +437,27 @@ function SignedIn({
       navigationGranted.current = true;
       window.location.hash = hash;
     });
+  }
+  async function toggleAppearance() {
+    if (appearanceSaving.current) return;
+    appearanceSaving.current = true;
+    setAppearancePending(true);
+    try {
+      await api('/me', {
+        method: 'PUT',
+        body: {
+          displayName: me.user.displayName,
+          theme: dark ? 'light' : 'dark',
+          rowVersion: me.user.rowVersion,
+        },
+      });
+      await onRefresh();
+    } catch (error) {
+      void message.error(describeError(error));
+    } finally {
+      appearanceSaving.current = false;
+      setAppearancePending(false);
+    }
   }
   function closeSettings() {
     requestNavigation(() => {
@@ -718,17 +742,11 @@ function SignedIn({
               )}
             </div>
             <Space>
-              <Tooltip
-                title={`外观：${me.user.theme === 'system' ? '跟随系统' : dark ? '深色' : '浅色'}`}
-              >
-                <Button
-                  type="text"
-                  className="iconbtn"
-                  aria-label="全平台外观"
-                  icon={<AppIcon name={dark ? 'moon' : 'sun'} />}
-                  onClick={() => openSettings('appearance')}
-                />
-              </Tooltip>
+              <AppearanceToggle
+                dark={dark}
+                pending={appearancePending}
+                onToggle={() => void toggleAppearance()}
+              />
               {notificationBell}
               <Dropdown
                 menu={{
@@ -791,7 +809,8 @@ function SignedIn({
               <Suspense fallback={<Skeleton active />}>
                 <Workspace
                   dark={dark}
-                  onAppearance={() => openSettings('appearance')}
+                  onAppearance={() => void toggleAppearance()}
+                  appearancePending={appearancePending}
                   notificationBell={notificationBell}
                   me={me}
                   project={selectedProject}
