@@ -1,0 +1,6 @@
+# Optional public RSS compatibility engine for the pinned SearXNG image.
+# Enable ath_bing_rss in the external SearXNG settings file.
+services:
+  agent-search:
+    volumes:
+      - ./searxng/ath_bing_rss.py:/usr/local/searxng/searx/engines/ath_bing_rss.py:ro
