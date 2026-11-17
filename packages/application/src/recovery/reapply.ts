@@ -1,5 +1,6 @@
 import { redactAutomaticAuxiliaryConversation } from '../auxiliary/automatic-common.js';
 import { invalidateRestoredAgentExecution } from '../agent-recovery/restore.js';
+import { detachRestoredActionIntents } from '../tool-registry/action-intent-data.js';
 import { z } from 'zod';
 import type { SqlExecutor } from '../../../persistence/src/database.js';
 import { DomainError } from '../errors.js';
@@ -518,9 +519,7 @@ export async function applyLatestSecurity(
     "UPDATE app.model_call_ledger SET status='unknown',finished_at=COALESCE(finished_at,clock_timestamp()) WHERE status='dispatchIntent'",
   );
   await recoverInterruptedModelAttemptsInTransaction(transaction);
-  await transaction.query(
-    "UPDATE app.business_confirmations SET state=CASE WHEN state='waitingConfirmation' THEN 'declined' ELSE 'unknown' END,resolved_at=COALESCE(resolved_at,clock_timestamp()) WHERE state IN ('waitingConfirmation','executing')",
-  );
+  await detachRestoredActionIntents(transaction);
   await transaction.query(
     "UPDATE app.commands SET status='unknown' WHERE status='pending'",
   );

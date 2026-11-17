@@ -685,6 +685,18 @@ export class AgentCalculationService {
             mediaType: output.mediaType,
           },
           bytes,
+          {
+            taskId: scope.taskId,
+            sources: z
+              .array(calculationSourceSnapshotSchema)
+              .parse(row.source_snapshot)
+              .map((source) => ({
+                entryId: source.entryId,
+                revision: source.revision,
+                resourceId: source.resourceId,
+                path: source.path,
+              })),
+          },
         );
         artifacts.push({
           sandboxPath: output.path,

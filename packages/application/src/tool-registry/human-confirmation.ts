@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { ActorContext } from '../../../contracts/src/identity.js';
-import { businessConfirmationProposalSchema } from '../../../contracts/src/business-tools.js';
+import { humanConfirmationProposalSchema } from '../../../contracts/src/human-confirmation.js';
 import type {
   Database,
   SqlExecutor,
@@ -116,7 +116,7 @@ async function verified(
         actor.keyId !== row.key_id))
   )
     throw invalid();
-  const proposal = businessConfirmationProposalSchema.safeParse(row.proposal);
+  const proposal = humanConfirmationProposalSchema.safeParse(row.proposal);
   if (!proposal.success) throw invalid();
   const { digest, ...scope } = proposal.data;
   if (
@@ -156,7 +156,7 @@ export async function humanConfirmationExecutionInTransaction(
   return binding.proof;
 }
 
-/** Only BusinessConfirmations.resolve calls this after a fresh authenticated
+/** Only ActionIntents calls this after a fresh authenticated
  * human accept and its unique successful dispatch claim. Always revoke locally. */
 export async function withHumanConfirmedExecution<T>(
   db: Pick<Database, 'transaction'>,

@@ -54,6 +54,7 @@ import type { Project } from './types';
 import { PageHeading } from './page-heading';
 import { AppIcon } from './app-icon';
 import { ArchivedRequirementsToggle } from './archived-requirements-toggle';
+import './assets-layout.css';
 
 type Navigation = z.infer<typeof assetNavigationSchema>;
 type Detail = z.infer<typeof assetDetailSchema>;
@@ -932,7 +933,7 @@ export function AssetsPage({
           </>
         }
       />
-      <div className="between mb wrap">
+      <div className="assets-unified-toolbar">
         <div className="segmented" aria-label="用例类型">
           {(['UI', 'API'] as const).map((value) => (
             <button
@@ -962,6 +963,7 @@ export function AssetsPage({
         </div>
         <div className="row wrap">
           <ArchivedRequirementsToggle
+            label="已归档需求"
             checked={includeArchivedRequirements}
             disabled={editor !== null || preview !== null || committing}
             onChange={(value) => {
@@ -973,9 +975,6 @@ export function AssetsPage({
               setIncludeArchivedRequirements(value);
             }}
           />
-          <span className="caption">
-            先评审，后执行 · AI 已优化仍需人工确认
-          </span>
         </div>
       </div>
       {reviewFilter === 'unapproved' && (
@@ -1011,7 +1010,7 @@ export function AssetsPage({
           type="info"
           showIcon
           title="当前需求版本不在本次浏览范围"
-          description="已归档需求默认隐藏。可开启“显示已归档需求”，或重新选择浏览范围；此开关不删除版本及历史资料。"
+          description="已归档需求默认隐藏。可开启“已归档需求”，或重新选择浏览范围；此开关不删除版本及历史资料。"
           className="section-alert"
         />
       )}
@@ -1232,7 +1231,7 @@ export function AssetsPage({
                     ? '资产尚未读取成功。'
                     : includeArchivedRequirements
                       ? '此需求版本不在当前项目目录，请重新选择范围。'
-                      : '此需求版本当前未展示，可开启“显示已归档需求”或另选范围。'
+                      : '此需求版本当前未展示，可开启“已归档需求”或另选范围。'
                 }
               />
             </div>

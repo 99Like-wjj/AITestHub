@@ -22,8 +22,11 @@ import { api, describeError } from './api';
 import {
   usageHeatmapLegend,
   usageHeatmapLevel,
+  usageHeatmapText,
+  groupModelRowSpan,
   type UsageHeatmapScope,
 } from './usage-heatmap';
+import './usage.css';
 
 type Origin = z.infer<typeof usageOriginScopeSchema>;
 const originLabels = {
@@ -42,7 +45,7 @@ const count = (value: string | null | undefined) =>
     ? '未记录'
     : BigInt(value).toLocaleString('zh-CN');
 
-function Heatmap({
+export function Heatmap({
   days,
   scope,
 }: {
@@ -108,14 +111,11 @@ function Heatmap({
                   />
                 );
               const level = usageHeatmapLevel(day.tokens, scope);
-              const unknown =
-                BigInt(day.unknown_calls) > 0n ||
-                BigInt(day.unknown_request_intents) > 0n;
-              const text = `${day.date}；${day.tokens === null ? (unknown ? 'Token未提供' : '无已记录模型Token') : `${count(day.tokens)} Token`}；确认请求 ${count(day.confirmed_requests)} 次；总用量未知记录 ${count(day.unknown_calls)}；发送结果未知意图 ${count(day.unknown_request_intents)}`;
+              const text = usageHeatmapText(day.date, day.tokens);
               return (
                 <Tooltip key={day.date} title={text}>
                   <span
-                    className={`usage-cell level-${level}${unknown ? ' unknown' : ''}`}
+                    className={`usage-cell level-${level}`}
                     tabIndex={
                       day.date ===
                       (focusedDate &&
@@ -180,7 +180,7 @@ function Heatmap({
           </Tooltip>
         ))}
         <Typography.Text type="secondary">
-          灰格为零/无已记录Token；描边表示总量或发送意图未知。范围外留白不计日期。
+          灰格为零或无已记录 Token，绿色深浅表示实际已记录数量。
         </Typography.Text>
       </Space>
       <p ref={afterCalendar} tabIndex={-1} className="caption">
@@ -232,6 +232,7 @@ export function PersonalUsagePanel() {
         total + (entry.tokens === null ? 0n : BigInt(entry.tokens)),
       0n,
     ) ?? 0n;
+  const modelRows = data?.models.filter((entry) => entry.tokens !== null) ?? [];
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Space wrap>
@@ -254,9 +255,7 @@ export function PersonalUsagePanel() {
         </Button>
       </Space>
       <Typography.Paragraph type="secondary">
-        最近 365 个自然日（含今天），北京时间。Token
-        默认仅真实供应商通道，隔离夹具与历史未知来源单列。活跃天按本人主动发起的AI、辅助、UI领取、手动接口/调试/复测任务日期去重，不含浏览、普通资料编辑或定时自动运行；与Token筛选分开。请求数是确认调用原生
-        HTTP 传输的次数，不代表供应商处理成功。
+        最近365天，北京时间。仅展示实际已记录的Token；确认请求次数不代表业务执行成功。
       </Typography.Paragraph>
       {error && <Alert type="error" showIcon title={error} />}
       {data && (
@@ -267,20 +266,12 @@ export function PersonalUsagePanel() {
               <Typography.Title level={3}>
                 {count(data.summary?.total_tokens)}
               </Typography.Title>
-              <Typography.Text type="secondary">
-                总用量未知 {count(data.summary?.unknown_calls)} 条；分项未知{' '}
-                {count(data.summary?.component_unknown_calls)} 条
-              </Typography.Text>
             </Card>
             <Card size="small">
               <Typography.Text type="secondary">确认请求次数</Typography.Text>
               <Typography.Title level={3}>
                 {count(data.summary?.confirmed_requests)}
               </Typography.Title>
-              <Typography.Text type="secondary">
-                发送意图未知 {count(data.summary?.unknown_request_intents)}
-                ；明确未发送 {count(data.summary?.not_dispatched_calls)}
-              </Typography.Text>
             </Card>
             <Card size="small">
               <Typography.Text type="secondary">
@@ -311,23 +302,32 @@ export function PersonalUsagePanel() {
           <Card title="年度 Token 热力图" size="small">
             <Heatmap days={data.heatmap} scope="personal" />
           </Card>
-          <Typography.Paragraph type="secondary">
-            优先采用供应商 reported
-            total；仅在缺总数且输入/输出均已知时回退相加。本范围回退{' '}
-            {count(data.summary?.total_fallback_calls)} 条。输入已记录{' '}
-            {count(data.summary?.input_tokens)}，输出已记录{' '}
-            {count(data.summary?.output_tokens)}；未知不补零，套餐积分不是
-            Token。
-          </Typography.Paragraph>
           <Table
             size="small"
-            rowKey={(entry) => `${entry.model_id}:${entry.source}`}
-            dataSource={data.models}
+            rowKey={(entry) => `${entry.model_key}:${entry.source}`}
+            dataSource={modelRows}
             pagination={false}
             scroll={{ x: 720 }}
             locale={{ emptyText: '当前范围尚无模型调用记录。' }}
             columns={[
-              { title: '模型', dataIndex: 'model_id' },
+              {
+                title: '模型',
+                render: (_, entry) => (
+                  <div>
+                    <Typography.Text strong>
+                      {entry.model_display_name}
+                    </Typography.Text>
+                    <div className="caption">{entry.model_service_name}</div>
+                  </div>
+                ),
+                onCell: (entry, index) => ({
+                  rowSpan: groupModelRowSpan(
+                    modelRows,
+                    index ?? 0,
+                    entry.model_key,
+                  ),
+                }),
+              },
               {
                 title: '来源',
                 render: (_, entry) => sourceLabels[entry.source],
@@ -349,22 +349,8 @@ export function PersonalUsagePanel() {
                 dataIndex: 'calls',
                 render: (value: string) => count(value),
               },
-              {
-                title: '总用量/分项未知',
-                render: (_, entry) =>
-                  `${count(entry.unknown_calls)} / ${count(entry.component_unknown_calls)}`,
-              },
-              {
-                title: '发送意图未知',
-                dataIndex: 'unknown_request_intents',
-                render: (value: string) => count(value),
-              },
             ]}
           />
-          <Typography.Text type="secondary">
-            模型与来源各行使用同一已记录总额作分母；未知 Token
-            不被当作零参与份额。
-          </Typography.Text>
           <Table
             size="small"
             rowKey="executionOrigin"
@@ -442,6 +428,8 @@ export function PlatformUsagePanel() {
         total + (entry.tokens === null ? 0n : BigInt(entry.tokens)),
       0n,
     ) ?? 0n;
+  const modelRows =
+    data?.byModel.filter((entry) => entry.tokens !== null) ?? [];
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Card
@@ -467,8 +455,7 @@ export function PlatformUsagePanel() {
           style={{ minWidth: 240 }}
         />
         <Typography.Paragraph type="secondary" className="section-alert">
-          最近 365
-          天，北京时间，按调用开始日期计量。管理员读取计量汇总，不读取用户私聊正文。默认不把隔离夹具/历史未知混为真实供应商调用。
+          最近365天，北京时间。按实际记录的Token展示模型、来源和用户用量。
         </Typography.Paragraph>
         {error && <Alert type="error" showIcon title={error} />}
         {data && (
@@ -476,11 +463,6 @@ export function PlatformUsagePanel() {
             <Space wrap>
               <Tag>已记录 Token：{count(data.totals?.tokens)}</Tag>
               <Tag>确认请求：{count(data.totals?.calls)}</Tag>
-              <Tag>总用量未知：{count(data.totals?.unknown_calls)}</Tag>
-              <Tag>
-                发送意图未知：{count(data.totals?.unknown_request_intents)}
-              </Tag>
-              <Tag>未发送：{count(data.totals?.not_dispatched_calls)}</Tag>
             </Space>
             <Card
               size="small"
@@ -491,11 +473,28 @@ export function PlatformUsagePanel() {
             </Card>
             <Table
               size="small"
-              rowKey={(entry) => `${entry.model_id}:${entry.source}`}
-              dataSource={data.byModel}
-              pagination={{ pageSize: 15 }}
+              rowKey={(entry) => `${entry.model_key}:${entry.source}`}
+              dataSource={modelRows}
+              pagination={false}
               columns={[
-                { title: '模型', dataIndex: 'model_id' },
+                {
+                  title: '模型',
+                  render: (_, entry) => (
+                    <div>
+                      <Typography.Text strong>
+                        {entry.model_display_name}
+                      </Typography.Text>
+                      <div className="caption">{entry.model_service_name}</div>
+                    </div>
+                  ),
+                  onCell: (entry, index) => ({
+                    rowSpan: groupModelRowSpan(
+                      modelRows,
+                      index ?? 0,
+                      entry.model_key,
+                    ),
+                  }),
+                },
                 {
                   title: '归属来源',
                   render: (_, entry) => sourceLabels[entry.source],
@@ -517,22 +516,16 @@ export function PlatformUsagePanel() {
                   dataIndex: 'calls',
                   render: (value: string) => count(value),
                 },
-                {
-                  title: '总量/分项未知',
-                  render: (_, entry) =>
-                    `${count(entry.unknown_calls)} / ${count(entry.component_unknown_calls)}`,
-                },
               ]}
             />
-            <Typography.Paragraph type="secondary">
-              各模型与来源行按当前范围已记录总Token使用同一分母。供应商total优先，缺total且输入/输出均已知才回退；未知总量与分项分别记录。
-            </Typography.Paragraph>
             <Table
               className="section-alert"
               rowKey="source"
               size="small"
               pagination={false}
-              dataSource={data.bySource}
+              dataSource={data.bySource.filter(
+                (entry) => entry.tokens !== null,
+              )}
               columns={[
                 {
                   title: '归属来源',
@@ -548,17 +541,12 @@ export function PlatformUsagePanel() {
                   dataIndex: 'calls',
                   render: (value: string) => count(value),
                 },
-                {
-                  title: '未知总用量',
-                  dataIndex: 'unknown_calls',
-                  render: (value: string) => count(value),
-                },
               ]}
             />
             <Table
               rowKey="user_id"
               size="small"
-              dataSource={data.byUser}
+              dataSource={data.byUser.filter((entry) => entry.tokens !== null)}
               pagination={{ pageSize: 20 }}
               columns={[
                 { title: '姓名', dataIndex: 'display_name' },
@@ -572,11 +560,6 @@ export function PlatformUsagePanel() {
                   title: '确认请求',
                   dataIndex: 'calls',
                   render: (value: string) => count(value),
-                },
-                {
-                  title: '未知总用量/发送意图',
-                  render: (_, entry) =>
-                    `${count(entry.unknown_calls)} / ${count(entry.unknown_request_intents)}`,
                 },
               ]}
             />

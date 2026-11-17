@@ -12,8 +12,6 @@ import { createSemanticEmbeddingFromEnvironment } from '../../../packages/agent-
 import { AgentRetrievalService } from '../../../packages/application/src/agent-retrieval/service.js';
 import { MaintenanceService } from '../../../packages/application/src/recovery/maintenance.js';
 import { runOfficeBackgroundWork } from './background-maintenance.js';
-import { createBrowserClientFromEnvironment } from '../../../packages/agent-browser/src/client.js';
-import { AgentBrowserService } from '../../../packages/application/src/agent-browser/service.js';
 import { createStorageFromEnvironment } from '../../../packages/storage/src/s3.js';
 import { FilesService } from '../../../packages/application/src/files/service.js';
 import { SecretBroker } from '../../../packages/application/src/configuration/secrets.js';
@@ -63,8 +61,6 @@ async function main() {
     : undefined;
   const tasks = new AiTasksService(database, configuration, fileReader);
   const embedding = await createSemanticEmbeddingFromEnvironment();
-  const browserRuntime = await createBrowserClientFromEnvironment();
-  const browser = new AgentBrowserService(database, browserRuntime);
   const retrieval = embedding
     ? new AgentRetrievalService(
         database,
@@ -101,7 +97,6 @@ async function main() {
     createConversationRunnerFactory(database, configuration, broker, {
       fileReader,
       officeSchedules,
-      ...(browserRuntime ? { browser } : {}),
       ...(retrieval ? { retrieval } : {}),
       ...(repository ? { repository } : {}),
       ...(documents ? { documents } : {}),
@@ -125,19 +120,7 @@ async function main() {
   );
   let auxiliaryNext = false;
   const backgroundMaintenance = new MaintenanceService(database);
-  let nextBrowserReconcile = 0;
   const tick = async () => {
-    if (browserRuntime && Date.now() >= nextBrowserReconcile) {
-      nextBrowserReconcile = Date.now() + 30_000;
-      await runOfficeBackgroundWork(
-        backgroundMaintenance,
-        async () => {
-          await browser.reconcile();
-          return false;
-        },
-        true,
-      );
-    }
     const scheduleWorked = await runOfficeBackgroundWork(
       backgroundMaintenance,
       async () => {

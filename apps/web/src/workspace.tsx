@@ -1,4 +1,16 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  InlineComposer,
+  InlineMessageContent,
+  type InlineComposerHandle,
+} from './inline-composer';
+import {
+  inlineReferenceKey,
+  inlineReferenceMarker,
+  inlineSkillMarker,
+  replaceConversationReferenceCode,
+  parseInlineComposerTokens,
+} from './workspace-inline-tokens';
 import type { ReactNode } from 'react';
 import {
   Alert,
@@ -60,8 +72,8 @@ import { uiLayers } from './ui-layers';
 import { AppIcon } from './app-icon';
 import { AppearanceToggle } from './appearance-toggle';
 import { AgentWorkspace } from './agent-workspace';
-import { AgentBrowserPanel } from './agent-browser';
-import { BusinessConfirmationsPanel } from './business-confirmations';
+import { FileCenter } from './file-center';
+import { ConversationActionCards } from './conversation-action-cards';
 import { ExternalMcpInvocationsPanel } from './external-mcp-settings';
 import { AiRetryStatus } from './ai-retry-status';
 import {
@@ -102,16 +114,9 @@ import { WorkspaceModelPicker } from './workspace-model-picker';
 import { WorkspaceContextDrawer } from './workspace-context-drawer';
 import { WorkspaceSendButton } from './workspace-send-button';
 import { WorkspaceJumpLatest } from './workspace-jump-latest';
-import {
-  WorkspaceComposerReferences,
-  WorkspaceReferenceChip,
-} from './workspace-composer-references';
+import { WorkspaceComposerReferences } from './workspace-composer-references';
 import { WorkspaceMessageReferences } from './workspace-message-references';
-import {
-  serializeComposerSkills,
-  splitComposerSkills,
-  workspaceSkillLabel,
-} from './workspace-composer-skills';
+import { serializeComposerSkills } from './workspace-composer-skills';
 import {
   readWorkspaceSendMode,
   saveWorkspaceSendMode,
@@ -190,23 +195,36 @@ function operationTargetFor(
       }
     : null;
 }
-function MessageText({ text }: { text: string }) {
-  const parsed = splitComposerSkills(text);
+function MessageText({
+  text,
+  references = [],
+}: {
+  text: string;
+  references?: ConversationMessage['references'];
+}) {
+  const allowed = new Set(
+    references.flatMap((item) =>
+      item.reference.kind === 'projectAccess'
+        ? []
+        : [inlineReferenceKey(item.reference)],
+    ),
+  );
   return (
-    <>
-      {parsed.skillIds.length > 0 && (
-        <div className="workspace-selected-skills">
-          {parsed.skillIds.map((id) => (
-            <WorkspaceReferenceChip
-              key={id}
-              kind="skill"
-              label={workspaceSkillLabel(id)}
-            />
-          ))}
-        </div>
-      )}
-      <WorkspaceMarkdown text={parsed.text} />
-    </>
+    <InlineMessageContent
+      text={text}
+      allowedReferences={allowed}
+      renderText={(value) => <WorkspaceMarkdown text={value} />}
+    />
+  );
+}
+function isInlineMessageReference(
+  text: string,
+  reference: ConversationMessage['references'][number]['reference'],
+) {
+  if (reference.kind === 'projectAccess') return false;
+  const key = inlineReferenceKey(reference);
+  return parseInlineComposerTokens(text).some(
+    (token) => token.referenceKey === key,
   );
 }
 function ModelCaption({ message }: { message: ConversationMessage }) {
@@ -376,6 +394,7 @@ export function Workspace({
     () => window.matchMedia('(max-width: 700px)').matches,
   );
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const [fileCenterOpen, setFileCenterOpen] = useState(false);
   useEffect(() => {
     const media = window.matchMedia('(max-width: 700px)');
     const changed = () => {
@@ -412,7 +431,58 @@ export function Workspace({
   const sidebarEpoch = useRef(0);
   const groupEpoch = useRef(0);
   const composition = useRef(false);
-  const input = useRef<HTMLTextAreaElement | null>(null);
+  const input = useRef<InlineComposerHandle | null>(null);
+  const composerContent = useRef(content);
+  composerContent.current = content;
+  const selectedReferenceHistory = useRef(
+    new Map<string, Map<string, PreparedReference>>(),
+  );
+  const inlineAllowedReferences = useMemo(
+    () => new Set(references.map((item) => inlineReferenceKey(item.reference))),
+    [references],
+  );
+  useEffect(() => {
+    if (composerSkills.length) {
+      setContent((value) => serializeComposerSkills(composerSkills, value));
+      setComposerSkills([]);
+    }
+  }, [composerSkills]);
+  useEffect(() => {
+    const existing = parseInlineComposerTokens(content);
+    const missing = references.filter(
+      (reference) =>
+        reference.reference.kind !== 'resource' &&
+        !reference.insertions?.length &&
+        !existing.some(
+          (token) =>
+            token.referenceKey === inlineReferenceKey(reference.reference),
+        ),
+    );
+    if (!missing.length) return;
+    let next = content;
+    const positions = new Map<
+      string,
+      { start: number; end: number; text: string }
+    >();
+    for (const reference of missing) {
+      const token = inlineReferenceMarker(reference.label, reference.reference);
+      if (next && !/\s$/.test(next)) next += ' ';
+      positions.set(reference.id, {
+        start: next.length,
+        end: next.length + token.length,
+        text: token,
+      });
+      next += token + ' ';
+    }
+    setContent(next);
+    setReferences((previous) =>
+      previous.map((reference) =>
+        positions.has(reference.id)
+          ? { ...reference, insertions: [positions.get(reference.id)!] }
+          : reference,
+      ),
+    );
+  }, [references, content]);
   const uploadInput = useRef<HTMLInputElement | null>(null);
   const candidatesControl = useRef<WorkspaceInlineCandidatesHandle | null>(
     null,
@@ -519,6 +589,25 @@ export function Workspace({
     (entry) => entry.id === targetProjectId,
   );
   const composerScope = activeId ?? newDraftKey(targetProjectId);
+  useEffect(() => {
+    if (
+      conversationLoading ||
+      (activeId && detail?.conversation.id !== activeId)
+    )
+      return;
+    const selected =
+      selectedReferenceHistory.current.get(composerScope) ??
+      new Map<string, PreparedReference>();
+    for (const reference of references)
+      selected.set(inlineReferenceKey(reference.reference), reference);
+    selectedReferenceHistory.current.set(composerScope, selected);
+  }, [
+    composerScope,
+    references,
+    conversationLoading,
+    activeId,
+    detail?.conversation.id,
+  ]);
   const restoredTarget =
     draftTarget?.ownerId === me.user.id && draftTarget.scope === composerScope
       ? draftTarget
@@ -882,6 +971,7 @@ export function Workspace({
     );
   }
   function replaceDraftGeneration(scope: string) {
+    selectedReferenceHistory.current.delete(scope);
     draftGenerations.current.set(
       scope,
       (draftGenerations.current.get(scope) ?? 0) + 1,
@@ -1015,15 +1105,34 @@ export function Workspace({
   }
   function selectReference(reference: PreparedReference) {
     if (references.length >= 30) return;
-    const prepared = reference;
+    const start =
+      mention?.start ?? input.current?.selectionStart ?? content.length;
+    const end = mention?.end ?? input.current?.selectionEnd ?? start;
+    const marker = inlineReferenceMarker(reference.label, reference.reference);
+    const prepared = {
+      ...reference,
+      insertions: [{ start, end: start + marker.length, text: marker }],
+    };
     if (mention) {
-      const text = content.slice(0, mention.start) + content.slice(mention.end);
-      const nextCaret = mention.start;
+      const text = content.slice(0, start) + marker + ' ' + content.slice(end);
+      const nextCaret = start + marker.length + 1;
       updateComposerContent(text);
       setCaret(nextCaret);
       window.requestAnimationFrame(() => {
         input.current?.focus();
         input.current?.setSelectionRange(nextCaret, nextCaret);
+      });
+    } else {
+      updateComposerContent(
+        content.slice(0, start) + marker + ' ' + content.slice(end),
+      );
+      setCaret(start + marker.length + 1);
+      window.requestAnimationFrame(() => {
+        input.current?.focus();
+        input.current?.setSelectionRange(
+          start + marker.length + 1,
+          start + marker.length + 1,
+        );
       });
     }
     setReferences((previous) => {
@@ -1049,12 +1158,11 @@ export function Workspace({
   }
   function selectSkill(skillId: PlatformGuidanceSkillId) {
     if (!mention || mention.symbol !== '/') return;
-    const text = content.slice(0, mention.start) + content.slice(mention.end);
-    const nextCaret = mention.start;
+    const marker = inlineSkillMarker(skillId) + ' ';
+    const text =
+      content.slice(0, mention.start) + marker + content.slice(mention.end);
+    const nextCaret = mention.start + marker.length;
     updateComposerContent(text);
-    setComposerSkills((previous) =>
-      previous.includes(skillId) ? previous : [...previous, skillId],
-    );
     setCaret(nextCaret);
     window.requestAnimationFrame(() => {
       input.current?.focus();
@@ -1063,18 +1171,52 @@ export function Workspace({
     closeCandidates(true);
   }
   function updateComposerContent(value: string) {
+    const before = composerContent.current;
+    composerContent.current = value;
     candidateInsertion.current = candidateInsertion.current
-      ? moveInsertion(content, value, candidateInsertion.current)
+      ? moveInsertion(before, value, candidateInsertion.current)
       : null;
-    setReferences((previous) =>
-      previous.map((reference) => ({
-        ...reference,
-        insertions: (reference.insertions ?? []).flatMap((insertion) => {
-          const updated = moveInsertion(content, value, insertion);
-          return updated ? [updated] : [];
-        }),
-      })),
-    );
+    setReferences((previous) => {
+      const tokens = parseInlineComposerTokens(value);
+      const nextReferences = previous.flatMap((reference) => {
+        const next = {
+          ...reference,
+          insertions: (reference.insertions ?? []).flatMap((insertion) => {
+            const updated = moveInsertion(before, value, insertion);
+            return updated ? [updated] : [];
+          }),
+        };
+        return reference.reference.kind !== 'resource' &&
+          reference.insertions?.length &&
+          !tokens.some(
+            (token) =>
+              token.referenceKey === inlineReferenceKey(reference.reference),
+          )
+          ? []
+          : [next];
+      });
+      // Undo restores only references explicitly selected in this draft scope.
+      // The server still freezes them using the current actor and permissions.
+      const prior = selectedReferenceHistory.current.get(composerScope);
+      for (const token of tokens) {
+        if (
+          !token.referenceKey ||
+          nextReferences.some(
+            (item) => inlineReferenceKey(item.reference) === token.referenceKey,
+          )
+        )
+          continue;
+        const remembered = prior?.get(token.referenceKey);
+        if (remembered && nextReferences.length < 30)
+          nextReferences.push({
+            ...remembered,
+            insertions: [
+              { start: token.start, end: token.end, text: token.raw },
+            ],
+          });
+      }
+      return nextReferences;
+    });
     setContent(value);
   }
   function removeReference(reference: PreparedReference) {
@@ -1119,6 +1261,14 @@ export function Workspace({
           mounted.current &&
           (activeRef.current ?? newDraftKey(browseRef.current)) === draftId
         ) {
+          const materialized = replaceConversationReferenceCode(
+            composerContent.current,
+            code,
+            inlineReferenceMarker(prepared.label, prepared.reference),
+          );
+          if (!materialized.insertions.length) continue;
+          prepared.insertions = materialized.insertions;
+          updateComposerContent(materialized.text);
           setReferences((previous) =>
             previous.some(
               (item) =>
@@ -1145,11 +1295,22 @@ export function Workspace({
             references: [],
             targetProjectId: null,
           };
-          if (old.references.length < 30)
+          if (old.references.length < 30) {
+            const materialized = replaceConversationReferenceCode(
+              old.content,
+              code,
+              inlineReferenceMarker(prepared.label, prepared.reference),
+            );
+            if (!materialized.insertions.length) continue;
             drafts.current.set(draftId, {
               ...old,
-              references: [...old.references, prepared],
+              content: materialized.text,
+              references: [
+                ...old.references,
+                { ...prepared, insertions: materialized.insertions },
+              ],
             });
+          }
         }
       } catch (error) {
         if (
@@ -1958,12 +2119,10 @@ export function Workspace({
           note: '从排队消息恢复，发送时重新校验当前权限。',
           reference,
         }));
-      const parsed = splitComposerSkills(restored.input.content);
       const draft = {
-        content: parsed.text,
+        content: restored.input.content,
         references: restoredReferences,
         operationTarget: restored.input.operationTarget,
-        ...(parsed.skillIds.length ? { skillIds: parsed.skillIds } : {}),
       };
       replaceDraftGeneration(conversationId);
       saveWorkspaceDraft(drafts.current, conversationId, draft);
@@ -2261,13 +2420,18 @@ export function Workspace({
           <Space className="chat-head-actions">
             {active ? (
               <AgentWorkspace key={active.id} conversationId={active.id} />
-            ) : null}
-            {active ? (
-              <AgentBrowserPanel
-                key={`browser-${active.id}`}
-                conversationId={active.id}
+            ) : (
+              <Button
+                icon={<FileSearchOutlined />}
+                aria-label="文件中心"
+                onClick={() => setFileCenterOpen(true)}
               />
-            ) : null}
+            )}
+            <FileCenter
+              key={me.user.id}
+              open={fileCenterOpen}
+              onClose={() => setFileCenterOpen(false)}
+            />
             <AppearanceToggle
               dark={dark}
               pending={appearancePending}
@@ -2387,29 +2551,50 @@ export function Workspace({
                 : undefined;
               if (entry.role === 'assistant' && entry.taskId)
                 return (
-                  <WorkspaceTurn
-                    key={entry.id}
-                    taskId={entry.taskId}
-                    current={entry.taskId === taskId}
-                    stream={stream}
-                    fallbackText={entry.content}
-                    messageStatus={entry.status}
-                    {...(entry.taskStatus !== undefined
-                      ? { taskStatus: entry.taskStatus }
-                      : {})}
-                    {...(entry.taskNotices
-                      ? { taskNotices: entry.taskNotices }
-                      : {})}
-                    caption={<ModelCaption message={entry} />}
-                    {...(sendTiming ? { sendTiming } : {})}
-                    onProposals={() => setProposalTaskId(entry.taskId)}
-                    {...(entry.taskId === taskId && inFlight
-                      ? { onStop: () => void stopReply() }
-                      : {})}
-                    {...(entry.taskId === taskId
-                      ? { onContinue: prepareContinuation }
-                      : {})}
-                  />
+                  <Fragment key={entry.id}>
+                    <WorkspaceTurn
+                      key={entry.id}
+                      taskId={entry.taskId}
+                      current={entry.taskId === taskId}
+                      stream={stream}
+                      fallbackText={entry.content}
+                      messageStatus={entry.status}
+                      {...(entry.taskStatus !== undefined
+                        ? { taskStatus: entry.taskStatus }
+                        : {})}
+                      {...(entry.taskNotices
+                        ? { taskNotices: entry.taskNotices }
+                        : {})}
+                      caption={<ModelCaption message={entry} />}
+                      {...(sendTiming ? { sendTiming } : {})}
+                      onProposals={() => setProposalTaskId(entry.taskId)}
+                      {...(entry.taskId === taskId && inFlight
+                        ? { onStop: () => void stopReply() }
+                        : {})}
+                      {...(entry.taskId === taskId
+                        ? { onContinue: prepareContinuation }
+                        : {})}
+                    />
+                    {activeId ? (
+                      <ConversationActionCards
+                        conversationId={activeId}
+                        taskId={entry.taskId}
+                        messageId={entry.id}
+                        refreshKey={pendingRefreshCount}
+                        onResolved={stream.reconnect}
+                      />
+                    ) : null}
+                    {activeId ? (
+                      <ExternalMcpInvocationsPanel
+                        inline
+                        taskId={entry.taskId}
+                        conversationId={activeId}
+                        hideEmpty
+                        refreshKey={`${entry.taskId}:${pendingRefreshCount}`}
+                        onResolved={stream.reconnect}
+                      />
+                    ) : null}
+                  </Fragment>
                 );
               return (
                 <article
@@ -2434,8 +2619,19 @@ export function Workspace({
                       })}
                     </time>
                   </header>
-                  <WorkspaceMessageReferences references={entry.references} />
-                  <MessageText text={entry.content} />
+                  <WorkspaceMessageReferences
+                    references={entry.references.filter(
+                      (item) =>
+                        !isInlineMessageReference(
+                          entry.content,
+                          item.reference,
+                        ),
+                    )}
+                  />
+                  <MessageText
+                    text={entry.content}
+                    references={entry.references}
+                  />
                 </article>
               );
             })}
@@ -2456,9 +2652,18 @@ export function Workspace({
                     </time>
                   </header>
                   <WorkspaceMessageReferences
+                    references={sendPreview.references.filter(
+                      (item) =>
+                        !isInlineMessageReference(
+                          sendPreview.content,
+                          item.reference,
+                        ),
+                    )}
+                  />
+                  <MessageText
+                    text={sendPreview.content}
                     references={sendPreview.references}
                   />
-                  <MessageText text={sendPreview.content} />
                   <p className="caption" role="status">
                     {sendPreview.userMessageId
                       ? '消息已受理，正在读取记录'
@@ -2470,40 +2675,40 @@ export function Workspace({
               )}
             {taskId &&
               !detail?.messages.some((entry) => entry.taskId === taskId) && (
-                <WorkspaceTurn
-                  taskId={taskId}
-                  current
-                  stream={stream}
-                  fallbackText=""
-                  messageStatus={stream.task?.messageStatus ?? 'queued'}
-                  {...(currentSendTiming
-                    ? { sendTiming: currentSendTiming }
-                    : {})}
-                  onProposals={() => setProposalTaskId(taskId)}
-                  {...(inFlight ? { onStop: () => void stopReply() } : {})}
-                  onContinue={prepareContinuation}
-                />
+                <Fragment>
+                  <WorkspaceTurn
+                    taskId={taskId}
+                    current
+                    stream={stream}
+                    fallbackText=""
+                    messageStatus={stream.task?.messageStatus ?? 'queued'}
+                    {...(currentSendTiming
+                      ? { sendTiming: currentSendTiming }
+                      : {})}
+                    onProposals={() => setProposalTaskId(taskId)}
+                    {...(inFlight ? { onStop: () => void stopReply() } : {})}
+                    onContinue={prepareContinuation}
+                  />
+                  {activeId ? (
+                    <ConversationActionCards
+                      conversationId={activeId}
+                      taskId={taskId}
+                      refreshKey={pendingRefreshCount}
+                      onResolved={stream.reconnect}
+                    />
+                  ) : null}
+                  {activeId ? (
+                    <ExternalMcpInvocationsPanel
+                      inline
+                      taskId={taskId}
+                      conversationId={activeId}
+                      hideEmpty
+                      refreshKey={`${taskId}:${pendingRefreshCount}`}
+                      onResolved={stream.reconnect}
+                    />
+                  ) : null}
+                </Fragment>
               )}
-            {activeId && (
-              <BusinessConfirmationsPanel
-                key={`business-pending:${activeId}`}
-                conversationId={activeId}
-                pendingOnly
-                hideEmpty
-                refreshKey={pendingRefreshCount}
-                onResolved={stream.reconnect}
-              />
-            )}
-            {activeId && (
-              <ExternalMcpInvocationsPanel
-                key={`external-pending:${activeId}`}
-                conversationId={activeId}
-                pendingOnly
-                hideEmpty
-                refreshKey={`${taskId ?? ''}:${pendingRefreshCount}`}
-                onResolved={stream.reconnect}
-              />
-            )}
             <AutomaticAuxiliaryPanel
               projectId={project?.id ?? null}
               refreshKey={
@@ -2751,48 +2956,33 @@ export function Workspace({
               />
             )}
             <WorkspaceComposerReferences
-              refs={references}
+              refs={references.filter(
+                (reference) =>
+                  reference.reference.kind === 'resource' ||
+                  !parseInlineComposerTokens(content).some(
+                    (token) =>
+                      token.referenceKey ===
+                      inlineReferenceKey(reference.reference),
+                  ),
+              )}
               uploading={uploading}
               disabled={creating || sending}
               accessMode={accessMode}
               onRemove={removeReference}
             />
-            {composerSkills.length > 0 && (
-              <div
-                className="workspace-selected-skills"
-                aria-label="已选 Skill"
-              >
-                {composerSkills.map((id) => (
-                  <WorkspaceReferenceChip
-                    key={id}
-                    kind="skill"
-                    label={workspaceSkillLabel(id)}
-                    trailing={
-                      <button
-                        type="button"
-                        className="workspace-skill-remove"
-                        aria-label={`移除 Skill：${workspaceSkillLabel(id)}`}
-                        disabled={creating || sending}
-                        onClick={() => {
-                          setComposerSkills((previous) =>
-                            previous.filter((entry) => entry !== id),
-                          );
-                          input.current?.focus();
-                        }}
-                      >
-                        ×
-                      </button>
-                    }
-                  />
-                ))}
-              </div>
-            )}
-            <Input.TextArea
-              ref={(value) => {
-                input.current = value?.resizableTextArea?.textArea ?? null;
-              }}
-              aria-label="聊天消息"
-              aria-autocomplete="list"
+
+            <InlineComposer
+              key={composerScope}
+              ref={input}
+              value={content}
+              allowedReferences={inlineAllowedReferences}
+              disabled={conversationLoading || creating || sending}
+              maxLength={100000}
+              placeholder={
+                active
+                  ? '输入消息，@ 引用，/ 选择 Skill'
+                  : '输入消息，选择模型后开始新对话'
+              }
               aria-controls={
                 candidateOpen ? 'workspace-inline-candidates' : undefined
               }
@@ -2800,19 +2990,13 @@ export function Workspace({
               aria-activedescendant={
                 candidateOpen ? activeCandidateId : undefined
               }
-              disabled={conversationLoading || creating || sending}
-              value={content}
-              onChange={(event) => {
-                const value = event.target.value;
+              onChange={(value, selection) => {
                 updateComposerContent(value);
-                setCaret(event.target.selectionStart);
+                setCaret(selection.start);
                 void prepareReferenceCode(value);
               }}
-              onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
-              onFocus={(event) => {
-                setCaret(event.currentTarget.selectionStart);
-                setDismissedCandidate(null);
-              }}
+              onSelect={(selection) => setCaret(selection.start)}
+              onFocus={() => setDismissedCandidate(null)}
               onBlur={(event) => {
                 if (
                   !event.relatedTarget?.closest('.workspace-inline-candidates')
@@ -2823,10 +3007,9 @@ export function Workspace({
                 composition.current = true;
                 setComposing(true);
               }}
-              onCompositionEnd={(event) => {
+              onCompositionEnd={() => {
                 composition.current = false;
                 setComposing(false);
-                setCaret(event.currentTarget.selectionStart);
               }}
               onPaste={(event) => {
                 if (event.clipboardData.files.length) {
@@ -2871,15 +3054,6 @@ export function Workspace({
                   setDismissedCandidate(null);
                 }
               }}
-              autoSize={{ minRows: 3, maxRows: 8 }}
-              maxLength={
-                100000 - serializeComposerSkills(composerSkills, '').length
-              }
-              placeholder={
-                active
-                  ? '输入消息，@ 引用，/ 选择 Skill'
-                  : '输入消息，选择模型后开始新对话'
-              }
             />
             <input
               hidden
@@ -3114,14 +3288,6 @@ export function Workspace({
           <>
             <HistoricalModelTask
               key={`model:${proposalTaskId}`}
-              taskId={proposalTaskId}
-            />
-            <BusinessConfirmationsPanel
-              key={`business:${proposalTaskId}`}
-              taskId={proposalTaskId}
-            />
-            <ExternalMcpInvocationsPanel
-              key={`external:${proposalTaskId}`}
               taskId={proposalTaskId}
             />
           </>

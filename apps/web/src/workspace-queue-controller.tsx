@@ -11,11 +11,8 @@ import {
 } from '@ant-design/icons';
 import { api, describeError, isUncertainMutationError } from './api';
 import { WorkspaceReferencePreview } from './workspace-reference-preview';
-import { WorkspaceReferenceChip } from './workspace-composer-references';
-import {
-  splitComposerSkills,
-  workspaceSkillLabel,
-} from './workspace-composer-skills';
+import { InlineMessageContent } from './inline-composer';
+import { inlineReferenceKey } from './workspace-inline-tokens';
 import {
   currentIdentityOwner,
   identityContextEpoch,
@@ -170,9 +167,14 @@ export function useWorkspaceSendQueue(
 }
 
 function QueueAttachment({ item }: { item: WorkspaceQueuedMessage }) {
-  const reference = item.display?.references[0];
-  if (!item.input.references.length) return null;
-  const label = reference?.label ?? `${item.input.references.length} 个引用`;
+  const reference = item.display?.references.find(
+    (entry) => entry.reference.kind === 'resource',
+  );
+  const fileCount = item.input.references.filter(
+    (entry) => entry.kind === 'resource',
+  ).length;
+  if (!fileCount) return null;
+  const label = reference?.label ?? `${fileCount} 个文件`;
   return (
     <WorkspaceReferencePreview
       fileId={
@@ -234,16 +236,11 @@ export function WorkspacePendingMessages({
       )}
       <ol className="workspace-queue-list">
         {state.items.map((item, index) => {
-          const prepared = splitComposerSkills(item.input.content);
-          const firstSkill = prepared.skillIds[0];
           const editable = item.state === 'queued' || item.state === 'failed';
           const canSteer =
             !state.paused &&
             state.items.every((entry) => entry.state === 'queued');
-          const summary = prepared.text
-            .trim()
-            .replace(/\s+/g, ' ')
-            .slice(0, 500);
+          const summary = item.input.content.trim().replace(/\s+/g, ' ');
           const status =
             item.state === 'queued'
               ? '等待发送'
@@ -259,19 +256,17 @@ export function WorkspacePendingMessages({
                 aria-label={`待发消息 ${index + 1}，${status}`}
               />
               <QueueAttachment item={item} />
-              {firstSkill && (
-                <WorkspaceReferenceChip
-                  kind="skill"
-                  className="workspace-queue-skill-chip"
-                  label={`${workspaceSkillLabel(firstSkill)}${prepared.skillIds.length > 1 ? ` +${prepared.skillIds.length - 1}` : ''}`}
-                  title={prepared.skillIds.map(workspaceSkillLabel).join('、')}
-                />
-              )}
               <span
                 className="workspace-queue-summary"
-                title={`${summary}\n${item.label}；${status}`}
+                title={`${item.label}；${status}`}
               >
-                {summary}
+                <InlineMessageContent
+                  text={summary}
+                  allowedReferences={
+                    new Set(item.input.references.map(inlineReferenceKey))
+                  }
+                  renderText={(text) => text}
+                />
               </span>
               {item.state !== 'queued' && (
                 <small className="workspace-queue-status">{status}</small>

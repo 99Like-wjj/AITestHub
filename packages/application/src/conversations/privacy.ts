@@ -10,6 +10,7 @@ import {
 import { readFile, mkdir, open, link, unlink, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { redactActionIntentPresentation } from '../tool-registry/action-intent-data.js';
 import { redactDeletedModelAttemptsInTransaction } from './model-attempts.js';
 import type {
   Database,
@@ -378,6 +379,7 @@ export async function applyPrivacyDeletion(
          WHERE conversation_id=$1 AND owner_id=$3`,
         [entry.targetId, entry.occurredAt, entry.ownerId],
       );
+      await redactActionIntentPresentation(tx, entry.targetId, entry.ownerId);
       await tx.query(
         'UPDATE app.ai_runtime_threads SET deleted_at=COALESCE(deleted_at,$2),active_run_id=NULL WHERE conversation_id=$1 AND owner_id=$3',
         [entry.targetId, entry.occurredAt, entry.ownerId],

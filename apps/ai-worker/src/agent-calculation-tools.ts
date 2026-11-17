@@ -172,7 +172,7 @@ export function createAgentCalculationTool(
     {
       name: 'ath_compute',
       description:
-        '真实Python沙箱计算、CSV/JSON数据分析及图表/文件产物。当前会话附件尚无工作区entry时，先import_resource按原resourceId和稳定commandId导入已授权原件，返回原ID/hash/bytes与entryId/revision，不从解析文本重建；import_status只查询原commandId，后续任务恢复须加原originTaskId，未找到不证明从未执行，未知禁止换命令重试。files列工作区文件；run显式绑定inputs沙箱相对path和outputs工作区workspacePath/预期版本。workspacePath是完整逻辑路径，保留用户指定的全部目录前缀，与沙箱内path分别指定；Python写新文件前须创建其父目录。Python可用decimal/csv/json/statistics等，标准库不保证额外第三方包。代码无网络、无宿主文件或平台凭据。使用Decimal处理金额，不能把代码文本或模型心算当已执行。结果含runId、实际执行状态、cleanup、真实文件hash和下载路径。计算未知/断线只能status/cancel原runId，禁止换commandId重跑；stdout/stderr较长用read_output分页。只在state=completed时宣称计算和全部指定产物已完成；不代表任务业务验收。',
+        '真实Python沙箱计算、CSV/JSON数据分析及图表/文件产物。先files查看已受理附件与会话文件：kind=original是固定只读原件，首次处理必须将outputs另存为新路径（expectedRowVersion=0），禁止覆盖、重命名或移除原件；继续修改kind=artifact成果时使用其当前路径和rowVersion追加版本。已有原件直接绑定entryId/revision读取；确实尚无entry的已授权附件才import_resource，按原resourceId和稳定commandId导入原件，不从解析文本重建。import_status只查询原commandId，后续任务恢复须加原originTaskId，未找到不证明从未执行，未知禁止换命令重试。run显式绑定inputs沙箱相对path和outputs工作区workspacePath/预期版本，成果来源由实际inputs记录。workspacePath保留用户指定的完整目录前缀，与沙箱内path分别指定；Python写新文件前须创建父目录。Python可用decimal/csv/json/statistics等，标准库不保证额外第三方包。代码无网络、无宿主文件或平台凭据。使用Decimal处理金额，不能把代码文本或模型心算当已执行。结果含runId、实际状态、cleanup、真实文件hash和下载路径。未知/断线只能status/cancel原runId，禁止换commandId重跑；stdout/stderr较长用read_output分页。只在state=completed时宣称计算和全部指定产物已完成；不代表业务验收。',
       schema: agentCalculationToolInputSchema,
     },
   );

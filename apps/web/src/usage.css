@@ -1,0 +1,38 @@
+/* The heatmap uses only recorded Token levels. Focus outlines remain accessibility affordances. */
+:root[data-theme='light'] .usage-cell.level-0 {
+  background: #e5e8e7;
+}
+:root[data-theme='light'] .usage-cell.level-1 {
+  background: #70cda1;
+}
+:root[data-theme='light'] .usage-cell.level-2 {
+  background: #39a978;
+}
+:root[data-theme='light'] .usage-cell.level-3 {
+  background: #147c51;
+}
+:root[data-theme='light'] .usage-cell.level-4 {
+  background: #064b31;
+}
+:root[data-theme='dark'] .usage-cell.level-0 {
+  background: #303433;
+}
+:root[data-theme='dark'] .usage-cell.level-1 {
+  background: #348a5e;
+}
+:root[data-theme='dark'] .usage-cell.level-2 {
+  background: #4bb67e;
+}
+:root[data-theme='dark'] .usage-cell.level-3 {
+  background: #7bd6a2;
+}
+:root[data-theme='dark'] .usage-cell.level-4 {
+  background: #b8f0d1;
+}
+.usage-cell.outside {
+  background: transparent;
+}
+.usage-calendar .usage-cell:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}

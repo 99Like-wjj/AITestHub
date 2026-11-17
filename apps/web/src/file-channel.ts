@@ -2,6 +2,7 @@ import { api, ApiError } from './api';
 import { identityContextEpoch } from './identity-context';
 import { fileReceiptSchema } from '../../../packages/contracts/src/files';
 import type { FileMetadata } from '../../../packages/contracts/src/files';
+import { previewUploadMediaType } from '../../../packages/contracts/src/file-preview';
 import {
   readWebFileCapabilities,
   webFileBinaryMaximumBytes,
@@ -84,20 +85,7 @@ async function uploadResource(
   const sha256 = [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');
-  const textTypes: Record<string, string> = {
-    md: 'text/markdown',
-    markdown: 'text/markdown',
-    txt: 'text/plain',
-    html: 'text/html',
-    htm: 'text/html',
-    json: 'application/json',
-    csv: 'text/csv',
-  };
-  const extension = file.name.toLowerCase().split('.').pop() ?? '';
-  const mediaType =
-    file.type && file.type !== 'application/octet-stream'
-      ? file.type
-      : (textTypes[extension] ?? 'application/octet-stream');
+  const mediaType = previewUploadMediaType(file.name, file.type);
   const registration = await api(
     '/files/register',
     {
@@ -252,13 +240,15 @@ export function isolatedHtml(source: string): string {
     'text/html',
   );
   document
-    .querySelectorAll('script,iframe,frame,object,embed,base,meta[http-equiv]')
+    .querySelectorAll(
+      'script,iframe,frame,object,embed,base,meta[http-equiv],foreignObject,animate,animateMotion,animateTransform,set',
+    )
     .forEach((element) => element.remove());
   document.querySelectorAll('*').forEach((element) => {
     for (const attribute of [...element.attributes]) {
       if (
         attribute.name.toLowerCase().startsWith('on') ||
-        ['srcdoc', 'action', 'formaction', 'ping'].includes(
+        ['srcdoc', 'action', 'formaction', 'ping', 'xlink:href'].includes(
           attribute.name.toLowerCase(),
         )
       )

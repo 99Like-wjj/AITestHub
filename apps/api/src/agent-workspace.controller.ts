@@ -7,6 +7,7 @@ import {
 import { AgentWorkspaceService } from '../../../packages/application/src/agent-workspace/service.js';
 import { IdentityService } from '../../../packages/application/src/identity/service.js';
 import { DomainError } from '../../../packages/application/src/errors.js';
+import { sendFileCenterBytes } from './file-center.controller.js';
 
 @Controller('api/v1/me/conversations/:conversationId/workspace')
 export class AgentWorkspaceController {
@@ -85,21 +86,7 @@ export class AgentWorkspaceController {
           entryId,
           revision,
         );
-        const filename = encodeURIComponent(
-          result.entry.path.split('/').at(-1) ?? 'download',
-        ).replace(
-          /[!'()*]/g,
-          (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
-        );
-        res.setHeader('Content-Type', result.entry.mediaType);
-        res.setHeader('Content-Length', result.bytes.length);
-        res.setHeader(
-          'Content-Disposition',
-          `attachment; filename="download"; filename*=UTF-8''${filename}`,
-        );
-        res.setHeader('Cache-Control', 'no-store');
-        res.setHeader('X-Content-Type-Options', 'nosniff');
-        return res.send(result.bytes);
+        return sendFileCenterBytes(res, req, result);
       }
     }
     throw new DomainError('NOT_FOUND', '没有此工作区操作。', 404);

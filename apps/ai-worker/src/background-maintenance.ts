@@ -6,15 +6,12 @@ import { DomainError } from '../../../packages/application/src/errors.js';
 export async function runOfficeBackgroundWork(
   maintenance: MaintenanceService,
   work: () => Promise<boolean>,
-  existingWork = false,
 ): Promise<boolean> {
   let admission: Awaited<ReturnType<MaintenanceService['enterRequest']>>;
   try {
     admission = await maintenance.enterRequest(
       'POST',
-      existingWork
-        ? '/api/internal/ai-worker/browser-reconcile'
-        : '/api/internal/agent-office/tick',
+      '/api/internal/agent-office/tick',
     );
   } catch (error: unknown) {
     if (error instanceof DomainError && error.details?.maintenancePhase)

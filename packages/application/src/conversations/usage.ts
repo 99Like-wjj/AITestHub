@@ -68,6 +68,80 @@ const base = (scope: UsageOriginScope) => ({
 /** Own aggregates only: no message text, source bodies, checkpoint data or credentials. */
 export class ModelUsageService {
   constructor(readonly db: Pick<Database, 'transaction'>) {}
+  async #heatmap(
+    tx: SqlExecutor,
+    userId: string | null,
+    selected: string | null,
+  ) {
+    return (
+      await tx.query<{ date: string; tokens: string | null }>(
+        `WITH days AS(SELECT generate_series((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date-364,
+        (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date,interval '1 day')::date calendar_date)
+      SELECT to_char(d.calendar_date,'YYYY-MM-DD') date,sum(${effectiveTotal}) FILTER(WHERE ${eligible})::text tokens
+      FROM days d LEFT JOIN app.model_call_ledger l ON (l.started_at AT TIME ZONE 'Asia/Shanghai')::date=d.calendar_date
+        AND ($1::uuid IS NULL OR l.initiator_user_id=$1) AND ($2::text IS NULL OR l.execution_origin=$2)
+      GROUP BY d.calendar_date ORDER BY d.calendar_date`,
+        [userId, selected],
+      )
+    ).rows;
+  }
+  async #models(
+    tx: SqlExecutor,
+    userId: string | null,
+    selected: string | null,
+  ) {
+    return (
+      await tx.query<
+        Aggregate & {
+          model_key: string;
+          model_display_name: string;
+          model_service_name: string;
+          source: string;
+          ledger_rows: string;
+        }
+      >(
+        `WITH labeled AS(
+        SELECT l.*,
+        encode(sha256(convert_to(l.model_service_id::text||':'||
+          CASE WHEN resolved.entry_id IS NOT NULL THEN 'entry:'||resolved.entry_id::text
+            ELSE 'legacy:'||l.model_config_revision::text||':'||l.model_id END,'UTF8')),'hex') model_key,
+        COALESCE(NULLIF(btrim(e.display_name),''),NULLIF(btrim(historical.name),''),
+          CASE WHEN m.model_snapshot->>'schemaVersion'='ath.model-snapshot.v2'
+            AND m.model_snapshot->>'modelServiceId'=l.model_service_id::text
+            AND m.model_snapshot->>'serviceRevision'=l.model_config_revision::text
+            AND m.model_snapshot->>'modelId'=l.model_id
+            AND m.model_snapshot->>'modelEntryId'=resolved.entry_id::text
+            THEN NULLIF(btrim(m.model_snapshot->>'modelDisplayName'),'') END,'历史模型') model_display_name,
+        COALESCE(NULLIF(btrim(s.name),''),NULLIF(btrim(revision.snapshot->'modelService'->>'name'),''),
+          NULLIF(btrim(revision.snapshot->>'name'),''),'历史模型服务') model_service_name
+        FROM app.model_call_ledger l
+        LEFT JOIN app.model_legacy_bindings binding ON binding.model_service_id=l.model_service_id AND binding.legacy_revision=l.model_config_revision
+        LEFT JOIN app.ai_tasks t ON t.id=l.task_id AND t.owner_id=l.initiator_user_id
+        LEFT JOIN app.ai_messages m ON m.id=t.assistant_message_id
+        LEFT JOIN LATERAL(SELECT COALESCE(l.model_entry_id,binding.model_entry_id,
+          CASE WHEN m.model_snapshot->>'schemaVersion'='ath.model-snapshot.v2'
+            AND m.model_snapshot->>'modelServiceId'=l.model_service_id::text
+            AND m.model_snapshot->>'serviceRevision'=l.model_config_revision::text
+            AND m.model_snapshot->>'modelId'=l.model_id
+            AND m.model_snapshot->>'modelEntryId' ~ '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
+          THEN (m.model_snapshot->>'modelEntryId')::uuid END) entry_id) resolved ON true
+        LEFT JOIN app.model_services s ON s.id=l.model_service_id
+        LEFT JOIN app.model_entries e ON e.model_service_id=l.model_service_id AND e.id=resolved.entry_id
+        LEFT JOIN app.model_service_revisions revision ON revision.model_service_id=l.model_service_id AND revision.revision=l.model_config_revision
+        LEFT JOIN LATERAL(SELECT item->>'displayName' name FROM jsonb_array_elements(
+          CASE WHEN jsonb_typeof(revision.snapshot->'modelService'->'models')='array'
+            THEN revision.snapshot->'modelService'->'models' ELSE '[]'::jsonb END) item
+          WHERE item->>'id'=resolved.entry_id::text LIMIT 1) historical ON true
+        WHERE l.started_at>=${annualStart} AND ($1::uuid IS NULL OR l.initiator_user_id=$1)
+          AND ($2::text IS NULL OR l.execution_origin=$2)
+      ) SELECT l.model_key,(array_agg(l.model_display_name ORDER BY l.started_at DESC,l.id DESC))[1] model_display_name,
+        (array_agg(l.model_service_name ORDER BY l.started_at DESC,l.id DESC))[1] model_service_name,
+        l.source,count(l.id)::text ledger_rows,${aggregate}
+      FROM labeled l GROUP BY l.model_key,l.source ORDER BY model_display_name,model_service_name,l.model_key,l.source`,
+        [userId, selected],
+      )
+    ).rows;
+  }
   async #origins(
     tx: SqlExecutor,
     userId: string | null,
@@ -173,33 +247,8 @@ export class ModelUsageService {
           [actor.userId],
         )
       ).rows[0]!;
-      const heatmap = (
-        await tx.query<{
-          date: string;
-          tokens: string | null;
-          unknown_calls: string;
-          component_unknown_calls: string;
-          confirmed_requests: string;
-          unknown_request_intents: string;
-        }>(
-          `WITH days AS(SELECT generate_series((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date-364,(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date,interval '1 day')::date calendar_date)
-        SELECT to_char(d.calendar_date,'YYYY-MM-DD') date,sum(${effectiveTotal}) FILTER(WHERE ${eligible})::text tokens,
-        count(l.id) FILTER(WHERE ${eligible} AND ${effectiveTotal} IS NULL)::text unknown_calls,
-        count(l.id) FILTER(WHERE ${eligible} AND (l.input_tokens IS NULL OR l.output_tokens IS NULL))::text component_unknown_calls,
-        COALESCE(sum(l.request_count),0)::text confirmed_requests,count(l.id) FILTER(WHERE l.request_count IS NULL)::text unknown_request_intents
-        FROM days d LEFT JOIN app.model_call_ledger l ON (l.started_at AT TIME ZONE 'Asia/Shanghai')::date=d.calendar_date AND l.initiator_user_id=$1 AND ($2::text IS NULL OR l.execution_origin=$2)
-        GROUP BY d.calendar_date ORDER BY d.calendar_date`,
-          [actor.userId, selected],
-        )
-      ).rows;
-      const models = (
-        await tx.query<
-          Aggregate & { model_id: string; source: string; ledger_rows: string }
-        >(
-          `SELECT l.model_id,l.source,count(l.id)::text ledger_rows,${aggregate} FROM app.model_call_ledger l WHERE l.initiator_user_id=$1 AND l.started_at>=${annualStart} AND ($2::text IS NULL OR l.execution_origin=$2) GROUP BY l.model_id,l.source ORDER BY l.model_id,l.source`,
-          [actor.userId, selected],
-        )
-      ).rows;
+      const heatmap = await this.#heatmap(tx, actor.userId, selected);
+      const models = await this.#models(tx, actor.userId, selected);
       return {
         ...base(scope),
         longestTaskScope: 'ended-platform-ai-and-auxiliary-tasks' as const,
@@ -226,7 +275,9 @@ export class ModelUsageService {
           : null,
         heatmap,
         models: models.map((row) => ({
-          model_id: row.model_id,
+          model_key: row.model_key,
+          model_display_name: row.model_display_name,
+          model_service_name: row.model_service_name,
           source: row.source,
           tokens: row.tokens,
           calls: row.confirmed_requests,
@@ -268,33 +319,8 @@ export class ModelUsageService {
           [selected],
         )
       ).rows;
-      const byModelRows = (
-        await tx.query<
-          Aggregate & { model_id: string; source: string; ledger_rows: string }
-        >(
-          `SELECT l.model_id,l.source,count(l.id)::text ledger_rows,${aggregate} FROM app.model_call_ledger l WHERE l.started_at>=${annualStart} AND ($1::text IS NULL OR l.execution_origin=$1) GROUP BY l.model_id,l.source ORDER BY l.model_id,l.source`,
-          [selected],
-        )
-      ).rows;
-      const heatmap = (
-        await tx.query<{
-          date: string;
-          tokens: string | null;
-          unknown_calls: string;
-          component_unknown_calls: string;
-          confirmed_requests: string;
-          unknown_request_intents: string;
-        }>(
-          `WITH days AS(SELECT generate_series((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date-364,(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date,interval '1 day')::date calendar_date)
-        SELECT to_char(d.calendar_date,'YYYY-MM-DD') date,sum(${effectiveTotal}) FILTER(WHERE ${eligible})::text tokens,
-        count(l.id) FILTER(WHERE ${eligible} AND ${effectiveTotal} IS NULL)::text unknown_calls,
-        count(l.id) FILTER(WHERE ${eligible} AND (l.input_tokens IS NULL OR l.output_tokens IS NULL))::text component_unknown_calls,
-        COALESCE(sum(l.request_count),0)::text confirmed_requests,count(l.id) FILTER(WHERE l.request_count IS NULL)::text unknown_request_intents
-        FROM days d LEFT JOIN app.model_call_ledger l ON (l.started_at AT TIME ZONE 'Asia/Shanghai')::date=d.calendar_date AND ($1::text IS NULL OR l.execution_origin=$1)
-        GROUP BY d.calendar_date ORDER BY d.calendar_date`,
-          [selected],
-        )
-      ).rows;
+      const byModelRows = await this.#models(tx, null, selected);
+      const heatmap = await this.#heatmap(tx, null, selected);
       const counters = (row: Aggregate) => ({
         tokens: row.tokens,
         calls: row.confirmed_requests,
@@ -314,7 +340,9 @@ export class ModelUsageService {
           ...counters(row),
         })),
         byModel: byModelRows.map((row) => ({
-          model_id: row.model_id,
+          model_key: row.model_key,
+          model_display_name: row.model_display_name,
+          model_service_name: row.model_service_name,
           source: row.source,
           ledger_rows: row.ledger_rows,
           ...counters(row),

@@ -12,7 +12,7 @@ import {
   type BusinessServices,
 } from '../../../packages/application/src/tool-registry/business.js';
 import { registerInternalTools } from '../../../packages/application/src/tool-registry/internal.js';
-import { BusinessConfirmations } from '../../../packages/application/src/tool-registry/confirmations.js';
+import { ActionIntents } from '../../../packages/application/src/tool-registry/action-intents.js';
 import { DomainError } from '../../../packages/application/src/errors.js';
 import type { AiHostEvent } from './host.js';
 import { assertSourceProjectAllowed } from '../../../packages/application/src/conversations/source-projects.js';
@@ -365,7 +365,7 @@ export function createAiBusinessTools(
 ) {
   const registry = createBusinessRegistry(db, options.services);
   registerInternalTools(registry, db);
-  const confirmations = new BusinessConfirmations(db, registry);
+  const confirmations = new ActionIntents(db, registry);
   const entries = [...registry.tools.values()].filter((entry) =>
     AI_BUSINESS_TOOL_NAMES.some((name) => name === entry.name),
   );
@@ -539,10 +539,13 @@ export function createAiBusinessTools(
               });
               return JSON.stringify({
                 status: pending.status,
-                confirmation: pending,
-                confirmationUrl: `/#business-confirmations?confirmationId=${pending.id}`,
-                statusPath: `/api/v1/me/business-confirmations/${pending.id}`,
+                actionIntent: pending,
+                statusPath: `/api/v1/me/conversations/${options.conversationId}/action-intents/${pending.id}`,
                 humanActionRequired: waiting,
+                interaction: 'inline-action-card',
+                instruction: waiting
+                  ? '请用户在本条回复的执行卡点击执行或取消；文字确认无效。'
+                  : '读取原卡状态，不重新执行。',
               });
             }
             writeStarted =

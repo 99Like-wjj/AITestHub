@@ -33,7 +33,6 @@ import type { AgentScheduleService } from '../../../packages/application/src/age
 import { AgentOfficeService } from '../../../packages/application/src/agent-office/service.js';
 import type { AgentRepositoryService } from '../../../packages/application/src/agent-repository/service.js';
 import type { AgentRetrievalService } from '../../../packages/application/src/agent-retrieval/service.js';
-import type { AgentBrowserService } from '../../../packages/application/src/agent-browser/service.js';
 
 /** Only the worker owns this factory. Model/credentials never become tool arguments. */
 export function createConversationRunnerFactory(
@@ -49,7 +48,6 @@ export function createConversationRunnerFactory(
     officeSchedules?: AgentScheduleService;
     repository?: AgentRepositoryService;
     retrieval?: AgentRetrievalService;
-    browser?: AgentBrowserService;
   } = {},
 ): ConversationRunnerFactory {
   const budgetCalibration = new Map<string, ModelBudgetCalibration>();
@@ -201,7 +199,6 @@ export function createConversationRunnerFactory(
     });
     const host = new RestrictedAiHost(db, model, {
       nativeTextEvents: true,
-      ...(options.browser ? { browser: options.browser } : {}),
       ...(options.retrieval ? { retrieval: options.retrieval } : {}),
       ...(options.officeSchedules
         ? { officeSchedules: options.officeSchedules }

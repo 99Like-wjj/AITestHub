@@ -7,9 +7,10 @@ import type {
 import { findMcpOperation } from '../../../contracts/src/mcp.js';
 import { idSchema } from '../../../contracts/src/base.js';
 import {
-  businessConfirmationSchema,
-  resolveBusinessConfirmationInputSchema,
-} from '../../../contracts/src/business-tools.js';
+  actionIntentSchema,
+  actionIntentDecisionSchema,
+  actionIntentPresentationSchema,
+} from '../../../contracts/src/action-intents.js';
 import { frozenConversationReferenceSchema } from '../../../contracts/src/conversations.js';
 import type {
   Database,
@@ -52,20 +53,42 @@ interface ConfirmationRow {
   dispatch_claim: boolean;
   created_at: Date;
   resolved_at: Date | null;
+  proposal_revision: number;
+  expires_at: Date;
+  interaction_kind: 'legacy' | 'inlineCard' | 'mcpForm';
+  message_id: string | null;
+  presentation: unknown;
+  replacement_key: string | null;
 }
 export interface ConfirmationContext {
   taskId?: string;
   conversationId?: string;
 }
 const safe = (row: ConfirmationRow) =>
-  businessConfirmationSchema.parse({
+  actionIntentSchema.parse({
     id: row.id,
     toolName: row.tool_name,
     op: row.operation,
     projectId: row.project_id,
     taskId: row.task_id,
     conversationId: row.conversation_id,
-    status: row.state,
+    status:
+      row.state === 'waitingConfirmation' &&
+      (row.interaction_kind === 'legacy' ||
+        row.expires_at.getTime() <= Date.now())
+        ? 'expired'
+        : row.state,
+    revision: row.proposal_revision,
+    expiresAt: row.expires_at.toISOString(),
+    messageId: row.message_id,
+    arguments: row.arguments,
+    ...(actionIntentPresentationSchema.safeParse(row.presentation).data ?? {
+      title: '历史业务操作',
+      summary: '此历史提案只读保留，请查看原始详情与执行回执。',
+      projectName: null,
+      changes: [],
+      details: [],
+    }),
     scopeDigest: row.scope_digest,
     proposal: row.proposal,
     response: row.response,
@@ -80,9 +103,227 @@ function confirmationCapability(name: string, op: string): Capability {
     return 'issues.lifecycle';
   return findMcpOperation(name, op)?.capability ?? 'project.read';
 }
+const roleNames: Record<string, string> = {
+  tester: '测试人员',
+  developer: '开发人员',
+  product: '产品人员',
+};
+function memberRoles(value: { roles: string[]; isAdmin: boolean }) {
+  return (
+    [
+      ...value.roles.map((role) => roleNames[role] ?? role),
+      ...(value.isAdmin ? ['项目管理员'] : []),
+    ].join('、') || '无角色'
+  );
+}
+const titles: Record<string, string> = {
+  ath_assets: '更新测试资产',
+  ath_reviews: '提交评审决定',
+  ath_api_runs: '启动接口执行',
+  ath_ui_executions: '更新执行进度',
+  ath_results: '提交结果判定',
+  ath_problems: '处理问题',
+  ath_retests: '执行复测',
+  ath_issue_lifecycle: '更新缺陷状态',
+  ath_knowledge: '更新知识',
+  ath_knowledge_changes: '提交知识变更',
+  ath_project_members: '变更项目成员',
+};
+function replacementKey(call: PreparedBusinessCall) {
+  const parsed = z
+    .object({
+      id: z.string().optional(),
+      userId: z.string().optional(),
+      entryId: z.string().optional(),
+      runId: z.string().optional(),
+      requirementId: z.string().optional(),
+    })
+    .safeParse(call.input);
+  const target = parsed.success
+    ? [
+        parsed.data.id,
+        parsed.data.userId,
+        parsed.data.entryId,
+        parsed.data.runId,
+        parsed.data.requirementId,
+      ].find((x) => x !== undefined)
+    : undefined;
+  return target
+    ? createHash('sha256')
+        .update(
+          canonicalJson({
+            tool: call.toolName,
+            op: call.op,
+            project: call.projectId ?? null,
+            target,
+          }),
+        )
+        .digest('hex')
+    : null;
+}
+async function presentation(tx: SqlExecutor, call: PreparedBusinessCall) {
+  const project = call.projectId
+    ? (
+        await tx.query<{ name: string }>(
+          'SELECT name FROM app.projects WHERE id=$1',
+          [call.projectId],
+        )
+      ).rows[0]
+    : undefined;
+  const result: z.infer<typeof actionIntentPresentationSchema> = {
+    title: titles[call.toolName] ?? '执行业务变更',
+    summary: call.confirmation?.summary ?? '',
+    projectName: project?.name ?? null,
+    changes: [],
+    details: [],
+  };
+  if (project) result.details.push({ label: '项目', value: project.name });
+  if (call.toolName === 'ath_project_members') {
+    const input = z
+      .object({
+        userId: idSchema,
+        input: z
+          .object({ isAdmin: z.boolean(), roles: z.array(z.string()) })
+          .optional(),
+      })
+      .parse(call.input);
+    const user = (
+      await tx.query<{
+        display_name: string;
+        display_account: string;
+        account: string;
+      }>(
+        'SELECT display_name,display_account,account FROM app.users WHERE id=$1',
+        [input.userId],
+      )
+    ).rows[0];
+    if (!user)
+      throw new DomainError(
+        'NOT_FOUND',
+        '成员对象已不存在，未创建执行卡。',
+        404,
+      );
+    const current = z
+      .object({
+        current: z.object({
+          members: z.array(
+            z.object({
+              userId: z.string(),
+              roles: z.array(z.string()),
+              isAdmin: z.boolean(),
+            }),
+          ),
+        }),
+      })
+      .parse(call.confirmation?.scope)
+      .current.members.find((m) => m.userId === input.userId);
+    const person = `${user.display_name}（${user.display_account || user.account}）`;
+    result.title =
+      call.op === 'remove'
+        ? '移除项目成员'
+        : current
+          ? '调整项目成员权限'
+          : '添加项目成员';
+    result.summary =
+      call.op === 'remove'
+        ? `将${person}从${project?.name ?? '当前项目'}移除。`
+        : `将${person}${current ? '在' : '加入'}${project?.name ?? '当前项目'}，${input.input ? memberRoles(input.input) : '核对所选角色'}。`;
+    result.details.push({ label: '成员', value: person });
+    result.changes.push({
+      label: '项目成员及权限',
+      before: current ? memberRoles(current) : '非项目成员',
+      after:
+        call.op === 'remove'
+          ? '移除成员'
+          : input.input
+            ? memberRoles(input.input)
+            : null,
+    });
+  } else {
+    const scope = z
+      .record(z.string(), z.unknown())
+      .safeParse(call.confirmation?.scope);
+    if (scope.success) {
+      for (const key of [
+        'objectIds',
+        'selectedIds',
+        'caseIds',
+        'selectedCaseIds',
+        'runIds',
+        'problemIds',
+        'items',
+      ]) {
+        const value = scope.data[key];
+        if (Array.isArray(value))
+          result.details.push({
+            label: '所选对象数量',
+            value: String(value.length),
+          });
+      }
+      const names = new Set<string>();
+      const collect = (value: unknown, depth: number) => {
+        if (depth > 4 || names.size >= 20) return;
+        if (Array.isArray(value)) {
+          for (const item of value.slice(0, 30)) collect(item, depth + 1);
+          return;
+        }
+        if (!value || typeof value !== 'object') return;
+        for (const [key, child] of Object.entries(value)) {
+          if (
+            ['title', 'name', 'displayName', 'businessNumber'].includes(key) &&
+            typeof child === 'string' &&
+            child.trim()
+          )
+            names.add(child.slice(0, 200));
+          else if (typeof child === 'object') collect(child, depth + 1);
+        }
+      };
+      collect(scope.data.current ?? scope.data, 0);
+      for (const value of names)
+        result.details.push({ label: '相关对象', value });
+      const requested = z
+        .record(z.string(), z.unknown())
+        .safeParse(
+          scope.data.requested ??
+            z.object({ input: z.unknown() }).safeParse(call.input).data?.input,
+        );
+      const current = z
+        .record(z.string(), z.unknown())
+        .safeParse(scope.data.current);
+      const labels: Record<string, string> = {
+        title: '标题',
+        status: '状态',
+        lifecycle: '生命周期',
+        decision: '本次决定',
+        finalConclusion: '人工最终结论',
+        assessment: '人工判定',
+        conclusion: '结论',
+        reason: '原因',
+        roles: '角色',
+        isAdmin: '项目管理员',
+      };
+      if (requested.success)
+        for (const [key, label] of Object.entries(labels)) {
+          if (!(key in requested.data)) continue;
+          const stringify = (v: unknown) =>
+            typeof v === 'string'
+              ? v.slice(0, 2000)
+              : v === undefined || v === null
+                ? null
+                : JSON.stringify(v).slice(0, 2000);
+          result.changes.push({
+            label,
+            before: current.success ? stringify(current.data[key]) : null,
+            after: stringify(requested.data[key]),
+          });
+        }
+    }
+  }
+  return actionIntentPresentationSchema.parse(result);
+}
 
 /** A durable proposal and UI event record, never an authentication/approval-role credential. */
-export class BusinessConfirmations {
+export class ActionIntents {
   constructor(
     readonly db: Database,
     readonly registry: BusinessToolRegistry,
@@ -198,6 +439,7 @@ export class BusinessConfirmations {
       (row.origin !== 'official-mcp' || row.key_id !== actor.keyId)
     )
       throw new DomainError('NOT_FOUND', '此Key没有该确认提案。', 404);
+    await this.assertTaskSources(tx, actor, row);
   }
   async propose(
     actor: ActorContext,
@@ -274,6 +516,11 @@ export class BusinessConfirmations {
       await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
         `confirmation:${actor.userId}:${actor.keyId ?? ''}:${context.taskId ?? ''}:${argumentDigest}`,
       ]);
+      const replacement = replacementKey(call);
+      if (replacement && context.conversationId)
+        await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
+          `action-intent-target:${actor.userId}:${context.conversationId}:${replacement}`,
+        ]);
       const prior = (
         await tx.query<ConfirmationRow>(
           `SELECT * FROM app.business_confirmations WHERE owner_id=$1 AND origin=$2 AND key_id IS NOT DISTINCT FROM $3::uuid AND task_id IS NOT DISTINCT FROM $4::uuid AND argument_digest=$5 ORDER BY created_at DESC LIMIT 1`,
@@ -292,8 +539,9 @@ export class BusinessConfirmations {
       }
       const row = (
         await tx.query<ConfirmationRow>(
-          `INSERT INTO app.business_confirmations(id,owner_id,project_id,origin,key_id,task_id,conversation_id,tool_name,operation,arguments,scope_digest,proposal,argument_digest)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+          `INSERT INTO app.business_confirmations(id,owner_id,project_id,origin,key_id,task_id,conversation_id,tool_name,operation,arguments,scope_digest,proposal,argument_digest,interaction_kind,message_id,presentation,replacement_key)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+          (SELECT assistant_message_id FROM app.ai_tasks WHERE id=$6 AND owner_id=$2 AND conversation_id=$7),$15,$16) RETURNING *`,
           [
             randomUUID(),
             actor.userId,
@@ -308,10 +556,20 @@ export class BusinessConfirmations {
             proposal.digest,
             JSON.stringify(proposal),
             argumentDigest,
+            actor.entrypoint === 'internal-ai' ? 'inlineCard' : 'mcpForm',
+            JSON.stringify(await presentation(tx, call)),
+            replacement,
           ],
         )
       ).rows[0];
       if (!row) throw new Error('Confirmation proposal insert failed');
+      await this.assertTaskSources(tx, actor, row);
+      if (row.replacement_key && row.conversation_id)
+        await tx.query(
+          `UPDATE app.business_confirmations SET expires_at=LEAST(expires_at,clock_timestamp())
+          WHERE owner_id=$1 AND conversation_id=$2 AND replacement_key=$3 AND id<>$4 AND state='waitingConfirmation'`,
+          [row.owner_id, row.conversation_id, row.replacement_key, row.id],
+        );
       await audit(
         tx,
         actor,
@@ -328,7 +586,43 @@ export class BusinessConfirmations {
       return safe(row);
     });
   }
-  async get(actor: ActorContext, id: string) {
+  async getConversation(
+    actor: ActorContext,
+    conversationId: string,
+    id: string,
+  ) {
+    idSchema.parse(conversationId);
+    await this.db.transaction((tx) =>
+      conversationRow(tx, actor, conversationId),
+    );
+    const result = await this.get(actor, id);
+    if (
+      result.intent.conversationId !== conversationId ||
+      !result.intent.taskId
+    )
+      throw new DomainError('NOT_FOUND', '当前对话没有此执行卡。', 404);
+    return result;
+  }
+  async decide(
+    actor: ActorContext,
+    conversationId: string,
+    id: string,
+    raw: unknown,
+  ) {
+    if (actor.entrypoint !== 'web')
+      throw new DomainError(
+        'FORBIDDEN',
+        '只接受当前本人对话界面的按钮事件。',
+        403,
+      );
+    idSchema.parse(conversationId);
+    await this.getConversation(actor, conversationId, id);
+    return this.resolve(actor, id, raw, 'web-user-event', conversationId);
+  }
+  async resolveForm(actor: ActorContext, id: string, raw: unknown) {
+    return this.resolve(actor, id, raw, 'mcp-form-elicitation');
+  }
+  private async get(actor: ActorContext, id: string) {
     idSchema.parse(id);
     return this.db.transaction(async (tx) => {
       const row = (
@@ -340,31 +634,17 @@ export class BusinessConfirmations {
       if (!row)
         throw new DomainError('NOT_FOUND', '没有此账号的确认提案。', 404);
       await this.authorize(tx, actor, row);
-      return { confirmation: safe(row) };
-    });
-  }
-  async list(actor: ActorContext, taskId: string) {
-    if (actor.entrypoint !== 'web')
-      throw new DomainError('FORBIDDEN', '确认列表仅供本人平台界面。', 403);
-    idSchema.parse(taskId);
-    return this.db.transaction(async (tx) => {
-      await currentUser(tx, actor);
-      const rows = await tx.query<ConfirmationRow>(
-        'SELECT * FROM app.business_confirmations WHERE owner_id=$1 AND task_id=$2 ORDER BY created_at,id',
-        [actor.userId, taskId],
-      );
-      const confirmations = [];
-      for (const row of rows.rows) {
-        await this.authorize(tx, actor, row);
-        confirmations.push(safe(row));
-      }
-      return { confirmations };
+      return { intent: safe(row) };
     });
   }
   async listConversation(
     actor: ActorContext,
     conversationId: string,
     pendingOnly = true,
+    filter: {
+      messageId?: string | undefined;
+      taskId?: string | undefined;
+    } = {},
   ) {
     if (actor.entrypoint !== 'web')
       throw new DomainError('FORBIDDEN', '会话提案列表仅供本人平台界面。', 403);
@@ -374,30 +654,53 @@ export class BusinessConfirmations {
       const rows = await tx.query<ConfirmationRow>(
         `SELECT c.* FROM app.business_confirmations c WHERE c.owner_id=$1 AND c.origin='internal-ai' AND c.conversation_id=$2
          AND EXISTS(SELECT 1 FROM app.ai_tasks t WHERE t.id=c.task_id AND t.owner_id=$1 AND t.conversation_id=$2)
-         AND (NOT $3 OR c.state=ANY($4::text[])) ORDER BY c.created_at,c.id`,
+         AND (NOT $3 OR c.state=ANY($4::text[]))
+         AND ($5::uuid IS NULL OR c.message_id=$5) AND ($6::uuid IS NULL OR c.task_id=$6)
+         ORDER BY c.created_at,c.id LIMIT 1000`,
         [
           actor.userId,
           conversationId,
           pendingOnly,
           ['waitingConfirmation', 'executing', 'failed', 'unknown'],
+          filter.messageId ?? null,
+          filter.taskId ?? null,
         ],
       );
       const confirmations = [];
       for (const row of rows.rows) {
-        await this.authorize(tx, actor, row);
+        try {
+          await this.authorize(tx, actor, row);
+        } catch (error) {
+          if (
+            error instanceof DomainError &&
+            ['FORBIDDEN', 'NOT_FOUND', 'PRECONDITIONS_MISSING'].includes(
+              error.code,
+            )
+          )
+            continue;
+          throw error;
+        }
         confirmations.push(safe(row));
       }
-      return { confirmations };
+      return { intents: confirmations };
     });
   }
-  async resolve(
+  private async resolve(
     actor: ActorContext,
     id: string,
     raw: unknown,
     source: 'web-user-event' | 'mcp-form-elicitation',
+    expectedConversationId?: string,
   ) {
     idSchema.parse(id);
-    const input = resolveBusinessConfirmationInputSchema.parse(raw);
+    const parsed = actionIntentDecisionSchema.parse(raw);
+    const input = {
+      ...parsed,
+      decision:
+        parsed.decision === 'execute'
+          ? ('accept' as const)
+          : ('decline' as const),
+    };
     if (
       (source === 'web-user-event' && actor.entrypoint !== 'web') ||
       (source === 'mcp-form-elicitation' && actor.entrypoint !== 'official-mcp')
@@ -435,12 +738,36 @@ export class BusinessConfirmations {
       if (!found)
         throw new DomainError('NOT_FOUND', '没有此账号的确认提案。', 404);
       await this.authorize(tx, actor, found);
+      if (
+        expectedConversationId !== undefined &&
+        (found.conversation_id !== expectedConversationId ||
+          found.origin !== 'internal-ai' ||
+          found.interaction_kind !== 'inlineCard')
+      )
+        throw new DomainError('NOT_FOUND', '当前对话没有此可执行卡。', 404);
+      if (
+        source === 'mcp-form-elicitation' &&
+        found.interaction_kind !== 'mcpForm'
+      )
+        throw new DomainError('FORBIDDEN', '此提案不是当前MCP表单意图。', 403);
+      if (found.proposal_revision !== input.revision)
+        throw new DomainError(
+          'STALE_BASE_REVISION',
+          '执行卡版本已变化，请核对原卡。',
+          412,
+        );
       if (found.scope_digest !== input.scopeDigest)
         throw new DomainError(
           'BUSINESS_CONFLICT',
           '确认摘要与精确提案不一致。',
           409,
         );
+      if (
+        found.state === 'waitingConfirmation' &&
+        (found.interaction_kind === 'legacy' ||
+          found.expires_at.getTime() <= Date.now())
+      )
+        return { row: found, acceptedNow: false };
       if (
         input.decision === 'accept' &&
         !found.dispatch_claim &&
@@ -451,10 +778,18 @@ export class BusinessConfirmations {
         return { row: found, acceptedNow: false };
       const state: ConfirmationRow['state'] =
         input.decision === 'accept' ? 'executing' : 'declined';
-      await tx.query(
-        'UPDATE app.business_confirmations SET state=$2,resolution_source=$3,resolved_at=clock_timestamp() WHERE id=$1',
-        [id, state, source],
-      );
+      const transitioned = (
+        await tx.query<ConfirmationRow>(
+          'UPDATE app.business_confirmations SET state=$2,resolution_source=$3,resolved_at=clock_timestamp() WHERE id=$1 RETURNING *',
+          [id, state, source],
+        )
+      ).rows[0];
+      if (!transitioned)
+        throw new DomainError(
+          'OPERATION_RESULT_UNKNOWN',
+          '执行卡状态回执未取得，请查询原卡。',
+          409,
+        );
       await audit(
         tx,
         actor,
@@ -469,7 +804,7 @@ export class BusinessConfirmations {
         },
       );
       return {
-        row: { ...found, state },
+        row: transitioned,
         acceptedNow: input.decision === 'accept',
       };
     });
@@ -479,7 +814,7 @@ export class BusinessConfirmations {
       row.state !== 'executing' ||
       input.decision !== 'accept'
     )
-      return { confirmation: safe(row) };
+      return { intent: safe(row) };
     // Only this request that changed waiting→executing can dispatch. Concurrent/repeated resolution never replays.
     // Claim is identified by a separate locked transition above; completed/unknown records are always status-only.
     const receipt = await this.db.query<{ dispatch_claim: boolean }>(

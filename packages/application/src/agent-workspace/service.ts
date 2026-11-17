@@ -12,6 +12,8 @@ import {
   workspacePutSchema,
   workspaceReceiptSchema,
   workspaceTextInputSchema,
+  workspaceProvenanceSchema,
+  workspaceSourceSchema,
   type WorkspaceEntry,
 } from '../../../contracts/src/agent-workspace.js';
 import {
@@ -29,8 +31,11 @@ import { DomainError, stale } from '../errors.js';
 import { FilesService } from '../files/service.js';
 import { registeredFilePolicyIntent } from '../files/resource-policy.js';
 import { canonicalJson } from '../operations/service.js';
+import { attachOriginalResource } from './originals.js';
+import { z } from 'zod';
+import { requireProject } from '../access/policy.js';
 
-interface EntryRow {
+export interface EntryRow {
   id: string;
   path: string;
   row_version: number;
@@ -43,12 +48,34 @@ interface EntryRow {
   updated_at: Date;
   resource_deleted_at: Date | null;
   status: string;
+  kind: 'original' | 'artifact' | 'legacy';
+  original_name: string | null;
+  origin_message_id: string | null;
+  created_at: Date;
+  created_by: string | null;
+  created_by_name: string | null;
+  message_id: string | null;
+  task_id: string | null;
+  base_revision: number | null;
+  sources: unknown;
 }
-const projection = `SELECT e.*,v.resource_id,f.media_type,f.declared_bytes,f.declared_sha256,
+const visibleSourcesSql = `(SELECT COALESCE(jsonb_agg(source),'[]'::jsonb) FROM jsonb_array_elements(v.sources) source
+   JOIN app.file_resources sf ON sf.id::text=source->>'resourceId'
+   WHERE sf.deleted_at IS NULL AND sf.status='verified' AND (
+     (sf.owner_scope='personal' AND sf.owner_user_id=e.owner_id) OR
+     (sf.owner_scope='project' AND EXISTS(SELECT 1 FROM app.project_members sm JOIN app.projects sp ON sp.id=sm.project_id
+      WHERE sm.user_id=e.owner_id AND sm.project_id=sf.project_id AND sm.active AND sp.active))))`;
+export const workspaceProjection = `SELECT e.*,v.resource_id,v.created_by,u.display_name created_by_name,
+  v.message_id,v.task_id,v.base_revision,${visibleSourcesSql} sources,
+  f.media_type,f.declared_bytes,f.declared_sha256,
   f.deleted_at resource_deleted_at,f.status FROM app.agent_workspace_entries e
   JOIN app.agent_workspace_versions v ON v.entry_id=e.id AND v.revision=e.revision
-  JOIN app.file_resources f ON f.id=v.resource_id`;
-function dto(row: EntryRow): WorkspaceEntry {
+  JOIN app.file_resources f ON f.id=v.resource_id LEFT JOIN app.users u ON u.id=v.created_by`;
+const projection = workspaceProjection;
+export const workspaceResourceAccessSql = `(f.owner_scope='personal' AND f.owner_user_id=e.owner_id OR
+  f.owner_scope='project' AND EXISTS(SELECT 1 FROM app.project_members fm JOIN app.projects fp ON fp.id=fm.project_id
+    WHERE fm.user_id=e.owner_id AND fm.project_id=f.project_id AND fm.active AND fp.active))`;
+export function workspaceEntryDto(row: EntryRow): WorkspaceEntry {
   return workspaceEntrySchema.parse({
     id: row.id,
     path: row.path,
@@ -61,7 +88,24 @@ function dto(row: EntryRow): WorkspaceEntry {
     deletedAt: row.deleted_at?.toISOString() ?? null,
     updatedAt: row.updated_at.toISOString(),
     available: row.resource_deleted_at === null && row.status === 'verified',
+    kind: row.kind,
+    originalName: row.original_name,
+    originMessageId: row.origin_message_id,
+    createdAt: row.created_at.toISOString(),
+    provenance: workspaceProvenanceSchema.parse({
+      createdBy: row.created_by,
+      createdByName: row.created_by_name,
+      messageId: row.message_id,
+      taskId: row.task_id,
+      baseRevision: row.base_revision,
+      sources: row.sources,
+    }),
   });
+}
+const dto = workspaceEntryDto;
+export interface WorkspaceArtifactProvenance {
+  taskId: string;
+  sources: z.infer<typeof workspaceSourceSchema>[];
 }
 const digest = (value: unknown) =>
   createHash('sha256').update(canonicalJson(value)).digest('hex');
@@ -125,7 +169,7 @@ export class AgentWorkspaceService {
   ) {
     const row = (
       await tx.query<EntryRow>(
-        `${projection} WHERE e.id=$1 AND e.conversation_id=$2 AND e.owner_id=$3`,
+        `${projection} WHERE e.id=$1 AND e.conversation_id=$2 AND e.owner_id=$3 AND ${workspaceResourceAccessSql}`,
         [idSchema.parse(entryId), conversationId, actor.userId],
       )
     ).rows[0];
@@ -135,6 +179,7 @@ export class AgentWorkspaceService {
 
   private async known(
     tx: SqlExecutor,
+    actor: ActorContext,
     conversationId: string,
     commandId: string,
     payloadDigest: string,
@@ -152,7 +197,50 @@ export class AgentWorkspaceService {
         '原工作区命令已绑定不同内容。',
         409,
       );
-    return { ...workspaceReceiptSchema.parse(row.response), replayed: true };
+    return {
+      ...(await this.readableReceipt(tx, actor, conversationId, row.response)),
+      replayed: true,
+    };
+  }
+
+  private async readableReceipt(
+    tx: SqlExecutor,
+    actor: ActorContext,
+    conversationId: string,
+    raw: unknown,
+  ) {
+    const receipt = workspaceReceiptSchema.parse(raw);
+    await this.authorizeImportResource(
+      tx,
+      actor,
+      conversationId,
+      receipt.entry.resourceId,
+    );
+    const row = (
+      await tx.query<EntryRow>(
+        `${projection.replace('v.revision=e.revision', 'v.revision=$4')} WHERE e.id=$1 AND e.conversation_id=$2 AND e.owner_id=$3 AND ${workspaceResourceAccessSql}`,
+        [
+          receipt.entry.id,
+          conversationId,
+          actor.userId,
+          receipt.entry.revision,
+        ],
+      )
+    ).rows[0];
+    if (!row || row.resource_id !== receipt.entry.resourceId)
+      throw new DomainError(
+        'NOT_FOUND',
+        '原文件回执对应的版本已不可访问。',
+        404,
+      );
+    return workspaceReceiptSchema.parse({
+      ...receipt,
+      entry: {
+        ...dto(row),
+        revision: receipt.entry.revision,
+        rowVersion: receipt.entry.rowVersion,
+      },
+    });
   }
 
   private async saveReceipt(
@@ -162,16 +250,19 @@ export class AgentWorkspaceService {
     commandId: string,
     payloadDigest: string,
     row: EntryRow,
+    request?: { path: string; expectedRowVersion: number },
   ) {
     const receipt = { entry: dto(row), replayed: false };
     await tx.query(
-      'INSERT INTO app.agent_workspace_commands(conversation_id,owner_id,command_id,payload_digest,response) VALUES($1,$2,$3,$4,$5::jsonb)',
+      'INSERT INTO app.agent_workspace_commands(conversation_id,owner_id,command_id,payload_digest,response,request_path,request_expected_row_version) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7)',
       [
         conversationId,
         actor.userId,
         commandId,
         payloadDigest,
         JSON.stringify(receipt),
+        request?.path ?? null,
+        request?.expectedRowVersion ?? null,
       ],
     );
     return receipt;
@@ -185,7 +276,7 @@ export class AgentWorkspaceService {
     return this.db.transaction(async (tx) => {
       await this.authorize(tx, actor, conversationId);
       const rows = await tx.query<EntryRow>(
-        `${projection} WHERE e.conversation_id=$1 AND e.owner_id=$2 AND ($3 OR e.deleted_at IS NULL) ORDER BY e.path,e.id LIMIT $4`,
+        `${projection} WHERE e.conversation_id=$1 AND e.owner_id=$2 AND ($3 OR e.deleted_at IS NULL) AND ${workspaceResourceAccessSql} ORDER BY e.path,e.id LIMIT $4`,
         [conversationId, actor.userId, includeDeleted, workspaceMaximumEntries],
       );
       return { entries: rows.rows.map(dto) };
@@ -205,10 +296,19 @@ export class AgentWorkspaceService {
         created_at: Date;
         deleted_at: Date | null;
         status: string;
+        created_by: string | null;
+        created_by_name: string | null;
+        message_id: string | null;
+        task_id: string | null;
+        base_revision: number | null;
+        sources: unknown;
       }>(
-        `SELECT v.*,f.media_type,f.declared_bytes,f.declared_sha256,f.deleted_at,f.status
-        FROM app.agent_workspace_versions v JOIN app.file_resources f ON f.id=v.resource_id
-        WHERE v.entry_id=$1 ORDER BY v.revision DESC`,
+        `SELECT v.entry_id,v.revision,v.resource_id,v.created_at,v.created_by,v.message_id,v.task_id,v.base_revision,
+        ${visibleSourcesSql} sources,u.display_name created_by_name,f.media_type,f.declared_bytes,f.declared_sha256,f.deleted_at,f.status
+        FROM app.agent_workspace_versions v JOIN app.agent_workspace_entries e ON e.id=v.entry_id
+        JOIN app.file_resources f ON f.id=v.resource_id
+        LEFT JOIN app.users u ON u.id=v.created_by
+        WHERE v.entry_id=$1 AND ${workspaceResourceAccessSql} ORDER BY v.revision DESC`,
         [entryId],
       );
       return {
@@ -221,6 +321,14 @@ export class AgentWorkspaceService {
           sha256: version.declared_sha256,
           createdAt: version.created_at.toISOString(),
           available: !version.deleted_at && version.status === 'verified',
+          provenance: workspaceProvenanceSchema.parse({
+            createdBy: version.created_by,
+            createdByName: version.created_by_name,
+            messageId: version.message_id,
+            taskId: version.task_id,
+            baseRevision: version.base_revision,
+            sources: version.sources,
+          }),
         })),
       };
     });
@@ -242,7 +350,9 @@ export class AgentWorkspaceService {
       ).rows[0];
       return workspaceCommandReceiptSchema.parse({
         found: Boolean(row),
-        receipt: row?.response ?? null,
+        receipt: row
+          ? await this.readableReceipt(tx, actor, conversationId, row.response)
+          : null,
       });
     });
   }
@@ -360,6 +470,12 @@ export class AgentWorkspaceService {
   }
 
   async putText(actor: ActorContext, conversationId: string, raw: unknown) {
+    if (actor.entrypoint !== 'internal-ai')
+      throw new DomainError(
+        'FORBIDDEN',
+        '文件中心只支持查看；请通过对话修改成果。',
+        403,
+      );
     const { text, ...input } = workspaceTextInputSchema.parse(raw);
     if (Buffer.byteLength(text, 'utf8') > workspaceMaximumTextBytes)
       throw new DomainError('FILE_TOO_LARGE', '文本编辑最多1MiB。', 413);
@@ -390,7 +506,10 @@ export class AgentWorkspaceService {
     conversationId: string,
     raw: unknown,
     bytes: Uint8Array,
+    provenance?: WorkspaceArtifactProvenance,
   ) {
+    if (actor.entrypoint !== 'internal-ai' || !provenance)
+      throw new DomainError('FORBIDDEN', '成果只能由当前受控任务生成。', 403);
     const input = workspacePutSchema.parse(raw);
     if (bytes.length > workspaceMaximumFileBytes)
       throw new DomainError(
@@ -404,11 +523,14 @@ export class AgentWorkspaceService {
       ...input,
       sha256,
       bytes: bytes.length,
+      provenance,
     });
     const known = await this.db.transaction(async (tx) => {
       await this.authorize(tx, actor, conversationId, true);
+      await this.artifactProvenance(tx, actor, conversationId, provenance);
       const receipt = await this.known(
         tx,
+        actor,
         conversationId,
         input.commandId,
         payloadDigest,
@@ -441,6 +563,8 @@ export class AgentWorkspaceService {
       conversationId,
       { ...input, resourceId: artifact.file.id },
       payloadDigest,
+      undefined,
+      provenance,
     );
   }
 
@@ -528,8 +652,13 @@ export class AgentWorkspaceService {
       if (originalScope.taskId !== taskScope.taskId)
         await assertTaskCapability(tx, actor, originalScope, 'office');
       const row = (
-        await tx.query<{ response: unknown; payload_digest: string }>(
-          'SELECT response,payload_digest FROM app.agent_workspace_commands WHERE conversation_id=$1 AND command_id=$2 AND owner_id=$3',
+        await tx.query<{
+          response: unknown;
+          payload_digest: string;
+          request_path: string | null;
+          request_expected_row_version: number | null;
+        }>(
+          'SELECT response,payload_digest,request_path,request_expected_row_version FROM app.agent_workspace_commands WHERE conversation_id=$1 AND command_id=$2 AND owner_id=$3',
           [taskScope.conversationId, storedCommand, actor.userId],
         )
       ).rows[0];
@@ -542,8 +671,9 @@ export class AgentWorkspaceService {
             action: 'task-import',
             taskId: originalScope.taskId,
             commandId,
-            path: receipt.entry.path,
-            expectedRowVersion: receipt.entry.rowVersion - 1,
+            path: row.request_path ?? receipt.entry.path,
+            expectedRowVersion:
+              row.request_expected_row_version ?? receipt.entry.rowVersion - 1,
             resourceId: receipt.entry.resourceId,
           })
       )
@@ -561,7 +691,14 @@ export class AgentWorkspaceService {
         );
       return workspaceCommandReceiptSchema.parse({
         found: Boolean(row),
-        receipt,
+        receipt: receipt
+          ? await this.readableReceipt(
+              tx,
+              actor,
+              taskScope.conversationId,
+              receipt,
+            )
+          : null,
       });
     });
     if (result.receipt)
@@ -582,12 +719,19 @@ export class AgentWorkspaceService {
         row_version: number;
         deleted_at: Date | null;
         revision: number;
+        kind: string;
       }>(
-        'SELECT id,row_version,deleted_at,revision FROM app.agent_workspace_entries WHERE conversation_id=$1 AND path=$2 FOR UPDATE',
+        'SELECT id,row_version,deleted_at,revision,kind FROM app.agent_workspace_entries WHERE conversation_id=$1 AND path=$2 FOR UPDATE',
         [conversationId, path],
       )
     ).rows[0];
     if ((row?.row_version ?? 0) !== expected) stale();
+    if (row?.kind === 'original')
+      throw new DomainError(
+        'BUSINESS_CONFLICT',
+        '原件只读，请将处理结果保存为新的成果文件。',
+        409,
+      );
     if (row?.deleted_at)
       throw new DomainError(
         'BUSINESS_CONFLICT',
@@ -653,7 +797,7 @@ export class AgentWorkspaceService {
         declared_bytes: string;
         declared_sha256: string;
       }>(
-        `SELECT * FROM app.file_resources WHERE id=$1 AND owner_scope='personal' AND owner_user_id=$2
+        `SELECT * FROM app.file_resources WHERE id=$1 AND (owner_scope='project' OR owner_user_id=$2)
         AND deleted_at IS NULL AND status='verified' FOR SHARE`,
         [resourceId, actor.userId],
       )
@@ -664,6 +808,8 @@ export class AgentWorkspaceService {
         '只能接入本人已校验且未删除的个人文件。',
         404,
       );
+    if (resource.owner_scope === 'project' && resource.project_id)
+      await requireProject(tx, actor, resource.project_id, 'files.transfer');
     if (BigInt(resource.declared_bytes) > BigInt(workspaceMaximumFileBytes))
       throw new DomainError(
         'FILE_TOO_LARGE',
@@ -683,6 +829,57 @@ export class AgentWorkspaceService {
       throw new DomainError('FORBIDDEN', '内部产物没有当前会话绑定。', 403);
   }
 
+  private async artifactProvenance(
+    tx: SqlExecutor,
+    actor: ActorContext,
+    conversationId: string,
+    provenance: WorkspaceArtifactProvenance,
+  ) {
+    await assertTaskCapability(
+      tx,
+      actor,
+      { conversationId, taskId: provenance.taskId },
+      'office',
+      { active: true, allowCompleted: true },
+    );
+    const task = (
+      await tx.query<{ assistant_message_id: string }>(
+        'SELECT assistant_message_id FROM app.ai_tasks WHERE id=$1 AND owner_id=$2 AND conversation_id=$3',
+        [provenance.taskId, actor.userId, conversationId],
+      )
+    ).rows[0];
+    if (!task)
+      throw new DomainError('NOT_FOUND', '当前成果任务不可访问。', 404);
+    const sources = z
+      .array(workspaceSourceSchema)
+      .max(32)
+      .parse(provenance.sources);
+    for (const source of sources) {
+      const row = (
+        await tx.query<{ resource_id: string; path: string }>(
+          `SELECT v.resource_id,e.path FROM app.agent_workspace_entries e JOIN app.agent_workspace_versions v ON v.entry_id=e.id
+         JOIN app.file_resources f ON f.id=v.resource_id WHERE e.id=$1 AND e.conversation_id=$2 AND e.owner_id=$3
+         AND e.deleted_at IS NULL AND v.revision=$4 AND f.deleted_at IS NULL AND f.status='verified'`,
+          [source.entryId, conversationId, actor.userId, source.revision],
+        )
+      ).rows[0];
+      if (!row || row.resource_id !== source.resourceId)
+        throw new DomainError(
+          'NOT_FOUND',
+          '成果来源版本已失效，未保存新成果。',
+          404,
+        );
+      await this.authorizeImportResource(
+        tx,
+        actor,
+        conversationId,
+        source.resourceId,
+      );
+      source.path = row.path;
+    }
+    return { messageId: task.assistant_message_id, sources };
+  }
+
   private async acceptResource(
     actor: ActorContext,
     conversationId: string,
@@ -694,6 +891,7 @@ export class AgentWorkspaceService {
     },
     payloadDigest: string,
     taskScope?: AgentWorkspaceTaskScope,
+    provenance?: WorkspaceArtifactProvenance,
   ) {
     return this.db.transaction(async (tx) => {
       await this.authorize(tx, actor, conversationId, true);
@@ -725,6 +923,7 @@ export class AgentWorkspaceService {
       }
       const known = await this.known(
         tx,
+        actor,
         conversationId,
         input.commandId,
         payloadDigest,
@@ -737,6 +936,41 @@ export class AgentWorkspaceService {
         input.resourceId,
       );
       if (known) return known;
+      if (!provenance) {
+        if (input.expectedRowVersion !== 0)
+          throw new DomainError(
+            'BUSINESS_CONFLICT',
+            '导入原件不允许替换已有文件。',
+            409,
+          );
+        const entryId = await attachOriginalResource(
+          tx,
+          actor,
+          conversationId,
+          input.resourceId,
+          null,
+        );
+        if (!taskScope)
+          await tx.query(
+            "INSERT INTO app.resource_references(resource_id,reference_type,reference_id,created_by) VALUES($1,'conversation',$2,$3) ON CONFLICT DO NOTHING",
+            [input.resourceId, conversationId, actor.userId],
+          );
+        return this.saveReceipt(
+          tx,
+          actor,
+          conversationId,
+          input.commandId,
+          payloadDigest,
+          await this.entry(tx, actor, conversationId, entryId),
+          input,
+        );
+      }
+      const trusted = await this.artifactProvenance(
+        tx,
+        actor,
+        conversationId,
+        provenance,
+      );
       const existing = await this.checkPathVersion(
         tx,
         conversationId,
@@ -754,7 +988,7 @@ export class AgentWorkspaceService {
       } else {
         const inserted = (
           await tx.query<{ id: string }>(
-            'INSERT INTO app.agent_workspace_entries(conversation_id,owner_id,path) VALUES($1,$2,$3) RETURNING id',
+            "INSERT INTO app.agent_workspace_entries(conversation_id,owner_id,path,kind) VALUES($1,$2,$3,'artifact') RETURNING id",
             [conversationId, actor.userId, input.path],
           )
         ).rows[0];
@@ -763,8 +997,18 @@ export class AgentWorkspaceService {
         entryId = inserted.id;
       }
       await tx.query(
-        'INSERT INTO app.agent_workspace_versions(entry_id,revision,resource_id) VALUES($1,$2,$3)',
-        [entryId, revision, input.resourceId],
+        `INSERT INTO app.agent_workspace_versions(entry_id,revision,resource_id,created_by,message_id,task_id,base_revision,sources)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)`,
+        [
+          entryId,
+          revision,
+          input.resourceId,
+          actor.userId,
+          trusted.messageId,
+          provenance.taskId,
+          existing?.revision ?? null,
+          JSON.stringify(trusted.sources),
+        ],
       );
       if (!taskScope)
         await tx.query(
@@ -778,6 +1022,7 @@ export class AgentWorkspaceService {
         input.commandId,
         payloadDigest,
         await this.entry(tx, actor, conversationId, entryId),
+        input,
       );
     });
   }
@@ -794,12 +1039,19 @@ export class AgentWorkspaceService {
       await this.authorize(tx, actor, conversationId, true);
       const known = await this.known(
         tx,
+        actor,
         conversationId,
         input.commandId,
         payloadDigest,
       );
       if (known) return known;
       const row = await this.entry(tx, actor, conversationId, entryId);
+      if (row.kind === 'original')
+        throw new DomainError(
+          'BUSINESS_CONFLICT',
+          '原件只读，不允许重命名、修改、移除或替换版本。',
+          409,
+        );
       if (row.row_version !== input.expectedRowVersion) stale();
       if (input.action === 'rename') {
         if (row.deleted_at)
@@ -841,8 +1093,15 @@ export class AgentWorkspaceService {
           input.revision,
         );
         await tx.query(
-          'INSERT INTO app.agent_workspace_versions(entry_id,revision,resource_id) VALUES($1,$2,$3)',
-          [entryId, row.revision + 1, resourceId],
+          'INSERT INTO app.agent_workspace_versions(entry_id,revision,resource_id,created_by,base_revision,sources) SELECT $1,$2,$3,$4,$5,sources FROM app.agent_workspace_versions WHERE entry_id=$1 AND revision=$6',
+          [
+            entryId,
+            row.revision + 1,
+            resourceId,
+            actor.userId,
+            input.revision,
+            input.revision,
+          ],
         );
         await tx.query(
           'UPDATE app.agent_workspace_entries SET deleted_at=NULL,revision=revision+1,row_version=row_version+1,updated_at=clock_timestamp() WHERE id=$1',

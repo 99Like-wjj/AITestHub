@@ -21,6 +21,19 @@ export function usageHeatmapLevel(
   if (value <= third) return 3;
   return 4;
 }
+export function usageHeatmapText(date: string, tokens: string | null) {
+  return `${date}；${tokens === null ? '无已记录 Token' : `${BigInt(tokens).toLocaleString('zh-CN')} Token`}`;
+}
+export function groupModelRowSpan(
+  rows: readonly { model_key: string }[],
+  index: number,
+  key: string,
+) {
+  if (index > 0 && rows[index - 1]?.model_key === key) return 0;
+  let span = 1;
+  while (rows[index + span]?.model_key === key) span++;
+  return span;
+}
 
 export function usageHeatmapLegend(
   scope: UsageHeatmapScope,

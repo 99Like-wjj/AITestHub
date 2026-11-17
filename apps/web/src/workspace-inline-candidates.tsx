@@ -14,7 +14,7 @@ import {
   HistoryOutlined,
   ApiOutlined,
   FileTextOutlined,
-  AppstoreOutlined,
+  CodeSandboxOutlined,
   LoadingOutlined,
 } from '@ant-design/icons';
 import {
@@ -39,7 +39,7 @@ import {
 } from './workspace-inline-keyboard';
 import './workspace-inline-candidates.css';
 export interface WorkspaceInlineCandidatesHandle {
-  handleKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => boolean;
+  handleKeyDown: (event: KeyboardEvent<HTMLElement>) => boolean;
 }
 export interface WorkspaceInlineCandidatesProps {
   trigger: '@' | '/';
@@ -215,7 +215,7 @@ export const WorkspaceInlineCandidates = forwardRef<
                       : entry.availability === 'deferred'
                         ? '延期'
                         : '规则不可用',
-                  icon: <AppstoreOutlined />,
+                  icon: <CodeSandboxOutlined />,
                   disabled: entry.availability !== 'available',
                   ...(entry.availability === 'available' && skill.success
                     ? { skillId: skill.data }

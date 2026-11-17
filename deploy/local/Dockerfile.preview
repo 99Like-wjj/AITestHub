@@ -1,0 +1,15 @@
+# Fixed, independently verified Office guest image; no application credentials.
+ARG OFFICE_IMAGE
+FROM ${OFFICE_IMAGE}
+USER root
+ARG LIBREOFFICE_VERSION
+RUN test -n "$LIBREOFFICE_VERSION" \
+    && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=30 update \
+    && apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=30 install -y --no-install-recommends \
+        "libreoffice-writer=$LIBREOFFICE_VERSION" \
+        "libreoffice-calc=$LIBREOFFICE_VERSION" \
+        "libreoffice-impress=$LIBREOFFICE_VERSION" \
+    && rm -rf /var/lib/apt/lists/*
+# The existing trusted sandbox supplies nonroot execution, readonly root,
+# no network and bounded tmpfs. No daemon, browser, macro or network grant added.

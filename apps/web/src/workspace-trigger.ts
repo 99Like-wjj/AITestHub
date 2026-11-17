@@ -14,10 +14,15 @@ export function composerTrigger(
 ): ComposerTrigger | null {
   if (!Number.isInteger(caret) || caret < 0 || caret > text.length) return null;
   const prefix = text.slice(0, caret),
-    match = /(?:^|\s)([@/])([^\s@/]{0,80})$/u.exec(prefix);
+    match = /(?:^|[\s\u3400-\u9fff。！？；，：])([@/])([^\s@/]{0,80})$/u.exec(
+      prefix,
+    );
   if (!match) return null;
   const symbol = match[1] as '@' | '/',
     query = match[2] ?? '';
+  // Skill names/IDs are not file paths or complete prose clauses. Reference
+  // queries keep punctuation because uploaded file names can contain it.
+  if (symbol === '/' && /[。！？；，：、,.!?;:\\]/u.test(query)) return null;
   return { symbol, query, start: caret - query.length - 1, end: caret };
 }
 

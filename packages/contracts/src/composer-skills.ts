@@ -21,8 +21,8 @@ export function serializeComposerSkills(
   return [...selected].map((id) => `/${id} `).join('') + text;
 }
 
-/** Only the recognized contiguous prefix is metadata; every remaining body
- * character, including excess whitespace and unknown commands, is preserved. */
+/** Recognized inline markers are metadata; unrelated body text is preserved.
+ * Legacy contiguous prefixes keep their original whitespace behavior. */
 export function splitComposerSkills(raw: string): {
   skillIds: PlatformGuidanceSkillId[];
   text: string;
@@ -38,5 +38,29 @@ export function splitComposerSkills(raw: string): {
     offset += match[0].length;
     if (raw[offset] === ' ') offset++;
   }
-  return { skillIds: [...selected], text: raw.slice(offset) };
+  // New composers place recognized markers at their actual text positions.
+  // They are user-content metadata only, with the same IDs and no execution authority.
+  const source = raw.slice(offset);
+  const body = source.replace(
+    /\[\/([a-z][a-z0-9-]{0,79})\]\(ath-skill:\1\)|\/([a-z][a-z0-9-]{0,79})(?=$|\s)/gu,
+    (
+      match: string,
+      marked: string | undefined,
+      legacy: string | undefined,
+      index: number,
+    ) => {
+      const parsed = platformGuidanceSkillIdSchema.safeParse(marked ?? legacy);
+      if (
+        !parsed.success ||
+        (!marked &&
+          index > 0 &&
+          /[A-Za-z0-9_./:@-]/.test(source[index - 1] ?? '')) ||
+        selected.size >= maximumSkillPrefixTokens
+      )
+        return match;
+      selected.add(parsed.data);
+      return '';
+    },
+  );
+  return { skillIds: [...selected], text: body };
 }

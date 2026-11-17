@@ -14,7 +14,7 @@ import {
   createBusinessRegistry,
   type BusinessServices,
 } from '../../../packages/application/src/tool-registry/business.js';
-import { BusinessConfirmations } from '../../../packages/application/src/tool-registry/confirmations.js';
+import { ActionIntents } from '../../../packages/application/src/tool-registry/action-intents.js';
 import { DomainError } from '../../../packages/application/src/errors.js';
 
 type SecureCall = (work: () => Promise<unknown>) => Promise<CallToolResult>;
@@ -32,7 +32,7 @@ export function registerBusinessMcpTools(
   services: BusinessServices,
 ): void {
   const registry = createBusinessRegistry(db, services);
-  const confirmations = new BusinessConfirmations(db, registry);
+  const confirmations = new ActionIntents(db, registry);
   for (const tool of registry.tools.values()) {
     if (tool.internalOnly) continue;
     server.registerTool(
@@ -90,7 +90,6 @@ export function registerBusinessMcpTools(
               reason: 'CLIENT_FORM_ELICITATION_UNAVAILABLE',
               compatibility:
                 '此客户端未声明标准表单交互能力；没有将Key或模型文字当成人已确认。',
-              confirmationUrl: `/#business-confirmations?confirmationId=${pending.id}`,
               objectLinks: pending.proposal.links,
             };
           const key = `confirm-${pending.id}`;
@@ -115,19 +114,17 @@ export function registerBusinessMcpTools(
                 response.action === 'cancel' ||
                 accepted?.confirm === false)
             )
-              return confirmations.resolve(
-                actor,
-                pending.id,
-                { scopeDigest: pending.scopeDigest, decision: 'decline' },
-                'mcp-form-elicitation',
-              );
+              return confirmations.resolveForm(actor, pending.id, {
+                revision: pending.revision,
+                scopeDigest: pending.scopeDigest,
+                decision: 'cancel',
+              });
             if (accepted?.confirm === true)
-              return confirmations.resolve(
-                actor,
-                pending.id,
-                { scopeDigest: pending.scopeDigest, decision: 'accept' },
-                'mcp-form-elicitation',
-              );
+              return confirmations.resolveForm(actor, pending.id, {
+                revision: pending.revision,
+                scopeDigest: pending.scopeDigest,
+                decision: 'execute',
+              });
             throw new DomainError(
               'VALIDATION_ERROR',
               '客户端确认响应不符合表单契约，没有执行。',

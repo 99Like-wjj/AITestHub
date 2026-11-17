@@ -24,16 +24,6 @@ export async function invalidateRestoredAgentExecution(
       "UPDATE app.agent_schedule_occurrences SET state=CASE WHEN state='claimed' THEN 'cancelled' ELSE 'unknown' END,error_code='RESTORED_NOT_REPLAYED',finished_at=COALESCE(finished_at,clock_timestamp()) WHERE state IN ('claimed','dispatching','enqueued')",
     );
   }
-  if (await present('agent_browser_sessions')) {
-    await tx.query(
-      "UPDATE app.agent_browser_operations SET plan=NULL,state=CASE WHEN state='waitingConfirmation' THEN 'cancelled' ELSE 'unknown' END,error_code='RESTORED_RUNTIME_DETACHED',row_version=row_version+1,finished_at=COALESCE(finished_at,clock_timestamp()) WHERE state IN ('waitingConfirmation','dispatching')",
-    );
-    // This restored DB does not own the source process or its cookies. Closed/detached
-    // is distinct from confirmed physical cleanup; no cleanup call is sent to source.
-    await tx.query(
-      "UPDATE app.agent_browser_sessions SET state='closed',control='agent',private_state=false,cleanup_pending=false,current_url=NULL,observation_id=NULL,observation_hash=NULL,document_id=NULL,row_version=row_version+1,updated_at=clock_timestamp()",
-    );
-  }
   if (await present('agent_calculation_runs'))
     await tx.query(
       "UPDATE app.agent_calculation_runs SET state='unknown',cancel_requested=true,error_code='RESTORED_NOT_REPLAYED',finished_at=COALESCE(finished_at,clock_timestamp()) WHERE state IN ('prepared','running','publishing')",

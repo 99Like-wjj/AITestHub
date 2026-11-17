@@ -4,7 +4,7 @@ import {
   AppstoreOutlined,
   BookOutlined,
   CloseOutlined,
-  ExperimentOutlined,
+  CodeSandboxOutlined,
   FileExcelOutlined,
   FileImageOutlined,
   FileOutlined,
@@ -39,7 +39,7 @@ export function WorkspaceReferenceIcon({
       fallback = <BookOutlined />;
       break;
     case 'skill':
-      fallback = <ExperimentOutlined />;
+      fallback = <CodeSandboxOutlined />;
       break;
     case 'plugin':
     case 'externalMcpConnection':

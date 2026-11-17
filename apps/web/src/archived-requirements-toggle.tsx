@@ -5,10 +5,12 @@ export function ArchivedRequirementsToggle({
   checked,
   onChange,
   disabled = false,
+  label = '显示已归档需求',
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
   disabled?: boolean;
+  label?: string;
 }) {
   const id = useId();
   return (
@@ -19,9 +21,9 @@ export function ArchivedRequirementsToggle({
         checked={checked}
         disabled={disabled}
         onChange={onChange}
-        aria-label="显示已归档需求"
+        aria-label={label}
       />
-      <span>显示已归档需求</span>
+      <span>{label}</span>
     </label>
   );
 }

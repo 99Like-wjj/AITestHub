@@ -28,6 +28,30 @@ export class ExternalMcpController {
     'invocations/{*path}',
   ])
   async handle(@Req() req: Request, @Res() res: Response) {
+    if (
+      req.method === 'POST' &&
+      /\/invocations\/[^/]+\/(resolve|cancel)\/?$/.test(req.path)
+    ) {
+      let origin: URL | undefined;
+      try {
+        origin = req.header('origin')
+          ? new URL(req.header('origin')!)
+          : undefined;
+      } catch {
+        origin = undefined;
+      }
+      if (
+        req.header('sec-fetch-site') === 'cross-site' ||
+        !origin ||
+        !/^https?:$/.test(origin.protocol) ||
+        origin.host !== req.get('host')
+      )
+        throw new DomainError(
+          'FORBIDDEN',
+          '外发决定须由当前平台页面的本人确认卡提交。',
+          403,
+        );
+    }
     if (req.header('authorization') !== undefined)
       throw new DomainError(
         'FORBIDDEN',

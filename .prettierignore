@@ -26,7 +26,10 @@ packages/contracts/src/**
 !packages/contracts/src/agent-office.ts
 !packages/contracts/src/agent-repository.ts
 !packages/contracts/src/agent-retrieval.ts
-!packages/contracts/src/agent-browser.ts
+!packages/contracts/src/file-preview.ts
+!packages/contracts/src/action-intents.ts
+!packages/contracts/src/human-confirmation.ts
+!packages/contracts/src/composer-skills.ts
 tooling/local-client/contracts/
 **/pnpm-lock.yaml
 **/*.snapshot.json

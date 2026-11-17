@@ -618,16 +618,14 @@ export const personalUsageSchema = z.strictObject({
       z.strictObject({
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
         tokens: decimalCountSchema.nullable(),
-        unknown_calls: decimalCountSchema,
-        component_unknown_calls: decimalCountSchema,
-        confirmed_requests: decimalCountSchema,
-        unknown_request_intents: decimalCountSchema,
       }),
     )
     .length(365),
   models: z.array(
     z.strictObject({
-      model_id: z.string(),
+      model_key: sha256Schema,
+      model_display_name: z.string().min(1).max(200),
+      model_service_name: z.string().min(1).max(200),
       source: sourceSchema,
       ledger_rows: decimalCountSchema,
       ...usageCounters,

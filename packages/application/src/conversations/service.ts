@@ -9,6 +9,7 @@ import {
   scheduledTaskTemplateSchema,
 } from '../../../contracts/src/agent-schedules.js';
 import { assertNewWorkAllowed } from '../recovery/maintenance.js';
+import { attachOriginalResource } from '../agent-workspace/originals.js';
 import { z } from 'zod';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import {
@@ -1204,6 +1205,20 @@ export class ConversationsService {
             "INSERT INTO app.resource_references(resource_id,project_id,reference_type,reference_id,created_by) VALUES($1,$2,'conversation',$3,$4) ON CONFLICT DO NOTHING",
             [resourceId, source.project_id, conversationId, actor.userId],
           );
+          if (
+            frozenReferences.some(
+              (ref) =>
+                ref.reference.kind === 'resource' &&
+                ref.reference.resourceId === resourceId,
+            )
+          )
+            await attachOriginalResource(
+              tx,
+              actor,
+              conversationId,
+              resourceId,
+              userMessageId,
+            );
         }
         await tx.query(
           'UPDATE app.ai_conversations SET default_title=CASE WHEN $2 AND alias IS NULL THEN $3 ELSE default_title END,updated_at=clock_timestamp(),row_version=row_version+1 WHERE id=$1',

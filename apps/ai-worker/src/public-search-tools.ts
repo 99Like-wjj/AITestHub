@@ -36,7 +36,8 @@ export function publicSearchModelReceipt(
     publicQuery: row.publicQuery ?? null,
     toolSendIntents: row.toolSends,
     errorCode: row.errorCode,
-    confirmationUrl: `/#external-mcp?invocationId=${row.id}`,
+    interaction: 'inline-external-consent',
+    statusPath: `/api/v1/external-mcp/invocations/${row.id}`,
     ...(row.state === 'completed' && parsed.success
       ? {
           search: {
@@ -52,7 +53,7 @@ export function publicSearchModelReceipt(
       : {}),
     notice:
       row.state === 'waitingConsent'
-        ? '请本人在Web核对唯一实际搜索词、接收方和用途，并确认仅通用公开信息；未发出搜索。'
+        ? '请用户在本条回复的搜索确认卡核对唯一实际搜索词、接收方和用途，并确认仅通用公开信息后点击执行或取消；不要跳转其他页面，未发出搜索。'
         : row.state === 'completed' && parsed.success
           ? '只返回搜索服务提供的条目与摘要，未抓取链接。引用必须使用这些实际来源；未命中不等于不存在。'
           : '尚无当前可用来源。未知/已发送状态只查询原记录，不重新发起，也不伪造检索结果。',

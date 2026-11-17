@@ -124,11 +124,6 @@ const ApiWorkbenchPage = lazy(() =>
 const PlatformUsagePanel = lazy(() =>
   import('./usage').then((module) => ({ default: module.PlatformUsagePanel })),
 );
-const BusinessConfirmationPage = lazy(() =>
-  import('./business-confirmations').then((module) => ({
-    default: module.BusinessConfirmationPage,
-  })),
-);
 
 const pages = [
   { key: 'workspace', label: 'AI 工作台', icon: <AppIcon name="spark" /> },
@@ -329,7 +324,7 @@ function SignedIn({
       'platform-users': '平台账号管理',
       'platform-models': '平台模型设置',
       usage: 'AI 使用监控',
-      'business-confirmations': '本人业务提案',
+      'business-confirmations': '旧确认链接已失效',
       'external-mcp': '外部工具调用',
       'personal-settings': '个人设置',
     }[page] ??
@@ -632,7 +627,16 @@ function SignedIn({
   else if (page === 'usage' && me.user.isPlatformAdmin)
     content = <PlatformUsagePanel />;
   else if (page === 'business-confirmations')
-    content = <BusinessConfirmationPage />;
+    content = (
+      <Result
+        status="info"
+        title="此确认链接已失效"
+        subTitle="请回到对应对话，在原AI回复下的操作卡查看当前结果。此页面不提供执行或取消入口。"
+        extra={
+          <Button onClick={() => navigate('workspace')}>返回 AI 工作台</Button>
+        }
+      />
+    );
   else if (page === 'external-mcp') content = <ExternalMcpDecisionsPage />;
   else if (isPlatformPage && !me.user.isPlatformAdmin)
     content = (

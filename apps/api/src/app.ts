@@ -58,6 +58,9 @@ import { FilePrivacyLedger } from '../../../packages/application/src/conversatio
 import { ConversationFileReader } from '../../../packages/application/src/conversations/file-reader.js';
 import { FilesService } from '../../../packages/application/src/files/service.js';
 import { AgentWorkspaceService } from '../../../packages/application/src/agent-workspace/service.js';
+import { FileCenterService } from '../../../packages/application/src/agent-workspace/file-center.js';
+import { SandboxFilePreviewRenderer } from '../../../packages/application/src/file-preview/renderer.js';
+import { FileCenterController } from './file-center.controller.js';
 import { AgentWorkspaceController } from './agent-workspace.controller.js';
 import { AgentMemoryService } from '../../../packages/application/src/agent-memory/service.js';
 import { AgentMemoryController } from './agent-memory.controller.js';
@@ -70,14 +73,11 @@ import { AgentSchedulesController } from './agent-schedules.controller.js';
 import { createSemanticEmbeddingFromEnvironment } from '../../../packages/agent-embedding/src/client.js';
 import { AgentRetrievalService } from '../../../packages/application/src/agent-retrieval/service.js';
 import { AgentRetrievalController } from './agent-retrieval.controller.js';
-import { createBrowserClientFromEnvironment } from '../../../packages/agent-browser/src/client.js';
-import { AgentBrowserService } from '../../../packages/application/src/agent-browser/service.js';
-import { AgentBrowserController } from './agent-browser.controller.js';
 import { createStorageFromEnvironment } from '../../../packages/storage/src/s3.js';
 import { createBusinessRegistry } from '../../../packages/application/src/tool-registry/business.js';
 import { registerInternalTools } from '../../../packages/application/src/tool-registry/internal.js';
-import { BusinessConfirmations } from '../../../packages/application/src/tool-registry/confirmations.js';
-import { BusinessConfirmationsController } from './business-confirmations.controller.js';
+import { ActionIntents } from '../../../packages/application/src/tool-registry/action-intents.js';
+import { ActionIntentsController } from './action-intents.controller.js';
 import { KnowledgeService } from '../../../packages/application/src/knowledge/service.js';
 import { KnowledgeComparisons } from '../../../packages/application/src/knowledge/comparisons.js';
 import { KnowledgeController } from './knowledge.controller.js';
@@ -407,6 +407,11 @@ export async function createApp(db: Database) {
   const storage = await createStorageFromEnvironment();
   const fileService = new FilesService(db, storage);
   const sandbox = await createSandboxClientFromEnvironment();
+  const workspace = new AgentWorkspaceService(db, fileService);
+  const fileCenter = new FileCenterService(
+    workspace,
+    sandbox ? new SandboxFilePreviewRenderer(sandbox) : undefined,
+  );
   const documents = sandbox
     ? new AgentDocumentsService(fileService, new SandboxDocumentParser(sandbox))
     : undefined;
@@ -423,8 +428,6 @@ export async function createApp(db: Database) {
   );
   const aiTasksService = new AiTasksService(db, configuration, fileReader);
   const embedding = await createSemanticEmbeddingFromEnvironment();
-  const browserRuntime = await createBrowserClientFromEnvironment();
-  const browser = new AgentBrowserService(db, browserRuntime);
   const retrieval = embedding
     ? new AgentRetrievalService(
         db,
@@ -459,12 +462,12 @@ export async function createApp(db: Database) {
       ApiWorkerController,
       ApiExecutionController,
       AgentWorkspaceController,
-      AgentBrowserController,
+      FileCenterController,
       AgentMemoryController,
       AgentSchedulesController,
       ...(retrieval ? [AgentRetrievalController] : []),
+      ActionIntentsController,
       ConversationsController,
-      BusinessConfirmationsController,
       KnowledgeController,
       RetestsController,
       NotificationsController,
@@ -501,15 +504,15 @@ export async function createApp(db: Database) {
       { provide: ResultService, useValue: new ResultService(db) },
       { provide: FilesService, useValue: fileService },
       { provide: AgentMemoryService, useValue: new AgentMemoryService(db) },
-      { provide: AgentBrowserService, useValue: browser },
       { provide: AgentScheduleService, useValue: officeSchedules },
       ...(retrieval
         ? [{ provide: AgentRetrievalService, useValue: retrieval }]
         : []),
       {
         provide: AgentWorkspaceService,
-        useValue: new AgentWorkspaceService(db, fileService),
+        useValue: workspace,
       },
+      { provide: FileCenterService, useValue: fileCenter },
       { provide: UiDeliveryService, useValue: new UiDeliveryService(db) },
       { provide: ReportService, useValue: new ReportService(db) },
       { provide: ApiExecutionControlService, useValue: apiExecution },
@@ -522,8 +525,8 @@ export async function createApp(db: Database) {
         useValue: aiTasksService,
       },
       {
-        provide: BusinessConfirmations,
-        useValue: new BusinessConfirmations(db, businessRegistry),
+        provide: ActionIntents,
+        useValue: new ActionIntents(db, businessRegistry),
       },
       { provide: KnowledgeService, useValue: new KnowledgeService(db) },
       { provide: KnowledgeComparisons, useValue: new KnowledgeComparisons(db) },

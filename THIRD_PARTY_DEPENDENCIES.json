@@ -321,6 +321,24 @@
       "description": "An alias package for `crypto.randomBytes` in Node.js and/or browsers"
     },
     {
+      "name": "@napi-rs/canvas",
+      "versions": [
+        "1.1.1"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/Brooooooklyn/canvas#readme",
+      "description": "Canvas for Node.js with skia backend"
+    },
+    {
+      "name": "@napi-rs/canvas-win32-x64-msvc",
+      "versions": [
+        "1.1.1"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/Brooooooklyn/canvas#readme",
+      "description": "Canvas for Node.js with skia backend"
+    },
+    {
       "name": "@nestjs/common",
       "versions": [
         "12.4.2"
@@ -1693,6 +1711,16 @@
       "description": "The fastest directory crawler & globbing alternative to glob, fast-glob, & tiny-glob. Crawls 1m files in < 1s"
     },
     {
+      "name": "fflate",
+      "versions": [
+        "0.8.3"
+      ],
+      "license": "MIT",
+      "author": "Arjun Barrett",
+      "homepage": "https://101arrowz.github.io/fflate",
+      "description": "High performance (de)compression in an 8kB package"
+    },
+    {
       "name": "file-type",
       "versions": [
         "22.3.0"
@@ -2802,6 +2830,7 @@
         "8.1.1"
       ],
       "license": "MIT",
+      "author": "Ivan Nikulin",
       "homepage": "https://parse5.js.org",
       "description": "HTML parser and serializer."
     },
@@ -4095,6 +4124,15 @@
       "description": "The official TypeScript library for the OpenAI API"
     },
     {
+      "name": "pdfjs-dist",
+      "versions": [
+        "6.5.438"
+      ],
+      "license": "Apache-2.0",
+      "homepage": "https://mozilla.github.io/pdf.js/",
+      "description": "Generic build of Mozilla's PDF.js library."
+    },
+    {
       "name": "playwright",
       "versions": [
         "1.65.0"
@@ -4317,7 +4355,29 @@
       "description": "SHA-256, HMAC and PBKDF2 implementation with typed arrays for modern browsers and Node.js"
     }
   ],
+  "BSD-2-Clause": [
+    {
+      "name": "entities",
+      "versions": [
+        "9.0.0"
+      ],
+      "license": "BSD-2-Clause",
+      "author": "Felix Boehm",
+      "homepage": "https://github.com/fb55/entities#readme",
+      "description": "Encode & decode XML and HTML entities with ease & speed"
+    }
+  ],
   "BSD-3-Clause": [
+    {
+      "name": "highlight.js",
+      "versions": [
+        "11.12.0"
+      ],
+      "license": "BSD-3-Clause",
+      "author": "Josh Goebel",
+      "homepage": "https://highlightjs.org/",
+      "description": "Syntax highlighting with language autodetection."
+    },
     {
       "name": "ieee754",
       "versions": [
@@ -4336,6 +4396,16 @@
       "license": "BSD-3-Clause",
       "homepage": "https://github.com/ljharb/qs",
       "description": "A querystring parser that supports nesting and arrays, with a depth limit"
+    },
+    {
+      "name": "smol-toml",
+      "versions": [
+        "1.9.1"
+      ],
+      "license": "BSD-3-Clause",
+      "author": "Cynthia Rey",
+      "homepage": "https://github.com/squirrelchat/smol-toml#readme",
+      "description": "A small, fast, and correct TOML parser/serializer"
     },
     {
       "name": "source-map",
@@ -4388,17 +4458,6 @@
       "author": "Microsoft Corp.",
       "homepage": "https://www.typescriptlang.org/",
       "description": "Runtime library for TypeScript helper functions"
-    }
-  ],
-  "BSD-2-Clause": [
-    {
-      "name": "entities",
-      "versions": [
-        "9.0.0"
-      ],
-      "license": "BSD-2-Clause",
-      "homepage": "https://github.com/fb55/entities",
-      "description": "Encode & decode XML and HTML entities with ease & speed"
     }
   ]
 }

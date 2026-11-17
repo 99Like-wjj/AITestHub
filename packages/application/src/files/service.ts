@@ -41,6 +41,32 @@ const mediaTypes = new Set([
   'image/jpeg',
   'image/webp',
   'image/gif',
+  'image/bmp',
+  'image/avif',
+  'image/svg+xml',
+  'video/mp4',
+  'video/webm',
+  'audio/mpeg',
+  'audio/wav',
+  'audio/x-wav',
+  'audio/ogg',
+  'audio/mp4',
+  'application/ogg',
+  'application/xml',
+  'text/xml',
+  'application/yaml',
+  'application/x-yaml',
+  'text/yaml',
+  'application/toml',
+  'text/tab-separated-values',
+  'text/javascript',
+  'application/javascript',
+  'text/css',
+  'text/x-python',
+  'text/x-java-source',
+  'application/vnd.oasis.opendocument.text',
+  'application/vnd.oasis.opendocument.spreadsheet',
+  'application/vnd.oasis.opendocument.presentation',
 ]);
 
 interface FileRow extends QueryResultRow {
@@ -94,11 +120,29 @@ function signatureMatches(mediaType: string, prefix: Buffer): boolean {
     );
   if (mediaType === 'image/gif')
     return /^GIF8[79]a$/.test(prefix.subarray(0, 6).toString('ascii'));
+  if (mediaType === 'image/bmp')
+    return prefix.subarray(0, 2).toString() === 'BM';
+  if (
+    mediaType === 'image/avif' ||
+    mediaType === 'video/mp4' ||
+    mediaType === 'audio/mp4'
+  )
+    return prefix.subarray(4, 8).toString() === 'ftyp';
+  if (mediaType === 'video/webm')
+    return prefix.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
+  if (mediaType === 'audio/wav' || mediaType === 'audio/x-wav')
+    return (
+      prefix.subarray(0, 4).toString() === 'RIFF' &&
+      prefix.subarray(8, 12).toString() === 'WAVE'
+    );
+  if (mediaType === 'audio/ogg' || mediaType === 'application/ogg')
+    return prefix.subarray(0, 4).toString() === 'OggS';
   if (mediaType === 'application/pdf')
     return prefix.subarray(0, 5).toString() === '%PDF-';
   if (
     mediaType === 'application/zip' ||
-    mediaType.startsWith('application/vnd.openxmlformats')
+    mediaType.startsWith('application/vnd.openxmlformats') ||
+    mediaType.startsWith('application/vnd.oasis.opendocument')
   ) {
     return (
       prefix[0] === 80 &&
@@ -749,6 +793,10 @@ export class FilesService {
   ) {
     if (conversationId) {
       await conversationRow(transaction, actor, conversationId, false, true);
+      if (scope === 'project' && projectId) {
+        await requireProject(transaction, actor, projectId, 'files.transfer');
+        return;
+      }
       if (
         scope !== 'personal' ||
         projectId !== null ||

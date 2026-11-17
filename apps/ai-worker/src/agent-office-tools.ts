@@ -132,7 +132,7 @@ export function createAgentOfficeTool(
       name: 'ath_office',
       schema: agentOfficeToolInputSchema,
       description:
-        '创建实际DOCX/XLSX/PPTX/中文PDF并保存工作区下载；output.path是完整工作区逻辑路径，保留用户指定的全部目录前缀，与沙箱内部artifact路径不同。create支持段落/表格、工作表值/公式/样式/图表、演示幻灯片。已有附件先用ath_compute.import_resource按原resourceId导入工作区原件，再按返回的entryId/revision执行edit或inspect，不能从解析文字重建原件。edit局部改Word/PPT精确文本或Excel单元格，要求文本expectedOccurrences；未改OOXML part按hash保留，宏/签名/可执行嵌入不支持。PDF edit仅覆盖文字/追加页：覆盖不会删除底层文字，绝不能用于脱敏。inspect返回真实结构及公式缓存状态，公式不自动求值，视觉布局仍需下载检查。复杂自定义处理可用ath_compute同一授权沙箱。status/cancel仅查/停原runId，未知结果不得重跑。',
+        '创建实际DOCX/XLSX/PPTX/中文PDF并保存会话文件。先files定位已受理附件：kind=original原件固定只读，edit读取原件后必须output另存新路径（expectedRowVersion=0）为独立成果，不能覆盖原件；继续修改kind=artifact成果使用当前路径和rowVersion追加版本。output.path保留用户指定的完整目录前缀，与沙箱内部artifact路径不同。create支持段落/表格、工作表值/公式/样式/图表、演示幻灯片。仅确实尚无entry的已授权附件才用ath_compute.import_resource按原resourceId导入，禁止从解析文字重建原件。edit局部改Word/PPT精确文本或Excel单元格，要求文本expectedOccurrences；未改OOXML part按hash保留，宏/签名/可执行嵌入不支持。PDF edit仅覆盖文字/追加页：覆盖不会删除底层文字，绝不能用于脱敏。inspect返回真实结构及公式缓存状态，公式不自动求值；会话文件可只读预览，复杂视觉布局仍需核对。复杂自定义处理可用ath_compute同一授权沙箱。status/cancel仅查/停原runId，未知结果不得重跑。',
     },
   );
 }

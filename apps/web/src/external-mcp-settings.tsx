@@ -27,6 +27,16 @@ import { useBusinessCommand } from './business-command';
 import { uiLayers } from './ui-layers';
 import { PageHeading } from './page-heading';
 import type { PreparedReference } from './workspace-references';
+import {
+  currentIdentityOwner,
+  subscribeIdentityChanges,
+} from './identity-context';
+import {
+  beginExternalDecision,
+  canInlineExternalDecision,
+  clearExternalDecision,
+  externalDecisionPending,
+} from './external-decision-state';
 
 type Service = z.infer<typeof externalServiceReceiptSchema>['service'];
 type Personal = z.infer<
@@ -1035,6 +1045,7 @@ export function ExternalMcpInvocationsPanel({
   hideEmpty = false,
   refreshKey,
   onResolved,
+  inline = false,
 }: {
   taskId?: string;
   conversationId?: string;
@@ -1043,6 +1054,7 @@ export function ExternalMcpInvocationsPanel({
   hideEmpty?: boolean;
   refreshKey?: unknown;
   onResolved?: () => void;
+  inline?: boolean;
 }) {
   const [publicReviews, setPublicReviews] = useState<Record<string, string>>(
     {},
@@ -1055,6 +1067,7 @@ export function ExternalMcpInvocationsPanel({
       Record<string, 'decision' | 'cancel'>
     >({});
   const epoch = useRef(0);
+  const sending = useRef(false);
   async function load(signal?: AbortSignal, generation = epoch.current) {
     if (
       (invocationId && !z.uuid().safeParse(invocationId).success) ||
@@ -1105,19 +1118,40 @@ export function ExternalMcpInvocationsPanel({
             : values,
         );
         setError('');
-        setUnconfirmed((current) =>
-          Object.fromEntries(
+        setUnconfirmed((current) => {
+          const next = Object.fromEntries(
             Object.entries(current).filter(([id, kind]) =>
               values.some(
                 (row) =>
                   row.id === id &&
                   (kind === 'cancel'
                     ? ['waitingConsent', 'dispatching'].includes(row.state)
-                    : row.state === 'waitingConsent'),
+                    : ['waitingConsent', 'dispatching', 'unknown'].includes(
+                        row.state,
+                      )),
               ),
             ),
-          ),
-        );
+          );
+          const owner = currentIdentityOwner();
+          if (owner)
+            for (const row of values) {
+              try {
+                if (
+                  ['completed', 'declined', 'cancelled', 'failed'].includes(
+                    row.state,
+                  )
+                )
+                  clearExternalDecision(window.localStorage, owner, row.id);
+                else if (
+                  externalDecisionPending(window.localStorage, owner, row.id)
+                )
+                  next[row.id] = 'decision';
+              } catch {
+                next[row.id] = 'decision';
+              }
+            }
+          return next;
+        });
       }
     } catch (error) {
       if (!signal?.aborted && generation === epoch.current) {
@@ -1140,6 +1174,18 @@ export function ExternalMcpInvocationsPanel({
     void load(abort.signal);
     return () => abort.abort();
   }, [taskId, conversationId, invocationId, pendingOnly]);
+  useEffect(
+    () =>
+      subscribeIdentityChanges(() => {
+        epoch.current++;
+        setItems([]);
+        setPublicReviews({});
+        setUnconfirmed({});
+        setBusy(undefined);
+        sending.current = false;
+      }),
+    [],
+  );
   useEffect(() => {
     if (refreshKey === undefined) return;
     const abort = new AbortController(),
@@ -1177,9 +1223,34 @@ export function ExternalMcpInvocationsPanel({
     pendingOnly,
   ]);
   async function decide(row: Invocation, decision: 'accept' | 'decline') {
+    if (sending.current) return;
+    if (
+      !canInlineExternalDecision({
+        inline,
+        taskId: row.taskId,
+        conversationId: row.conversationId,
+        ...(taskId ? { currentTaskId: taskId } : {}),
+        ...(conversationId ? { currentConversationId: conversationId } : {}),
+      })
+    ) {
+      setError('此调用只能在对应AI回复的确认卡中决定。');
+      return;
+    }
+    const owner = currentIdentityOwner();
+    if (!owner) {
+      setError('当前账号尚未核对，未发出外发决定。');
+      return;
+    }
+    sending.current = true;
     const generation = epoch.current;
     setBusy(row.id);
     try {
+      beginExternalDecision(window.localStorage, owner, {
+        id: row.id,
+        scopeDigest: row.scopeDigest,
+        decision,
+      });
+      setUnconfirmed((current) => ({ ...current, [row.id]: 'decision' }));
       await api(
         `${base}/invocations/${row.id}/resolve`,
         {
@@ -1202,10 +1273,17 @@ export function ExternalMcpInvocationsPanel({
     } catch (error) {
       if (generation === epoch.current) {
         setError(describeError(error));
-        if (uncertain(error))
+        let fence = true;
+        try {
+          fence = externalDecisionPending(window.localStorage, owner, row.id);
+        } catch {
+          fence = true;
+        }
+        if (uncertain(error) || fence)
           setUnconfirmed((current) => ({ ...current, [row.id]: 'decision' }));
       }
     } finally {
+      sending.current = false;
       if (generation === epoch.current) setBusy(undefined);
     }
   }
@@ -1231,7 +1309,9 @@ export function ExternalMcpInvocationsPanel({
   }
   if (hideEmpty && !error && !items.length) return null;
   return (
-    <div className="external-mcp-page">
+    <div
+      className={`external-mcp-page${inline ? ' conversation-external-consent' : ''}`}
+    >
       {error && (
         <Notice error>
           {error}
@@ -1280,7 +1360,10 @@ export function ExternalMcpInvocationsPanel({
             用途：{row.purpose || '原内容已按隐私删除'}
           </p>
           {row.arguments !== null ? (
-            <details className="mt" open={row.state === 'waitingConsent'}>
+            <details
+              className="mt"
+              open={!inline && row.state === 'waitingConsent'}
+            >
               <summary>本次实际外发参数</summary>
               <pre className="code mt">
                 {JSON.stringify(row.arguments, null, 2)}
@@ -1291,56 +1374,67 @@ export function ExternalMcpInvocationsPanel({
               原参数已删除、来源失权或连接已变化，不能据旧摘要发送。
             </Notice>
           )}
-          {row.state === 'waitingConsent' && (
-            <>
-              {row.isPublicSearch && (
-                <label className="checkrow mt">
-                  <input
-                    type="checkbox"
-                    checked={publicReviews[row.id] === row.scopeDigest}
+          {row.state === 'waitingConsent' &&
+            canInlineExternalDecision({
+              inline,
+              taskId: row.taskId,
+              conversationId: row.conversationId,
+              ...(taskId ? { currentTaskId: taskId } : {}),
+              ...(conversationId
+                ? { currentConversationId: conversationId }
+                : {}),
+            }) && (
+              <>
+                {row.isPublicSearch && (
+                  <label className="checkrow mt">
+                    <input
+                      type="checkbox"
+                      checked={publicReviews[row.id] === row.scopeDigest}
+                      disabled={
+                        busy !== undefined || Boolean(unconfirmed[row.id])
+                      }
+                      onChange={(event) =>
+                        setPublicReviews((current) => ({
+                          ...current,
+                          [row.id]: event.target.checked ? row.scopeDigest : '',
+                        }))
+                      }
+                    />
+                    <span>
+                      我已核对实际搜索词「{row.publicQuery ?? '当前不可读取'}
+                      」，仅含通用公开信息，可交给上述服务检索。不会发送项目正文、私聊、附件或凭据；模式检查不能保证识别所有非公开内容。
+                    </span>
+                  </label>
+                )}
+                <div className="row wrap mt">
+                  <button
+                    className="btn primary"
+                    disabled={
+                      busy !== undefined ||
+                      Boolean(unconfirmed[row.id]) ||
+                      row.arguments === null ||
+                      Boolean(
+                        row.isPublicSearch &&
+                        publicReviews[row.id] !== row.scopeDigest,
+                      )
+                    }
+                    onClick={() => void decide(row, 'accept')}
+                  >
+                    {inline ? '执行并同意此次外发' : '同意并发送这份内容'}
+                  </button>
+                  <button
+                    className="btn"
                     disabled={
                       busy !== undefined || Boolean(unconfirmed[row.id])
                     }
-                    onChange={(event) =>
-                      setPublicReviews((current) => ({
-                        ...current,
-                        [row.id]: event.target.checked ? row.scopeDigest : '',
-                      }))
-                    }
-                  />
-                  <span>
-                    我已核对实际搜索词「{row.publicQuery ?? '当前不可读取'}
-                    」，仅含通用公开信息，可交给上述服务检索。不会发送项目正文、私聊、附件或凭据；模式检查不能保证识别所有非公开内容。
-                  </span>
-                </label>
-              )}
-              <div className="row wrap mt">
-                <button
-                  className="btn primary"
-                  disabled={
-                    busy !== undefined ||
-                    Boolean(unconfirmed[row.id]) ||
-                    row.arguments === null ||
-                    Boolean(
-                      row.isPublicSearch &&
-                      publicReviews[row.id] !== row.scopeDigest,
-                    )
-                  }
-                  onClick={() => void decide(row, 'accept')}
-                >
-                  同意并发送这份内容
-                </button>
-                <button
-                  className="btn"
-                  disabled={busy !== undefined || Boolean(unconfirmed[row.id])}
-                  onClick={() => void decide(row, 'decline')}
-                >
-                  拒绝外发
-                </button>
-              </div>
-            </>
-          )}
-          {row.state === 'dispatching' && (
+                    onClick={() => void decide(row, 'decline')}
+                  >
+                    {inline ? '取消' : '拒绝外发'}
+                  </button>
+                </div>
+              </>
+            )}
+          {row.state === 'dispatching' && !inline && row.taskId === null && (
             <button
               className="btn danger mt"
               disabled={busy !== undefined || Boolean(unconfirmed[row.id])}
@@ -1384,7 +1478,11 @@ export function ExternalMcpInvocationsPanel({
             >
               只读刷新原状态
             </button>
-            <a href={`/#external-mcp?invocationId=${row.id}`}>独立查看</a>
+            {!inline && row.taskId !== null ? (
+              <span className="caption">
+                此调用属于对话，请在原AI回复下的操作卡核对并决定。
+              </span>
+            ) : null}
           </div>
         </section>
       ))}
