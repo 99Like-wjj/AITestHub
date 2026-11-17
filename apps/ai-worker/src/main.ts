@@ -1,4 +1,19 @@
 import { createDatabaseFromEnvironment } from '../../../packages/persistence/src/config.js';
+import { createSandboxClientFromEnvironment } from '../../../packages/agent-runtime/src/environment.js';
+import { AgentWorkspaceService } from '../../../packages/application/src/agent-workspace/service.js';
+import { AgentCalculationService } from '../../../packages/application/src/agent-calculation/service.js';
+import { AgentDocumentsService } from '../../../packages/application/src/agent-documents/service.js';
+import { SandboxDocumentParser } from '../../../packages/application/src/agent-documents/sandbox-parser.js';
+import { ConversationsService } from '../../../packages/application/src/conversations/service.js';
+import { createAgentScheduleService } from '../../../packages/application/src/agent-schedules/factory.js';
+import { DomainError } from '../../../packages/application/src/errors.js';
+import { AgentRepositoryService } from '../../../packages/application/src/agent-repository/service.js';
+import { createSemanticEmbeddingFromEnvironment } from '../../../packages/agent-embedding/src/client.js';
+import { AgentRetrievalService } from '../../../packages/application/src/agent-retrieval/service.js';
+import { MaintenanceService } from '../../../packages/application/src/recovery/maintenance.js';
+import { runOfficeBackgroundWork } from './background-maintenance.js';
+import { createBrowserClientFromEnvironment } from '../../../packages/agent-browser/src/client.js';
+import { AgentBrowserService } from '../../../packages/application/src/agent-browser/service.js';
 import { createStorageFromEnvironment } from '../../../packages/storage/src/s3.js';
 import { FilesService } from '../../../packages/application/src/files/service.js';
 import { SecretBroker } from '../../../packages/application/src/configuration/secrets.js';
@@ -30,10 +45,50 @@ async function main() {
   const storage = await createStorageFromEnvironment();
   const broker = await SecretBroker.fromEnvironment(database);
   const configuration = new ConfigurationService(database, broker);
-  const fileReader = new ConversationFileReader(
-    new FilesService(database, storage),
-  );
+  const files = new FilesService(database, storage);
+  const sandbox = await createSandboxClientFromEnvironment();
+  const documents = sandbox
+    ? new AgentDocumentsService(files, new SandboxDocumentParser(sandbox))
+    : undefined;
+  const calculation = sandbox
+    ? new AgentCalculationService(
+        database,
+        new AgentWorkspaceService(database, files),
+        sandbox,
+      )
+    : undefined;
+  const fileReader = new ConversationFileReader(files, documents);
+  const repository = sandbox
+    ? new AgentRepositoryService(files, sandbox)
+    : undefined;
   const tasks = new AiTasksService(database, configuration, fileReader);
+  const embedding = await createSemanticEmbeddingFromEnvironment();
+  const browserRuntime = await createBrowserClientFromEnvironment();
+  const browser = new AgentBrowserService(database, browserRuntime);
+  const retrieval = embedding
+    ? new AgentRetrievalService(
+        database,
+        files,
+        documents,
+        embedding,
+        tasks.references,
+      )
+    : undefined;
+  const scheduledConversations = new ConversationsService(
+    database,
+    configuration,
+    fileReader,
+    {
+      record: async () => {
+        throw new DomainError('FORBIDDEN', '定时执行端不开放会话删除。', 403);
+      },
+    },
+  );
+  const officeSchedules = createAgentScheduleService(
+    database,
+    scheduledConversations,
+    tasks,
+  );
   const admission = new AiTaskAdmission();
   const auxiliaryService = new AuxiliaryService(
     database,
@@ -45,6 +100,15 @@ async function main() {
     tasks,
     createConversationRunnerFactory(database, configuration, broker, {
       fileReader,
+      officeSchedules,
+      ...(browserRuntime ? { browser } : {}),
+      ...(retrieval ? { retrieval } : {}),
+      ...(repository ? { repository } : {}),
+      ...(documents ? { documents } : {}),
+      ...(calculation ? { calculation } : {}),
+      ...(process.env.AITESTHUB_SEARCH_ENDPOINT
+        ? { searchEndpoint: process.env.AITESTHUB_SEARCH_ENDPOINT }
+        : {}),
     }),
     admission,
     (tx, ownerId, taskId) =>
@@ -60,12 +124,31 @@ async function main() {
     admission,
   );
   let auxiliaryNext = false;
+  const backgroundMaintenance = new MaintenanceService(database);
+  let nextBrowserReconcile = 0;
   const tick = async () => {
+    if (browserRuntime && Date.now() >= nextBrowserReconcile) {
+      nextBrowserReconcile = Date.now() + 30_000;
+      await runOfficeBackgroundWork(
+        backgroundMaintenance,
+        async () => {
+          await browser.reconcile();
+          return false;
+        },
+        true,
+      );
+    }
+    const scheduleWorked = await runOfficeBackgroundWork(
+      backgroundMaintenance,
+      async () => {
+        return officeSchedules.tick();
+      },
+    );
     auxiliaryNext = !auxiliaryNext;
     const first = auxiliaryNext ? auxiliary : worker,
       second = auxiliaryNext ? worker : auxiliary;
     if (await first.tick()) return true;
-    return second.tick();
+    return (await second.tick()) || scheduleWorked;
   };
   let stopping = false;
   process.once('SIGINT', () => {

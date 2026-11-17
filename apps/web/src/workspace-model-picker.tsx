@@ -114,6 +114,7 @@ export function WorkspaceModelPicker({
             </button>
             {levels.length ? (
               <Slider
+                className="workspace-effort-slider"
                 ariaLabelForHandle="模型思考强度，Default 表示不指定"
                 ariaValueTextFormatterForHandle={choiceLabel}
                 min={0}

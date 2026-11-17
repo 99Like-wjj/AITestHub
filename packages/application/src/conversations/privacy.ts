@@ -1,4 +1,6 @@
 import { redactAutomaticAuxiliaryConversation } from '../auxiliary/automatic-common.js';
+import { redactAgentContextConversation } from '../agent-context/service.js';
+import { redactAgentRetrievalSource } from '../agent-retrieval/privacy.js';
 import {
   createHmac,
   randomUUID,
@@ -388,6 +390,7 @@ export async function applyPrivacyDeletion(
         'DELETE FROM app.ai_runtime_checkpoints WHERE conversation_id=$1',
         [entry.targetId],
       );
+      await redactAgentContextConversation(tx, entry.ownerId, entry.targetId);
       if (
         (
           await tx.query<{ present: boolean }>(
@@ -469,6 +472,14 @@ export async function applyPrivacyDeletion(
     entry.ownerId,
     entry.exclusiveResourceIds,
   );
+  await redactAgentRetrievalSource(
+    tx,
+    entry.ownerId,
+    entry.targetType,
+    entry.targetId,
+  );
+  for (const resourceId of entry.exclusiveResourceIds)
+    await redactAgentRetrievalSource(tx, entry.ownerId, 'resource', resourceId);
   await redactDeletedModelAttemptsInTransaction(
     tx,
     entry.ownerId,

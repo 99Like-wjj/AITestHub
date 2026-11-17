@@ -243,6 +243,21 @@ export class MaintenanceService {
       ).rows[0]!.count,
     );
     let auxiliary = 0;
+    let officeBrowser = 0;
+    if (
+      (
+        await transaction.query<{ exists: boolean }>(
+          "SELECT to_regclass('app.agent_browser_operations') IS NOT NULL exists",
+        )
+      ).rows[0]?.exists
+    )
+      officeBrowser = Number(
+        (
+          await transaction.query<{ count: string }>(
+            "SELECT count(*)::text count FROM app.agent_browser_operations WHERE state='dispatching'",
+          )
+        ).rows[0]?.count ?? '0',
+      );
     if (
       (
         await transaction.query<{ exists: boolean }>(
@@ -263,7 +278,8 @@ export class MaintenanceService {
       ai,
       files,
       auxiliary,
-      total: requests + api + ai + files + auxiliary,
+      officeBrowser,
+      total: requests + api + ai + files + auxiliary + officeBrowser,
     };
   }
   async freezeIfDrained(operationId: string) {

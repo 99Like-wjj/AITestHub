@@ -1,0 +1,24 @@
+# Standalone SearXNG (AGPL-3.0-or-later), accessed over its JSON API; no source is bundled into AITestHub.
+# Public upstream source: https://github.com/searxng/searxng/tree/2d500cb6b
+services:
+  agent-search:
+    image: docker.io/searxng/searxng@sha256:932f69dca010db9880bddebb2171f05d8e1a25d04a59149ff65409993d680024
+    restart: unless-stopped
+    user: '977:977'
+    environment:
+      FORCE_OWNERSHIP: 'false'
+    volumes:
+      - ${AITESTHUB_SEARCH_SETTINGS_FILE:?external reviewed SearXNG settings required}:/etc/searxng/settings.yml:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+      - /var/cache/searxng:size=32m,noexec,nosuid,nodev,uid=977,gid=977
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 100
+    mem_limit: 512m
+    cpus: 1
+    networks: [default]
+    logging:
+      driver: json-file
+      options: { max-size: '2m', max-file: '2' }

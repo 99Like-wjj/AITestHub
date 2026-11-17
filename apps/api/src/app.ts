@@ -57,6 +57,22 @@ import { AiTasksService } from '../../../packages/application/src/conversations/
 import { FilePrivacyLedger } from '../../../packages/application/src/conversations/privacy.js';
 import { ConversationFileReader } from '../../../packages/application/src/conversations/file-reader.js';
 import { FilesService } from '../../../packages/application/src/files/service.js';
+import { AgentWorkspaceService } from '../../../packages/application/src/agent-workspace/service.js';
+import { AgentWorkspaceController } from './agent-workspace.controller.js';
+import { AgentMemoryService } from '../../../packages/application/src/agent-memory/service.js';
+import { AgentMemoryController } from './agent-memory.controller.js';
+import { createSandboxClientFromEnvironment } from '../../../packages/agent-runtime/src/environment.js';
+import { AgentDocumentsService } from '../../../packages/application/src/agent-documents/service.js';
+import { SandboxDocumentParser } from '../../../packages/application/src/agent-documents/sandbox-parser.js';
+import { createAgentScheduleService } from '../../../packages/application/src/agent-schedules/factory.js';
+import { AgentScheduleService } from '../../../packages/application/src/agent-schedules/service.js';
+import { AgentSchedulesController } from './agent-schedules.controller.js';
+import { createSemanticEmbeddingFromEnvironment } from '../../../packages/agent-embedding/src/client.js';
+import { AgentRetrievalService } from '../../../packages/application/src/agent-retrieval/service.js';
+import { AgentRetrievalController } from './agent-retrieval.controller.js';
+import { createBrowserClientFromEnvironment } from '../../../packages/agent-browser/src/client.js';
+import { AgentBrowserService } from '../../../packages/application/src/agent-browser/service.js';
+import { AgentBrowserController } from './agent-browser.controller.js';
 import { createStorageFromEnvironment } from '../../../packages/storage/src/s3.js';
 import { createBusinessRegistry } from '../../../packages/application/src/tool-registry/business.js';
 import { registerInternalTools } from '../../../packages/application/src/tool-registry/internal.js';
@@ -390,11 +406,39 @@ export async function createApp(db: Database) {
   const externalInvocations = new ExternalMcpInvocations(db, externalMcp);
   const storage = await createStorageFromEnvironment();
   const fileService = new FilesService(db, storage);
-  const fileReader = new ConversationFileReader(fileService);
+  const sandbox = await createSandboxClientFromEnvironment();
+  const documents = sandbox
+    ? new AgentDocumentsService(fileService, new SandboxDocumentParser(sandbox))
+    : undefined;
+  const fileReader = new ConversationFileReader(fileService, documents);
   const auxiliary = new AuxiliaryService(db, configuration, broker, fileReader);
   const automaticAuxiliary = new AutomaticAuxiliaryService(auxiliary);
   const privacyLedger = await FilePrivacyLedger.fromEnvironment();
   await privacyLedger.reapply(db);
+  const conversationsService = new ConversationsService(
+    db,
+    configuration,
+    fileReader,
+    privacyLedger,
+  );
+  const aiTasksService = new AiTasksService(db, configuration, fileReader);
+  const embedding = await createSemanticEmbeddingFromEnvironment();
+  const browserRuntime = await createBrowserClientFromEnvironment();
+  const browser = new AgentBrowserService(db, browserRuntime);
+  const retrieval = embedding
+    ? new AgentRetrievalService(
+        db,
+        fileService,
+        documents,
+        embedding,
+        aiTasksService.references,
+      )
+    : undefined;
+  const officeSchedules = createAgentScheduleService(
+    db,
+    conversationsService,
+    aiTasksService,
+  );
   const businessRegistry = createBusinessRegistry(db, {
     files: fileService,
     plans,
@@ -414,6 +458,11 @@ export async function createApp(db: Database) {
       UiDeliveryController,
       ApiWorkerController,
       ApiExecutionController,
+      AgentWorkspaceController,
+      AgentBrowserController,
+      AgentMemoryController,
+      AgentSchedulesController,
+      ...(retrieval ? [AgentRetrievalController] : []),
       ConversationsController,
       BusinessConfirmationsController,
       KnowledgeController,
@@ -451,21 +500,26 @@ export async function createApp(db: Database) {
       },
       { provide: ResultService, useValue: new ResultService(db) },
       { provide: FilesService, useValue: fileService },
+      { provide: AgentMemoryService, useValue: new AgentMemoryService(db) },
+      { provide: AgentBrowserService, useValue: browser },
+      { provide: AgentScheduleService, useValue: officeSchedules },
+      ...(retrieval
+        ? [{ provide: AgentRetrievalService, useValue: retrieval }]
+        : []),
+      {
+        provide: AgentWorkspaceService,
+        useValue: new AgentWorkspaceService(db, fileService),
+      },
       { provide: UiDeliveryService, useValue: new UiDeliveryService(db) },
       { provide: ReportService, useValue: new ReportService(db) },
       { provide: ApiExecutionControlService, useValue: apiExecution },
       {
         provide: ConversationsService,
-        useValue: new ConversationsService(
-          db,
-          configuration,
-          fileReader,
-          privacyLedger,
-        ),
+        useValue: conversationsService,
       },
       {
         provide: AiTasksService,
-        useValue: new AiTasksService(db, configuration, fileReader),
+        useValue: aiTasksService,
       },
       {
         provide: BusinessConfirmations,

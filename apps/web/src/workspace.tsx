@@ -59,6 +59,8 @@ import type { ConversationCreateAttempt } from './workspace-create';
 import { uiLayers } from './ui-layers';
 import { AppIcon } from './app-icon';
 import { AppearanceToggle } from './appearance-toggle';
+import { AgentWorkspace } from './agent-workspace';
+import { AgentBrowserPanel } from './agent-browser';
 import { BusinessConfirmationsPanel } from './business-confirmations';
 import { ExternalMcpInvocationsPanel } from './external-mcp-settings';
 import { AiRetryStatus } from './ai-retry-status';
@@ -2257,6 +2259,15 @@ export function Workspace({
             </div>
           </div>
           <Space className="chat-head-actions">
+            {active ? (
+              <AgentWorkspace key={active.id} conversationId={active.id} />
+            ) : null}
+            {active ? (
+              <AgentBrowserPanel
+                key={`browser-${active.id}`}
+                conversationId={active.id}
+              />
+            ) : null}
             <AppearanceToggle
               dark={dark}
               pending={appearancePending}
@@ -2300,11 +2311,7 @@ export function Workspace({
             )}
           </Space>
         </header>
-        <div
-          className="conversation-scroll"
-          ref={scroll.viewport}
-          onScroll={scroll.onScroll}
-        >
+        <div className="conversation-scroll" ref={scroll.viewport} tabIndex={0}>
           <div ref={scroll.content} className="conversation-content">
             {conversationLoading && <Skeleton active paragraph={{ rows: 5 }} />}
             {conversationError && (

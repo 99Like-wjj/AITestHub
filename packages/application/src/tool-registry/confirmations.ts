@@ -23,6 +23,7 @@ import { assertFrozenTaskSources } from '../conversations/task-sources.js';
 import type { BusinessToolRegistry, PreparedBusinessCall } from './registry.js';
 import { withHumanConfirmedExecution } from './human-confirmation.js';
 import { conversationRow } from '../conversations/common.js';
+import { assertTaskCapability } from '../conversations/task-capabilities.js';
 import { workspaceAccessModeSchema } from '../../../contracts/src/workspace-access.js';
 import { withWorkspaceModelAccess } from '../security/model-input.js';
 
@@ -121,6 +122,12 @@ export class BusinessConfirmations {
   ): Promise<void> {
     if (row.origin !== 'internal-ai' || !row.task_id || !row.conversation_id)
       return;
+    await assertTaskCapability(
+      tx,
+      actor,
+      { taskId: row.task_id, conversationId: row.conversation_id },
+      'businessWrite',
+    );
     const message = (
       await tx.query<{
         id: string;
@@ -234,6 +241,17 @@ export class BusinessConfirmations {
       .digest('hex');
     return this.db.transaction(async (tx) => {
       await currentUser(tx, actor);
+      if (
+        actor.entrypoint === 'internal-ai' &&
+        context.taskId &&
+        context.conversationId
+      )
+        await assertTaskCapability(
+          tx,
+          actor,
+          { taskId: context.taskId, conversationId: context.conversationId },
+          'businessWrite',
+        );
       if (call.projectId)
         await requireProject(
           tx,
@@ -390,6 +408,24 @@ export class BusinessConfirmations {
         403,
       );
     const accepted = await this.db.transaction(async (tx) => {
+      // Privacy deletion owns the conversation before its derived confirmations.
+      // Acquire that same parent lock before locking a pending confirmation.
+      if (actor.entrypoint === 'web') {
+        const locator = (
+          await tx.query<{ conversation_id: string | null }>(
+            'SELECT conversation_id FROM app.business_confirmations WHERE id=$1 AND owner_id=$2',
+            [id, actor.userId],
+          )
+        ).rows[0];
+        if (locator?.conversation_id)
+          await conversationRow(
+            tx,
+            actor,
+            locator.conversation_id,
+            false,
+            true,
+          );
+      }
       const found = (
         await tx.query<ConfirmationRow>(
           'SELECT * FROM app.business_confirmations WHERE id=$1 AND owner_id=$2 FOR UPDATE',
@@ -492,6 +528,17 @@ export class BusinessConfirmations {
           resolutionSource: source,
         },
         async () => {
+          const taskId = row.task_id;
+          const conversationId = row.conversation_id;
+          if (row.origin === 'internal-ai' && taskId && conversationId)
+            await this.db.transaction((tx) =>
+              assertTaskCapability(
+                tx,
+                actor,
+                { taskId, conversationId },
+                'businessWrite',
+              ),
+            );
           const mode =
             row.origin === 'internal-ai' && row.task_id
               ? (

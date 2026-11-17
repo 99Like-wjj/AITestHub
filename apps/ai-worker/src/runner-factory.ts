@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
+import { agentContextBudgetSnapshotSchema } from '../../../packages/contracts/src/agent-context.js';
 import type { Database } from '../../../packages/persistence/src/database.js';
 import { ConfigurationService } from '../../../packages/application/src/configuration/service.js';
 import { SecretBroker } from '../../../packages/application/src/configuration/secrets.js';
@@ -6,6 +8,10 @@ import type {
   ConversationRunnerFactory,
   ConversationRunner,
 } from '../../../packages/application/src/conversations/tasks.js';
+import {
+  createModelBudgetCalibration,
+  type ModelBudgetCalibration,
+} from '../../../packages/model-adapters/src/index.js';
 import { createNativeModelAdapter } from '../../../packages/model-adapters/src/index.js';
 import { NativeAdapterChatModel } from './adapter-model.js';
 import { RestrictedAiHost } from './host.js';
@@ -20,6 +26,14 @@ import { ExternalMcpInvocations } from '../../../packages/application/src/extern
 import type { AiModelRetryPolicy } from '../../../packages/application/src/ai/model-retry.js';
 import type { PersonalFileReader } from '../../../packages/application/src/conversations/references.js';
 import { resolveModelOutputBudget } from '../../../packages/application/src/ai/model-output-budget.js';
+import { AgentWebService } from '../../../packages/application/src/agent-web/service.js';
+import type { AgentCalculationService } from '../../../packages/application/src/agent-calculation/service.js';
+import type { AgentDocumentsService } from '../../../packages/application/src/agent-documents/service.js';
+import type { AgentScheduleService } from '../../../packages/application/src/agent-schedules/service.js';
+import { AgentOfficeService } from '../../../packages/application/src/agent-office/service.js';
+import type { AgentRepositoryService } from '../../../packages/application/src/agent-repository/service.js';
+import type { AgentRetrievalService } from '../../../packages/application/src/agent-retrieval/service.js';
+import type { AgentBrowserService } from '../../../packages/application/src/agent-browser/service.js';
 
 /** Only the worker owns this factory. Model/credentials never become tool arguments. */
 export function createConversationRunnerFactory(
@@ -29,10 +43,24 @@ export function createConversationRunnerFactory(
   options: {
     modelRetryPolicy?: Partial<AiModelRetryPolicy>;
     fileReader?: PersonalFileReader;
+    searchEndpoint?: string;
+    calculation?: AgentCalculationService;
+    documents?: AgentDocumentsService;
+    officeSchedules?: AgentScheduleService;
+    repository?: AgentRepositoryService;
+    retrieval?: AgentRetrievalService;
+    browser?: AgentBrowserService;
   } = {},
 ): ConversationRunnerFactory {
+  const budgetCalibration = new Map<string, ModelBudgetCalibration>();
   return async (selection, actor) => {
     const outputBudget = resolveModelOutputBudget(selection);
+    if (!selection.contextLimit)
+      throw new DomainError(
+        'PRECONDITIONS_MISSING',
+        '模型上下文Token窗口尚未明确配置，无法核对完整请求预算。',
+        422,
+      );
     const testConfiguration = new TestConfigurationService(db, broker);
     const plans = new PlanService(db, testConfiguration);
     const externalMcp = new ExternalMcpService(db, broker);
@@ -45,11 +73,36 @@ export function createConversationRunnerFactory(
     let activeIntentId: string | null = null;
     let activeInput: Parameters<ConversationRunner['run']>[1] | undefined;
     const v2 = 'runtimeVersion' in selection;
+    const budgetKey = JSON.stringify({
+      owner: actor.userId,
+      service: selection.modelServiceId,
+      entry: v2 ? selection.modelEntryId : selection.modelId,
+      revision: v2 ? selection.serviceRevision : selection.configRevision,
+      protocol: v2 ? selection.protocol : 'chatCompletions',
+    });
+    let calibration = budgetCalibration.get(budgetKey);
+    if (!calibration) {
+      calibration = createModelBudgetCalibration();
+      budgetCalibration.set(budgetKey, calibration);
+    }
     const native = createNativeModelAdapter(
       v2 ? selection.protocol : 'chatCompletions',
       {
         baseUrl: selection.baseUrl,
         model: selection.modelId,
+        ...(selection.contextLimit
+          ? { contextLimit: selection.contextLimit }
+          : {}),
+        contextBudgetCalibration: calibration,
+        onContextBudget: (budget) => {
+          if (activeInput && activeIntentId)
+            activeInput.onEvent({
+              type: 'contextBudget',
+              stage: 'dispatch',
+              modelAttemptId: activeIntentId,
+              budget: agentContextBudgetSnapshotSchema.parse(budget),
+            });
+        },
         // Only an administrator-saved loopback HTTP endpoint can pass the native adapter guard.
         allowLocalHttp: true,
         ...(v2 ? { authScheme: selection.authScheme } : {}),
@@ -148,6 +201,39 @@ export function createConversationRunnerFactory(
     });
     const host = new RestrictedAiHost(db, model, {
       nativeTextEvents: true,
+      ...(options.browser ? { browser: options.browser } : {}),
+      ...(options.retrieval ? { retrieval: options.retrieval } : {}),
+      ...(options.officeSchedules
+        ? { officeSchedules: options.officeSchedules }
+        : {}),
+      ...(v2
+        ? {
+            modelSelection: {
+              modelServiceId: selection.modelServiceId,
+              modelEntryId: selection.modelEntryId,
+              serviceRevision: selection.serviceRevision,
+              effort: selection.effort,
+            },
+          }
+        : {}),
+      ...(options.calculation ? { calculation: options.calculation } : {}),
+      ...(options.calculation
+        ? { office: new AgentOfficeService(options.calculation) }
+        : {}),
+      ...(options.repository ? { repository: options.repository } : {}),
+      ...(options.documents ? { documents: options.documents } : {}),
+      // Resource ceiling only. Token capacity is measured on the complete wire envelope.
+      contextMaxCharacters: 4_000_000,
+      bindContextFrame: (scopeId, prompt) =>
+        model.bindContextFrame(
+          createHash('sha256')
+            .update(budgetKey + ':' + scopeId)
+            .digest('hex'),
+          prompt,
+        ),
+      inspectContextBudget: (messages, tools) =>
+        model.inspectBudget(messages, tools),
+      agentWeb: new AgentWebService(db, options.searchEndpoint ?? null),
       modelRetryPolicy: { maxRetries: 5, ...options.modelRetryPolicy },
       externalServices: {
         connections: externalMcp,

@@ -1,6 +1,6 @@
 services:
   api:
-    image: aitesthub-app:0.1.0-local
+    image: ${AITESTHUB_APPLICATION_IMAGE:-aitesthub-app:0.1.2-local}
     build:
       context: ../..
       dockerfile: deploy/local/Dockerfile

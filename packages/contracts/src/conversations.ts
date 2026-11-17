@@ -1,3 +1,4 @@
+import { agentContextBudgetSnapshotSchema } from './agent-context.js';
 import { modelDataScopeSchema } from './configuration.js';
 import { z } from 'zod';
 import { workspaceAccessModeSchema } from './workspace-access.js';
@@ -380,6 +381,8 @@ const eventBase = {
   sentAt: timestampSchema.optional(),
 };
 export const aiToolSourceReferenceSchema = z.discriminatedUnion('kind', [
+  z.strictObject({kind:z.literal('conversation'),conversationId:idSchema,messageIds:z.array(idSchema).max(1000)}),
+  z.strictObject({ kind: z.literal('resource'), resourceId: idSchema }),
   z.strictObject({ kind: z.literal('projectAccess'), projectId: idSchema }),
   z.strictObject({
     kind: z.literal('knowledge'),
@@ -392,6 +395,12 @@ export const aiToolSourceReferenceSchema = z.discriminatedUnion('kind', [
   }),
 ]);
 export type AiToolSourceReference = z.infer<typeof aiToolSourceReferenceSchema>;
+/** Pure provenance projection; authorization remains in ConversationReferences. */
+export function freezeAiToolSource(source:AiToolSourceReference,dataScope:z.infer<typeof dataScopeSchema>) {
+  return frozenConversationReferenceSchema.parse(source.kind==='conversation'?{
+    reference:{kind:'conversation',conversationId:source.conversationId,mode:'full',dataScope},messageIds:source.messageIds,resourceIds:[],
+  }:{reference:{...source,dataScope}});
+}
 const referenceAvailabilitySchema = z.enum([
   'available',
   'partial',
@@ -474,6 +483,16 @@ export const aiTaskEventSchema = z.discriminatedUnion('type', [
     ...eventBase,
     type: z.literal('ai.guidance.loaded'),
     payload: z.strictObject({ receipt: sharedSkillRuleReadMetadataSchema }),
+  }),
+  z.strictObject({
+    ...eventBase,
+    type: z.literal('ai.contextBudget'),
+    payload: z.strictObject({
+      type: z.literal('contextBudget'),
+      stage: z.enum(['preflight', 'dispatch']),
+      modelAttemptId: idSchema,
+      budget: agentContextBudgetSnapshotSchema,
+    }),
   }),
   z.strictObject({
     ...eventBase,

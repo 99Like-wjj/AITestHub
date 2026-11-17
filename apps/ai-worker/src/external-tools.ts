@@ -12,6 +12,7 @@ import {
 } from '../../../packages/application/src/external-mcp/safety.js';
 import { DomainError } from '../../../packages/application/src/errors.js';
 import type { AiHostEvent } from './host.js';
+import type { createAgentWebTools } from './agent-web-tools.js';
 import {
   createAiPublicSearchTool,
   publicSearchModelReceipt,
@@ -96,6 +97,7 @@ export async function createAiExternalTools(
     conversationId: string;
     assertActive: () => Promise<void>;
     emit: (event: AiHostEvent) => void;
+    defaultSearch?: ReturnType<typeof createAgentWebTools>['search'];
   },
 ) {
   if (!services || !options.taskId) return [];
@@ -119,12 +121,14 @@ export async function createAiExternalTools(
   const makeSearch = (
     profiles: Parameters<typeof createAiPublicSearchTool>[2],
   ) =>
-    createAiPublicSearchTool(actor, services.invocations, profiles, {
-      taskId: options.taskId!,
-      originalPrompt: row.original_prompt,
-      assertActive: options.assertActive,
-      emit: options.emit,
-    });
+    !profiles.length && options.defaultSearch
+      ? options.defaultSearch
+      : createAiPublicSearchTool(actor, services.invocations, profiles, {
+          taskId: options.taskId!,
+          originalPrompt: row.original_prompt,
+          assertActive: options.assertActive,
+          emit: options.emit,
+        });
   if (!connections.length && !resultRefs.length) return [makeSearch([])];
   const available = await services.connections.availableTools(actor),
     names = new Set<string>();

@@ -2,18 +2,35 @@ import { randomUUID } from 'node:crypto';
 import type { ModelProtocol } from '../../contracts/src/model-protocol.js';
 import { resolveModelEndpoint } from './model-endpoint.js';
 import {
+  createModelBudgetCalibration,
+  estimateModelBudget,
+  ModelImageBudgetError,
+  opaqueOutputReserve,
+  type ModelBudgetCalibration,
+  type ModelBudgetEstimate,
+} from './context-budget.js';
+import {
+  modelContentText,
+  serializeModelContent,
+  validateModelContent,
+} from './model-content.js';
+import {
   OpenAiCompatibleAdapter,
   ModelAdapterError,
   maximumNativeModelOutputTokens,
   emptyUsage,
   mergeUsage,
   parseModelRetryAfter,
+  checkModelContextFrame,
+  modelContextFrameHash,
   type AdapterOptions,
   type ModelContinuation,
   type ModelRequest,
   type ModelResponse,
   type ModelToolCall,
   type TokenUsage,
+  type BoundModelContextFrame,
+  type ModelMessage,
 } from './openai-compatible.js';
 
 export type ModelApiProtocol = ModelProtocol;
@@ -21,6 +38,7 @@ export interface NativeModelAdapter {
   readonly maxAttempts: 1;
   readonly model: string;
   complete(request: ModelRequest): Promise<ModelResponse>;
+  inspectBudget(request: ModelRequest): ModelBudgetEstimate;
   release(continuation: ModelContinuation): void;
 }
 type JsonObject = Record<string, unknown>;
@@ -30,6 +48,8 @@ interface ProtectedExchange {
   output: unknown[];
   system: string;
   toolIds: string[];
+  opaqueTokensReserve: number;
+  contextFrame?: BoundModelContextFrame;
 }
 interface Parsed {
   content: string;
@@ -64,12 +84,15 @@ class TypedProtocolAdapter implements NativeModelAdapter {
   readonly #endpoint: URL;
   readonly #options: AdapterOptions;
   readonly #history = new WeakMap<ModelContinuation, ProtectedExchange>();
+  readonly #calibration: ModelBudgetCalibration;
   constructor(
     readonly protocol: TypedProtocol,
     options: AdapterOptions,
   ) {
     this.model = options.model;
     this.#options = Object.freeze({ ...options });
+    this.#calibration =
+      options.contextBudgetCalibration ?? createModelBudgetCalibration();
     let endpoint: URL;
     try {
       endpoint = resolveModelEndpoint(options.baseUrl, protocol);
@@ -92,6 +115,9 @@ class TypedProtocolAdapter implements NativeModelAdapter {
       endpoint.hash ||
       (options.authScheme !== undefined &&
         !['bearer', 'xApiKey'].includes(options.authScheme)) ||
+      (options.contextLimit !== undefined &&
+        (!Number.isSafeInteger(options.contextLimit) ||
+          options.contextLimit < 1)) ||
       !/^[A-Za-z0-9_.:/-]{1,200}$/.test(this.model)
     )
       throw new ModelAdapterError(
@@ -104,8 +130,37 @@ class TypedProtocolAdapter implements NativeModelAdapter {
   release(continuation: ModelContinuation) {
     this.#history.delete(continuation);
   }
+  #estimate(body: JsonObject, request: ModelRequest) {
+    try {
+      return estimateModelBudget(body, {
+        protocol: this.protocol,
+        ...(this.#options.contextLimit === undefined
+          ? {}
+          : { contextLimit: this.#options.contextLimit }),
+        maxOutput: request.maxTokens,
+        calibration: this.#calibration,
+        opaqueTokens: request.continuation
+          ? (this.#history.get(request.continuation)?.opaqueTokensReserve ?? 0)
+          : 0,
+      });
+    } catch (error: unknown) {
+      if (error instanceof ModelImageBudgetError)
+        throw new ModelAdapterError(
+          'IMAGE_BUDGET_UNAVAILABLE',
+          'notDispatched',
+          randomUUID(),
+        );
+      throw error;
+    }
+  }
+  inspectBudget(request: ModelRequest): ModelBudgetEstimate {
+    const prepared = this.#body(request, randomUUID());
+    return this.#estimate(prepared.body, request);
+  }
 
   #body(request: ModelRequest, id: string) {
+    for (const message of request.messages)
+      validateModelContent(message.content, message.role);
     const invalid = () =>
       new ModelAdapterError('INVALID_REQUEST', 'notDispatched', id);
     if (request.sampling !== undefined) throw invalid();
@@ -129,6 +184,36 @@ class TypedProtocolAdapter implements NativeModelAdapter {
         'notDispatched',
         id,
       );
+    const identity = checkModelContextFrame(request, prior?.contextFrame, id);
+    const serialize = (item: ModelMessage) => ({
+      role: item.role,
+      content: serializeModelContent(item.content, item.role, this.protocol),
+    });
+    const prefix =
+      request.contextFrame?.prefix
+        .filter(
+          (item) => this.protocol === 'responses' || item.role !== 'system',
+        )
+        .map(serialize) ?? [];
+    let priorInput = prior?.input ?? [];
+    if (identity && prior?.contextFrame && request.contextFrame) {
+      if (
+        modelContextFrameHash(priorInput[prior.contextFrame.prefixLength]) !==
+        modelContextFrameHash(serialize(request.contextFrame.user))
+      )
+        throw new ModelAdapterError(
+          'CONTEXT_FRAME_MISMATCH',
+          'notDispatched',
+          id,
+        );
+      priorInput = [
+        ...prefix,
+        ...priorInput.slice(prior.contextFrame.prefixLength),
+      ];
+    }
+    const contextFrame = identity
+      ? { ...identity, prefixLength: prefix.length }
+      : undefined;
     const results = request.toolResults ?? [];
     if (results.length && !prior) throw invalid();
     if (
@@ -143,14 +228,29 @@ class TypedProtocolAdapter implements NativeModelAdapter {
       prior?.system ?? '',
       ...request.messages
         .filter((item) => item.role === 'system')
-        .map((item) => item.content),
+        .map((item) => modelContentText(item.content)),
     ]
       .filter(Boolean)
       .join('\n\n');
+    if (contextFrame && this.protocol === 'anthropicMessages') {
+      const frameSystem = request.contextFrame?.prefix
+        .filter((item) => item.role === 'system')
+        .map((item) => modelContentText(item.content))
+        .filter(Boolean)
+        .join('\n\n');
+      // Messages stores system separately. Rebasing must not replace, duplicate
+      // or erase the bound authority while changing its ordinary message prefix.
+      if (frameSystem !== system)
+        throw new ModelAdapterError(
+          'CONTEXT_FRAME_MISMATCH',
+          'notDispatched',
+          id,
+        );
+    }
     let input: unknown[];
     if (this.protocol === 'responses') {
       input = [
-        ...(prior ? [...prior.input, ...prior.output] : []),
+        ...(prior ? [...priorInput, ...prior.output] : []),
         ...results.map((item) => ({
           type: 'function_call_output',
           call_id: item.toolCallId,
@@ -158,7 +258,7 @@ class TypedProtocolAdapter implements NativeModelAdapter {
         })),
         ...request.messages.map((item) => ({
           role: item.role,
-          content: item.content,
+          content: serializeModelContent(item.content, item.role, 'responses'),
         })),
       ];
       const body: JsonObject = {
@@ -195,11 +295,11 @@ class TypedProtocolAdapter implements NativeModelAdapter {
                   strict: request.responseFormat.strict,
                 },
         };
-      return { body, input, system: '' };
+      return { body, input, system: '', contextFrame };
     }
     input = [
       ...(prior
-        ? [...prior.input, { role: 'assistant', content: prior.output }]
+        ? [...priorInput, { role: 'assistant', content: prior.output }]
         : []),
       ...(results.length
         ? [
@@ -215,7 +315,14 @@ class TypedProtocolAdapter implements NativeModelAdapter {
         : []),
       ...request.messages
         .filter((item) => item.role !== 'system')
-        .map((item) => ({ role: item.role, content: item.content })),
+        .map((item) => ({
+          role: item.role,
+          content: serializeModelContent(
+            item.content,
+            item.role,
+            'anthropicMessages',
+          ),
+        })),
     ];
     const body: JsonObject = {
       model: this.model,
@@ -251,7 +358,7 @@ class TypedProtocolAdapter implements NativeModelAdapter {
     if (request.responseFormat?.type === 'json_object') throw invalid();
     // Messages requires an explicit JSON schema; never silently drop a requested output mode.
     if (Object.keys(output).length) body.output_config = output;
-    return { body, input, system };
+    return { body, input, system, contextFrame };
   }
 
   #parse(raw: unknown, id: string, requestId: string | null): Parsed {
@@ -766,6 +873,26 @@ class TypedProtocolAdapter implements NativeModelAdapter {
   async complete(request: ModelRequest): Promise<ModelResponse> {
     const clientRequestId = randomUUID(),
       prepared = this.#body(request, clientRequestId);
+    const estimate = this.#estimate(prepared.body, request);
+    this.#options.onContextBudget?.(
+      Object.freeze({
+        ...estimate,
+        components: Object.freeze({ ...estimate.components }),
+      }),
+    );
+    if (!estimate.fits)
+      throw new ModelAdapterError(
+        'CONTEXT_BUDGET_EXCEEDED',
+        'notDispatched',
+        clientRequestId,
+        null,
+        null,
+        null,
+        null,
+        0,
+        null,
+        estimate,
+      );
     let serialized: string;
     try {
       serialized = JSON.stringify(prepared.body);
@@ -919,7 +1046,18 @@ class TypedProtocolAdapter implements NativeModelAdapter {
         output: parsed.output,
         system: prepared.system,
         toolIds: parsed.calls.map((call) => call.id),
+        opaqueTokensReserve:
+          estimate.components.opaqueTokens +
+          opaqueOutputReserve(
+            parsed.output,
+            parsed.usage.outputTokens,
+            estimate.maxOutput,
+          ),
+        ...(prepared.contextFrame
+          ? { contextFrame: prepared.contextFrame }
+          : {}),
       });
+      this.#calibration.observe(estimate, parsed.usage.inputTokens);
       return {
         content: parsed.content,
         toolCalls: parsed.calls,

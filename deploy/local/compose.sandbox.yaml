@@ -1,0 +1,35 @@
+# Optional trusted broker only. API/AI worker must not receive the Docker socket.
+# Build/provision the broker image externally with Node, Docker CLI and compiled runtime.
+# The Python execution image must already exist on this Docker daemon by immutable digest.
+services:
+  sandbox-broker:
+    image: ${AITESTHUB_SANDBOX_BROKER_IMAGE:?explicit immutable broker image required}
+    entrypoint: ['node', '/app/dist/packages/agent-runtime/src/main.js']
+    command: []
+    restart: unless-stopped
+    environment:
+      AITESTHUB_SANDBOX_BIND_HOST: 0.0.0.0
+      AITESTHUB_SANDBOX_PORT: '5312'
+      AITESTHUB_SANDBOX_IMAGE: ${AITESTHUB_SANDBOX_IMAGE:?immutable execution image required}
+      AITESTHUB_SANDBOX_TOKEN_FILE: /run/secrets/sandbox_broker_token
+      AITESTHUB_SANDBOX_JOURNAL_DIRECTORY: /var/lib/aitesthub-sandbox-journal
+    secrets: [sandbox_broker_token]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${AITESTHUB_SANDBOX_JOURNAL_ROOT:?external journal directory required}:/var/lib/aitesthub-sandbox-journal
+    read_only: true
+    tmpfs: ['/tmp:size=16m,noexec,nosuid,nodev']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 768m
+    cpus: 1
+    networks: [sandbox-control]
+    logging:
+      driver: json-file
+      options: { max-size: '2m', max-file: '2' }
+secrets:
+  sandbox_broker_token:
+    file: ${AITESTHUB_SANDBOX_TOKEN_FILE:?external secret file required}
+networks:
+  sandbox-control:
+    internal: true

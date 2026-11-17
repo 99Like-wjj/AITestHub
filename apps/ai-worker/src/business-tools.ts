@@ -17,6 +17,102 @@ import { DomainError } from '../../../packages/application/src/errors.js';
 import type { AiHostEvent } from './host.js';
 import { assertSourceProjectAllowed } from '../../../packages/application/src/conversations/source-projects.js';
 import { recoveryFencesReady } from '../../../packages/application/src/recovery/fences.js';
+import { assertTaskCapability } from '../../../packages/application/src/conversations/task-capabilities.js';
+import { requirementCandidatesInputSchema } from '../../../packages/contracts/src/requirements.js';
+
+const officeRequirementFindSchema = z.union([
+  requirementCandidatesInputSchema.safeExtend({ op: z.literal('find') }),
+  z.strictObject({
+    op: z.literal('find'),
+    input: requirementCandidatesInputSchema,
+  }),
+]);
+// Only reviewed read handlers belong here. A registry "read" label alone does
+// not establish absence of platform writes, even during prepare. New operations
+// stay closed until reviewed. This projection serves schemas and dispatch.
+const reviewedOfficeReadOperations: ReadonlySet<string> = new Set([
+  'ath_api_runs.attempt-detail',
+  'ath_api_runs.debug-trace',
+  'ath_api_runs.events',
+  'ath_api_runs.status',
+  'ath_assets.auxiliary-by-command',
+  'ath_assets.auxiliary-status',
+  'ath_assets.get',
+  'ath_assets.list',
+  'ath_database_connections.get',
+  'ath_database_connections.list',
+  'ath_issues.auxiliary-by-command',
+  'ath_issues.auxiliary-status',
+  'ath_issues.get',
+  'ath_issues.list',
+  'ath_knowledge.export',
+  'ath_knowledge.get',
+  'ath_knowledge.history',
+  'ath_knowledge.list-index',
+  'ath_knowledge.search',
+  'ath_knowledge.spaces',
+  'ath_knowledge_changes.get-comparison',
+  'ath_knowledge_changes.get-selection-receipts',
+  'ath_operation_status.get',
+  'ath_plans.get',
+  'ath_plans.list',
+  'ath_problems.get',
+  'ath_problems.list',
+  'ath_project_members.candidates',
+  'ath_project_members.list',
+  'ath_reports.get',
+  'ath_reports.get-revision',
+  'ath_reports.list',
+  'ath_reports.list-executions',
+  'ath_reports.search-in-scope',
+  'ath_requirement_materials.get-manifest',
+  'ath_requirement_materials.prepare-version',
+  'ath_requirement_membership.get',
+  'ath_requirement_state.deletion-receipt',
+  'ath_requirements.auxiliary-by-command',
+  'ath_requirements.auxiliary-status',
+  'ath_requirements.find',
+  'ath_requirements.get',
+  'ath_requirements.list',
+  'ath_requirements.list-page',
+  'ath_results.get',
+  'ath_results.prepare',
+  'ath_results.receipt',
+  'ath_results.resource-capabilities',
+  'ath_results.ui-batch-receipt',
+  'ath_results.ui-delivery-status',
+  'ath_retests.get',
+  'ath_retests.group',
+  'ath_retests.list',
+  'ath_retests.start-preview',
+  'ath_reviews.opinions',
+  'ath_schedules.get',
+  'ath_schedules.list',
+  'ath_schedules.occurrences',
+  'ath_schedules.preview',
+  'ath_test_configuration.get',
+  'ath_test_configuration.list',
+  'ath_ui_executions.get-close-progress-batch',
+  'ath_ui_executions.get-scope',
+  'ath_ui_executions.prepare',
+  'ath_ui_executions.preview-close-progress-batch',
+  'ath_ui_executions.resume',
+  'ath_ui_executions.status',
+]);
+function officeBusinessOperationSchema(
+  name: string,
+  op: string,
+  operation: { access: 'read' | 'write'; schema: z.ZodType },
+): z.ZodType | null {
+  if (
+    operation.access !== 'read' ||
+    !reviewedOfficeReadOperations.has(`${name}.${op}`)
+  )
+    return null;
+  return name === 'ath_requirements' && op === 'find'
+    ? officeRequirementFindSchema
+    : operation.schema;
+}
 
 /** Fixed names, no filesystem, shell, arbitrary network/SQL, execute or subagent entry. */
 export const AI_BUSINESS_TOOL_NAMES = [
@@ -263,6 +359,7 @@ export function createAiBusinessTools(
     allowedSourceProjectIds?: readonly string[];
     assertActive: () => Promise<void>;
     assertEffectsSettled?: () => void | Promise<void>;
+    readOnly?: boolean;
     emit: (event: AiHostEvent) => void;
   },
 ) {
@@ -273,6 +370,12 @@ export function createAiBusinessTools(
     AI_BUSINESS_TOOL_NAMES.some((name) => name === entry.name),
   );
   for (const entry of entries) {
+    if (options.readOnly)
+      for (const [op, operation] of entry.operations) {
+        const schema = officeBusinessOperationSchema(entry.name, op, operation);
+        if (!schema) entry.operations.delete(op);
+        else operation.schema = schema;
+      }
     // Platform AI may prepare/read local UI scope. It cannot manufacture local observations or result facts.
     if (entry.name === 'ath_ui_executions')
       for (const op of ['claim', 'progress', 'declare-end', 'declare-resume'])
@@ -304,6 +407,49 @@ export function createAiBusinessTools(
           });
           try {
             await options.assertActive();
+            const requested = z.object({ op: z.string() }).parse(raw);
+            const operation = entry.operations.get(requested.op);
+            const assertPolicy = async () => {
+              let officePolicy = options.readOnly === true;
+              if (!options.taskId) {
+                if (options.readOnly)
+                  throw new DomainError(
+                    'FORBIDDEN',
+                    '只读办公工具须关联原任务。',
+                    403,
+                  );
+              } else {
+                const persisted = await db.transaction((tx) =>
+                  assertTaskCapability(
+                    tx,
+                    actor,
+                    {
+                      taskId: options.taskId!,
+                      conversationId: options.conversationId,
+                    },
+                    operation?.access === 'write'
+                      ? 'businessWrite'
+                      : 'businessRead',
+                    { active: true },
+                  ),
+                );
+                officePolicy ||= persisted.executionPolicy === 'officeOnly';
+              }
+              const schema =
+                operation &&
+                officeBusinessOperationSchema(
+                  entry.name,
+                  requested.op,
+                  operation,
+                );
+              if (officePolicy && (!schema || !schema.safeParse(raw).success))
+                throw new DomainError(
+                  'FORBIDDEN',
+                  '定时办公任务只读取既有业务资料，不创建业务快照、提案或辅助任务。',
+                  403,
+                );
+            };
+            await assertPolicy();
             const prepared = await registry.prepare(actor, entry.name, raw);
             if (options.allowedSourceProjectIds !== undefined) {
               let sourceProjectId = prepared.projectId;
@@ -354,6 +500,7 @@ export function createAiBusinessTools(
               );
             }
             if (prepared.confirmation) {
+              await assertPolicy();
               if (!options.taskId)
                 throw new DomainError(
                   'PRECONDITIONS_MISSING',
@@ -400,6 +547,7 @@ export function createAiBusinessTools(
             }
             writeStarted =
               entry.operations.get(prepared.op)?.access === 'write';
+            await assertPolicy();
             const result = await prepared.execute();
             const sourceRefs: AiToolSourceReference[] = prepared.projectId
               ? [{ kind: 'projectAccess', projectId: prepared.projectId }]

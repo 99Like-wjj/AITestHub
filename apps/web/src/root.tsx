@@ -162,6 +162,8 @@ const pageKeys = new Set([
 ]);
 
 const personalSettingsTabs = new Set([
+  'memory',
+  'agent-schedules',
   'profile',
   'security',
   'appearance',

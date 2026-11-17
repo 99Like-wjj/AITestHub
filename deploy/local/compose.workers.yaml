@@ -1,7 +1,7 @@
 # Local workers share application code but receive only their own credentials.
 services:
   api-worker:
-    image: ${AITESTHUB_API_WORKER_IMAGE:-aitesthub-app:0.1.0-local}
+    image: ${AITESTHUB_API_WORKER_IMAGE:-aitesthub-app:0.1.2-local}
     profiles: [workers]
     restart: unless-stopped
     command: [node, dist/apps/api-worker/src/main.js]
@@ -21,7 +21,7 @@ services:
     stop_grace_period: 15s
     logging: { driver: json-file, options: { max-size: '5m', max-file: '3' } }
   ai-worker:
-    image: aitesthub-app:0.1.0-local
+    image: ${AITESTHUB_APPLICATION_IMAGE:-aitesthub-app:0.1.2-local}
     profiles: [workers]
     restart: unless-stopped
     command: [node, dist/apps/ai-worker/src/main.js]

@@ -38,6 +38,8 @@ import {
   personalKeyCreatedSchema,
 } from '../../../packages/contracts/src/identity';
 import './personal-settings-page.css';
+import { AgentMemoryPanel } from './agent-memory';
+import { AgentSchedules } from './agent-schedules';
 
 function KeySettings() {
   const { modal, message } = App.useApp();
@@ -264,6 +266,8 @@ export function PersonalSettings({
     'profile',
     'security',
     'appearance',
+    'memory',
+    'agent-schedules',
     'usage',
     'archive',
     'resources',
@@ -425,6 +429,12 @@ export function PersonalSettings({
         }}
         destroyOnHidden
         items={[
+          {
+            key: 'agent-schedules',
+            label: '提醒与定时任务',
+            children: <AgentSchedules />,
+          },
+          { key: 'memory', label: '个人记忆', children: <AgentMemoryPanel /> },
           {
             key: 'profile',
             label: '基本资料',

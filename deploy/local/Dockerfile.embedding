@@ -1,0 +1,11 @@
+ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72
+FROM ${PYTHON_IMAGE}
+COPY deploy/local/requirements.embedding.txt /tmp/requirements.embedding.txt
+RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r /tmp/requirements.embedding.txt \
+    && rm /tmp/requirements.embedding.txt
+COPY packages/agent-embedding/provision.py /tmp/provision.py
+RUN python /tmp/provision.py && rm /tmp/provision.py
+COPY packages/agent-embedding/server.py /opt/aitesthub-embedding/server.py
+ENV HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false PYTHONDONTWRITEBYTECODE=1
+USER 65534:65534
+ENTRYPOINT ["python", "/opt/aitesthub-embedding/server.py"]

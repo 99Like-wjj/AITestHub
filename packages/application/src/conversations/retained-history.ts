@@ -1,7 +1,17 @@
 import { z } from 'zod';
+import {
+  AIMessage,
+  HumanMessage,
+  type BaseMessage,
+} from '@langchain/core/messages';
+import type { AgentContextArchiveRecord } from '../../../contracts/src/agent-context.js';
+import { compactModelMessages } from '../agent-context/compaction.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import type { WorkspaceAccessMode } from '../../../contracts/src/workspace-access.js';
-import { aiToolSourceReferenceSchema } from '../../../contracts/src/conversations.js';
+import {
+  aiToolSourceReferenceSchema,
+  freezeAiToolSource,
+} from '../../../contracts/src/conversations.js';
 import type { Database } from '../../../persistence/src/database.js';
 import type { ConversationReferences, FrozenReference } from './references.js';
 import { canonicalJson } from '../operations/service.js';
@@ -20,6 +30,8 @@ export interface RetainedConversationHistory {
     sources: FrozenReference[];
   }[];
   unavailableToolSources: boolean;
+  /** Current-authority originals; import into the new scope before dispatch. */
+  archives?: AgentContextArchiveRecord[];
 }
 interface HistoryRow {
   id: string;
@@ -30,6 +42,8 @@ interface HistoryRow {
   status: string;
   model_snapshot: unknown;
   deleted_at: Date | null;
+  created_at: Date;
+  cursor_created_at: string;
 }
 const modeSchema = z.object({
   workspaceAccessMode: z.enum(['full', 'restricted']).optional(),
@@ -67,34 +81,44 @@ export async function readRetainedConversationHistory(
     ).rows[0];
     if (!current)
       throw new DomainError('NOT_FOUND', '当前任务不属于此账号的会话。', 404);
-    return (
-      await tx.query<HistoryRow>(
-        `SELECT m.id,t.id task_id,t.data_scope,m.role,m.content,m.status,m.model_snapshot,m.deleted_at
+    const rows: HistoryRow[] = [];
+    let cursor: HistoryRow | undefined;
+    let characters = 0;
+    for (;;) {
+      const page = (
+        await tx.query<HistoryRow>(
+          `SELECT m.id,t.id task_id,t.data_scope,m.role,m.content,m.status,m.model_snapshot,m.deleted_at,m.created_at,m.created_at::text cursor_created_at
          FROM app.ai_messages m LEFT JOIN app.ai_tasks t
          ON t.owner_id=$4 AND t.conversation_id=m.conversation_id
          AND (t.user_message_id=m.id OR t.assistant_message_id=m.id)
          WHERE m.conversation_id=$1
          AND m.id<>$2 AND m.id<>$3
          AND m.created_at<=(SELECT created_at FROM app.ai_messages WHERE id=$2)
-         ORDER BY m.created_at,m.id LIMIT 1001`,
-        [
-          input.conversationId,
-          current.user_message_id,
-          current.assistant_message_id,
-          actor.userId,
-        ],
-      )
-    ).rows;
+         AND ($5::timestamptz IS NULL OR (m.created_at,m.id)>($5::timestamptz,$6::uuid))
+         ORDER BY m.created_at,m.id LIMIT 100`,
+          [
+            input.conversationId,
+            current.user_message_id,
+            current.assistant_message_id,
+            actor.userId,
+            cursor?.cursor_created_at ?? null,
+            cursor?.id ?? null,
+          ],
+        )
+      ).rows;
+      for (const row of page) characters += row.content.length + 128;
+      rows.push(...page);
+      if (rows.length > 2000 || characters > 20_000_000)
+        throw new DomainError(
+          'PRECONDITIONS_MISSING',
+          '历史超过本次分页恢复安全范围（2000条/2000万字符），请缩小引用；未静默跳过或直接外发完整历史。',
+          422,
+        );
+      cursor = page.at(-1);
+      if (page.length < 100) break;
+    }
+    return rows;
   });
-  if (
-    rows.length > 1000 ||
-    rows.reduce((size, row) => size + row.content.length + 128, 0) > 100_000
-  )
-    throw new DomainError(
-      'PRECONDITIONS_MISSING',
-      '已保存历史超过本次安全上下文范围，请明确缩小引用后继续；未将缺失历史冒称已读。',
-      422,
-    );
   const eligible = rows.filter((row) => {
     if (row.deleted_at || row.status === 'deleted') return false;
     if (
@@ -184,9 +208,9 @@ export async function readRetainedConversationHistory(
     }
     for (const [key, tool] of tools) {
       const { sourceRefs, ...metadata } = tool.fact;
-      const sources: FrozenReference[] = (sourceRefs ?? []).map((source) => ({
-        reference: { ...source, dataScope: input.dataScope },
-      }));
+      const sources: FrozenReference[] = (sourceRefs ?? []).map((source) =>
+        freezeAiToolSource(source, input.dataScope),
+      );
       let readable = sources.length > 0 && tool.fact.state !== 'started';
       for (const source of sources)
         if (!(await references.readable(actor, source))) {
@@ -206,24 +230,24 @@ export async function readRetainedConversationHistory(
     (row) =>
       row.role !== 'assistant' || !row.task_id || !deniedTasks.has(row.task_id),
   );
-  const resolved = bodyEligible.length
-    ? (
-        await references.resolve(actor, [
-          {
-            reference: {
-              kind: 'conversation',
-              conversationId: input.conversationId,
-              mode: 'full',
-              dataScope: input.dataScope,
-            },
-            messageIds: bodyEligible.map((row) => row.id),
-            resourceIds: [],
-          },
-        ])
-      )[0]
-    : undefined;
-  const readableIds = new Set(resolved?.messageIds ?? []);
-  const readable = bodyEligible.filter((row) => readableIds.has(row.id));
+  // Do not join/truncate a complete conversation via resolve() before its
+  // originals can be archived. Reuse the same per-message provenance checks.
+  const readable: HistoryRow[] = [];
+  for (const row of bodyEligible) {
+    if (
+      await references.readable(actor, {
+        reference: {
+          kind: 'conversation',
+          conversationId: input.conversationId,
+          mode: 'full',
+          dataScope: input.dataScope,
+        },
+        messageIds: [row.id],
+        resourceIds: [],
+      })
+    )
+      readable.push(row);
+  }
   const readableTasks = new Set(
     readable
       .filter((row) => row.role === 'assistant')
@@ -235,6 +259,22 @@ export async function readRetainedConversationHistory(
       .flatMap((row) => (row.task_id ? [row.task_id] : [])),
   );
   const restoredSources = new Map<string, FrozenReference>();
+  // Recheck body lineage on every subsequent dispatch/read in the new scope,
+  // not just the single recovery fetch. Earlier message IDs make an acyclic
+  // provenance edge; no reference to this task's pending assistant is inserted.
+  for (let offset = 0; offset < readable.length; offset += 100) {
+    const source: FrozenReference = {
+      reference: {
+        kind: 'conversation',
+        conversationId: input.conversationId,
+        mode: 'full',
+        dataScope: input.dataScope,
+      },
+      messageIds: readable.slice(offset, offset + 100).map((row) => row.id),
+      resourceIds: [],
+    };
+    restoredSources.set(canonicalJson(source), source);
+  }
   const allowedTools: RetainedConversationHistory['tools'] = [];
   for (const [key, tool] of tools) {
     const proof = sourceProof.get(key);
@@ -250,8 +290,16 @@ export async function readRetainedConversationHistory(
     });
   }
   const omitted = readable.length !== rows.length;
-  const text = [
-    resolved?.text ?? '',
+  const originalMessages: BaseMessage[] = readable.map((row) => {
+    const message = {
+      id: row.id,
+      content: `${row.role} (state=${row.status}; original-message=${row.id}${row.task_id ? '; task=' + row.task_id : ''}): ${row.content || '[无已保存正文]'}`,
+    };
+    return row.role === 'user'
+      ? new HumanMessage(message)
+      : new AIMessage(message);
+  });
+  const notices = [
     omitted
       ? '[Some earlier content was omitted because its current permission, access mode or deletion state could not be verified.]'
       : '',
@@ -259,12 +307,33 @@ export async function readRetainedConversationHistory(
   ]
     .filter(Boolean)
     .join('\n\n');
-  if (text.length > 100_000)
-    throw new DomainError(
-      'PRECONDITIONS_MISSING',
-      '历史与回执元数据超出上下文限额，未截断冒称完整读取。',
-      422,
-    );
+  const fullText = [
+    ...originalMessages.map((message) => String(message.content)),
+    notices,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+  const sentinels: BaseMessage[] = [
+    new HumanMessage('Historical recovery boundary; not a user request.'),
+    new AIMessage('Historical recovery boundary.'),
+  ];
+  const projection =
+    fullText.length > 60_000
+      ? compactModelMessages(
+          [
+            ...originalMessages,
+            ...(notices ? [new HumanMessage(notices)] : []),
+            ...sentinels,
+          ],
+          { maxCharacters: 60_000, keepRecentMessages: 2 },
+        )
+      : null;
+  const text = projection
+    ? projection.messages
+        .filter((message) => !sentinels.includes(message))
+        .map((message) => String(message.content))
+        .join('\n\n')
+    : fullText;
   return {
     text,
     userContents: readable
@@ -274,5 +343,6 @@ export async function readRetainedConversationHistory(
     sources: [...restoredSources.values()],
     tools: allowedTools,
     unavailableToolSources,
+    ...(projection ? { archives: projection.archives } : {}),
   };
 }

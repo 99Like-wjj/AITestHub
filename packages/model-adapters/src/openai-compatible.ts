@@ -1,7 +1,17 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ModelAuthScheme } from '../../contracts/src/model-protocol.js';
 import { resolveModelEndpoint } from './model-endpoint.js';
+import type { ModelContent } from '../../contracts/src/model-content.js';
+import { serializeModelContent } from './model-content.js';
+import {
+  createModelBudgetCalibration,
+  estimateModelBudget,
+  ModelImageBudgetError,
+  opaqueOutputReserve,
+  type ModelBudgetCalibration,
+  type ModelBudgetEstimate,
+} from './context-budget.js';
 import {
   resolveModelSampling,
   type ModelSamplingParameters,
@@ -13,7 +23,7 @@ export type JsonValue = z.infer<ReturnType<typeof z.json>>;
 export const maximumNativeModelOutputTokens = 393_216;
 export interface ModelMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: ModelContent;
 }
 export interface ModelTool {
   name: string;
@@ -71,6 +81,17 @@ export interface ModelRequest {
   toolResults?: readonly ModelToolResult[];
   signal?: AbortSignal;
   onDelta?: (delta: ModelDelta) => void;
+  /** Trusted worker binding only; never a tool/model-supplied input. */
+  contextFrame?: {
+    scopeId: string;
+    user: ModelMessage;
+    prefix: readonly ModelMessage[];
+  };
+}
+export interface BoundModelContextFrame {
+  scopeId: string;
+  userHash: string;
+  prefixLength: number;
 }
 export interface ModelResponse {
   content: string;
@@ -91,6 +112,9 @@ export type ModelAdapterErrorCode =
   | 'DISPATCH_PRECONDITIONS_FAILED'
   | 'UNSAFE_MODEL_INPUT'
   | 'CONTINUATION_UNAVAILABLE'
+  | 'CONTEXT_BUDGET_EXCEEDED'
+  | 'IMAGE_BUDGET_UNAVAILABLE'
+  | 'CONTEXT_FRAME_MISMATCH'
   | 'HTTP_ERROR'
   | 'NETWORK_ERROR'
   | 'TIMEOUT'
@@ -109,6 +133,7 @@ export class ModelAdapterError extends Error {
     readonly providerType: string | null = null,
     readonly attemptedRequests: 0 | 1 = certainty === 'notDispatched' ? 0 : 1,
     readonly retryAfterMs: number | null = null,
+    readonly contextBudget: ModelBudgetEstimate | null = null,
   ) {
     super(
       `Model request ${code.toLowerCase()}; inspect its recorded status before another request.`,
@@ -126,6 +151,9 @@ export interface AdapterOptions {
   fetch?: typeof globalThis.fetch;
   /** For isolated loopback fixtures only, never arbitrary plaintext HTTP. */
   allowLocalHttp?: boolean;
+  contextLimit?: number;
+  contextBudgetCalibration?: ModelBudgetCalibration;
+  onContextBudget?: (estimate: Readonly<ModelBudgetEstimate>) => void;
   onDispatch?: (attempt: {
     clientRequestId: string;
     model: string;
@@ -137,6 +165,59 @@ export interface AdapterOptions {
     monotonicMs: number;
     sampling?: ModelSamplingMetadata;
   }) => void;
+}
+/** Stable equality for trusted frame boundaries, never provider/body logging. */
+export function modelContextFrameHash(value: unknown): string {
+  const canonical = (entry: unknown): unknown => {
+    if (Array.isArray(entry)) return entry.map(canonical);
+    if (entry === null || typeof entry !== 'object') return entry;
+    return Object.fromEntries(
+      Object.entries(entry)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, child]) => [key, canonical(child)]),
+    );
+  };
+  return createHash('sha256')
+    .update(JSON.stringify(canonical(value)) ?? 'undefined')
+    .digest('hex');
+}
+export function checkModelContextFrame(
+  request: ModelRequest,
+  prior: BoundModelContextFrame | undefined,
+  clientRequestId: string,
+): Omit<BoundModelContextFrame, 'prefixLength'> | undefined {
+  const frame = request.contextFrame;
+  if (!frame && !prior) return undefined;
+  const invalid = () =>
+    new ModelAdapterError(
+      'CONTEXT_FRAME_MISMATCH',
+      'notDispatched',
+      clientRequestId,
+    );
+  if (
+    !frame ||
+    typeof frame.scopeId !== 'string' ||
+    !/^[A-Za-z0-9:_-]{1,256}$/.test(frame.scopeId) ||
+    frame.user.role !== 'user' ||
+    !Array.isArray(frame.prefix) ||
+    frame.prefix.length > 2000
+  )
+    throw invalid();
+  const userHash = modelContextFrameHash(frame.user);
+  if (request.continuation) {
+    if (
+      !prior ||
+      prior.scopeId !== frame.scopeId ||
+      prior.userHash !== userHash
+    )
+      throw invalid();
+  } else if (
+    prior ||
+    modelContextFrameHash(request.messages) !==
+      modelContextFrameHash([...frame.prefix, frame.user])
+  )
+    throw invalid();
+  return { scopeId: frame.scopeId, userHash };
 }
 /** Keep only bounded timing advice; provider response bodies stay private. */
 export function parseModelRetryAfter(
@@ -177,6 +258,8 @@ interface ProtectedHistory {
   messages: unknown[];
   assistant: ProviderAssistant;
   toolIds: string[];
+  opaqueTokensReserve: number;
+  contextFrame?: BoundModelContextFrame;
 }
 interface ToolAccumulator {
   id: string;
@@ -280,6 +363,9 @@ export class OpenAiCompatibleAdapter {
   readonly #onFetchStarted: AdapterOptions['onFetchStarted'];
   readonly #authScheme: ModelAuthScheme;
   readonly #continuations = new WeakMap<ModelContinuation, ProtectedHistory>();
+  readonly #contextLimit: number | undefined;
+  readonly #calibration: ModelBudgetCalibration;
+  readonly #onContextBudget: AdapterOptions['onContextBudget'];
 
   constructor(options: AdapterOptions) {
     let endpoint: URL;
@@ -304,6 +390,9 @@ export class OpenAiCompatibleAdapter {
       endpoint.hash ||
       (options.authScheme !== undefined &&
         !['bearer', 'xApiKey'].includes(options.authScheme)) ||
+      (options.contextLimit !== undefined &&
+        (!Number.isSafeInteger(options.contextLimit) ||
+          options.contextLimit < 1)) ||
       !/^[A-Za-z0-9_.:/-]{1,200}$/.test(options.model)
     ) {
       throw new ModelAdapterError(
@@ -315,6 +404,10 @@ export class OpenAiCompatibleAdapter {
     this.model = options.model;
     this.#endpoint = endpoint;
     this.#credential = options.credential;
+    this.#contextLimit = options.contextLimit;
+    this.#calibration =
+      options.contextBudgetCalibration ?? createModelBudgetCalibration();
+    this.#onContextBudget = options.onContextBudget;
     this.#timeoutMs = options.timeoutMs ?? 60_000;
     this.#maxResponseBytes = options.maxResponseBytes ?? 8 * 1024 * 1024;
     if (
@@ -340,17 +433,13 @@ export class OpenAiCompatibleAdapter {
     this.#continuations.delete(continuation);
   }
 
-  async complete(request: ModelRequest): Promise<ModelResponse> {
-    const clientRequestId = randomUUID();
-    if (request.signal?.aborted)
-      throw new ModelAdapterError(
-        'CANCELLED',
-        'notDispatched',
-        clientRequestId,
-      );
+  #prepare(request: ModelRequest, clientRequestId: string) {
     let messages: unknown[];
+    let contextFrame: BoundModelContextFrame | undefined;
     try {
-      messages = this.#messages(request, clientRequestId);
+      const prepared = this.#messages(request, clientRequestId);
+      messages = prepared.messages;
+      contextFrame = prepared.contextFrame;
     } catch (error: unknown) {
       if (error instanceof ModelAdapterError) throw error;
       throw new ModelAdapterError(
@@ -370,22 +459,6 @@ export class OpenAiCompatibleAdapter {
         clientRequestId,
       );
     }
-    let key: string;
-    try {
-      key = (await this.#credential()).trim();
-    } catch {
-      throw new ModelAdapterError(
-        'MISSING_CREDENTIAL',
-        'notDispatched',
-        clientRequestId,
-      );
-    }
-    if (key.length < 8 || !/^[\x21-\x7e]+$/.test(key))
-      throw new ModelAdapterError(
-        'MISSING_CREDENTIAL',
-        'notDispatched',
-        clientRequestId,
-      );
     const body: Record<string, unknown> = {
       model: this.model,
       messages,
@@ -445,15 +518,6 @@ export class OpenAiCompatibleAdapter {
                 },
               };
       serialized = JSON.stringify(z.json().parse(body));
-      if (
-        serialized.includes(key) ||
-        serialized.includes(JSON.stringify(key).slice(1, -1))
-      )
-        throw new ModelAdapterError(
-          'UNSAFE_MODEL_INPUT',
-          'notDispatched',
-          clientRequestId,
-        );
     } catch (error: unknown) {
       if (error instanceof ModelAdapterError) throw error;
       throw new ModelAdapterError(
@@ -462,6 +526,92 @@ export class OpenAiCompatibleAdapter {
         clientRequestId,
       );
     }
+    return { body, messages, serialized, sampling, contextFrame };
+  }
+  #estimate(body: Record<string, unknown>, request: ModelRequest) {
+    try {
+      return estimateModelBudget(body, {
+        protocol: 'chatCompletions',
+        ...(this.#contextLimit === undefined
+          ? {}
+          : { contextLimit: this.#contextLimit }),
+        maxOutput: request.maxTokens,
+        calibration: this.#calibration,
+        opaqueTokens: request.continuation
+          ? (this.#continuations.get(request.continuation)
+              ?.opaqueTokensReserve ?? 0)
+          : 0,
+      });
+    } catch (error: unknown) {
+      if (error instanceof ModelImageBudgetError)
+        throw new ModelAdapterError(
+          'IMAGE_BUDGET_UNAVAILABLE',
+          'notDispatched',
+          randomUUID(),
+        );
+      throw error;
+    }
+  }
+  inspectBudget(request: ModelRequest): ModelBudgetEstimate {
+    const prepared = this.#prepare(request, randomUUID());
+    return this.#estimate(prepared.body, request);
+  }
+
+  async complete(request: ModelRequest): Promise<ModelResponse> {
+    const clientRequestId = randomUUID();
+    if (request.signal?.aborted)
+      throw new ModelAdapterError(
+        'CANCELLED',
+        'notDispatched',
+        clientRequestId,
+      );
+    const { body, messages, serialized, sampling, contextFrame } =
+      this.#prepare(request, clientRequestId);
+    const estimate = this.#estimate(body, request);
+    this.#onContextBudget?.(
+      Object.freeze({
+        ...estimate,
+        components: Object.freeze({ ...estimate.components }),
+      }),
+    );
+    if (!estimate.fits)
+      throw new ModelAdapterError(
+        'CONTEXT_BUDGET_EXCEEDED',
+        'notDispatched',
+        clientRequestId,
+        null,
+        null,
+        null,
+        null,
+        0,
+        null,
+        estimate,
+      );
+    let key: string;
+    try {
+      key = (await this.#credential()).trim();
+    } catch {
+      throw new ModelAdapterError(
+        'MISSING_CREDENTIAL',
+        'notDispatched',
+        clientRequestId,
+      );
+    }
+    if (key.length < 8 || !/^[\x21-\x7e]+$/.test(key))
+      throw new ModelAdapterError(
+        'MISSING_CREDENTIAL',
+        'notDispatched',
+        clientRequestId,
+      );
+    if (
+      serialized.includes(key) ||
+      serialized.includes(JSON.stringify(key).slice(1, -1))
+    )
+      throw new ModelAdapterError(
+        'UNSAFE_MODEL_INPUT',
+        'notDispatched',
+        clientRequestId,
+      );
     const timerController = new AbortController();
     const signal = request.signal
       ? AbortSignal.any([request.signal, timerController.signal])
@@ -529,7 +679,7 @@ export class OpenAiCompatibleAdapter {
           parseModelRetryAfter(response.headers),
         );
       }
-      return request.stream
+      const answer = request.stream
         ? await this.#stream(
             response,
             request,
@@ -538,6 +688,19 @@ export class OpenAiCompatibleAdapter {
             requestId,
           )
         : await this.#nonStream(response, messages, clientRequestId, requestId);
+      const history = this.#continuations.get(answer.continuation);
+      if (history) {
+        if (contextFrame) history.contextFrame = contextFrame;
+        history.opaqueTokensReserve =
+          estimate.components.opaqueTokens +
+          opaqueOutputReserve(
+            history.assistant,
+            answer.usage.outputTokens,
+            estimate.maxOutput,
+          );
+      }
+      this.#calibration.observe(estimate, answer.usage.inputTokens);
+      return answer;
     } catch (error: unknown) {
       if (error instanceof ModelAdapterError) throw error;
       if (request.signal?.aborted)
@@ -565,11 +728,16 @@ export class OpenAiCompatibleAdapter {
     }
   }
 
-  #messages(request: ModelRequest, clientRequestId: string): unknown[] {
-    const messages: unknown[] = request.messages.map((message) => ({
+  #messages(request: ModelRequest, clientRequestId: string) {
+    const serialize = (message: ModelMessage) => ({
       role: z.enum(['system', 'user', 'assistant']).parse(message.role),
-      content: z.string().max(1_000_000).parse(message.content),
-    }));
+      content: serializeModelContent(
+        message.content,
+        message.role,
+        'chatCompletions',
+      ),
+    });
+    const messages: unknown[] = request.messages.map(serialize);
     if (request.continuation) {
       const history = this.#continuations.get(request.continuation);
       if (!history)
@@ -593,17 +761,46 @@ export class OpenAiCompatibleAdapter {
           clientRequestId,
         );
       }
-      // Original messages and the provider assistant turn stay in this adapter's private memory only.
-      return [
-        ...history.messages,
-        history.assistant,
-        ...request.toolResults.map((result) => ({
-          role: 'tool',
-          tool_call_id: result.toolCallId,
-          content: z.string().max(1_000_000).parse(result.content),
-        })),
-        ...messages,
-      ];
+      const identity = checkModelContextFrame(
+        request,
+        history.contextFrame,
+        clientRequestId,
+      );
+      const prefix = request.contextFrame?.prefix.map(serialize) ?? [];
+      let historical = history.messages;
+      if (identity && history.contextFrame && request.contextFrame) {
+        if (
+          modelContextFrameHash(
+            historical[history.contextFrame.prefixLength],
+          ) !== modelContextFrameHash(serialize(request.contextFrame.user))
+        )
+          throw new ModelAdapterError(
+            'CONTEXT_FRAME_MISMATCH',
+            'notDispatched',
+            clientRequestId,
+          );
+        historical = [
+          ...prefix,
+          ...historical.slice(history.contextFrame.prefixLength),
+        ];
+      }
+      // Only the authenticated pre-user prefix can change. Every native item
+      // from the fixed current user onward remains byte-for-byte in order.
+      return {
+        messages: [
+          ...historical,
+          history.assistant,
+          ...request.toolResults.map((result) => ({
+            role: 'tool',
+            tool_call_id: result.toolCallId,
+            content: z.string().max(1_000_000).parse(result.content),
+          })),
+          ...messages,
+        ],
+        contextFrame: identity
+          ? { ...identity, prefixLength: prefix.length }
+          : undefined,
+      };
     }
     if (
       request.toolResults?.length ||
@@ -616,7 +813,20 @@ export class OpenAiCompatibleAdapter {
         clientRequestId,
       );
     }
-    return messages;
+    const identity = checkModelContextFrame(
+      request,
+      undefined,
+      clientRequestId,
+    );
+    return {
+      messages,
+      contextFrame: identity
+        ? {
+            ...identity,
+            prefixLength: request.contextFrame?.prefix.length ?? 0,
+          }
+        : undefined,
+    };
   }
 
   async #readText(
@@ -976,6 +1186,7 @@ export class OpenAiCompatibleAdapter {
       messages,
       assistant,
       toolIds: toolCalls.map((call) => call.id),
+      opaqueTokensReserve: 0,
     });
     return {
       content,

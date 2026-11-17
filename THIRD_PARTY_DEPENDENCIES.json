@@ -2797,6 +2797,15 @@
       "description": "Parse HTML character references"
     },
     {
+      "name": "parse5",
+      "versions": [
+        "8.1.1"
+      ],
+      "license": "MIT",
+      "homepage": "https://parse5.js.org",
+      "description": "HTML parser and serializer."
+    },
+    {
       "name": "parseurl",
       "versions": [
         "1.3.3"
@@ -4379,6 +4388,17 @@
       "author": "Microsoft Corp.",
       "homepage": "https://www.typescriptlang.org/",
       "description": "Runtime library for TypeScript helper functions"
+    }
+  ],
+  "BSD-2-Clause": [
+    {
+      "name": "entities",
+      "versions": [
+        "9.0.0"
+      ],
+      "license": "BSD-2-Clause",
+      "homepage": "https://github.com/fb55/entities",
+      "description": "Encode & decode XML and HTML entities with ease & speed"
     }
   ]
 }

@@ -1,4 +1,5 @@
 import { redactAutomaticAuxiliaryConversation } from '../auxiliary/automatic-common.js';
+import { invalidateRestoredAgentExecution } from '../agent-recovery/restore.js';
 import { z } from 'zod';
 import type { SqlExecutor } from '../../../persistence/src/database.js';
 import { DomainError } from '../errors.js';
@@ -569,11 +570,16 @@ export async function applyLatestSecurity(
     "UPDATE app.file_upload_attempts SET status='interrupted',error_code='RESTORED_NOT_REPLAYED' WHERE status='uploading'",
   );
   await transaction.query('SET CONSTRAINTS ALL IMMEDIATE');
+  const agentRecovery = await invalidateRestoredAgentExecution(
+    transaction,
+    state.agentMemory,
+  );
   return {
     privacyApplied,
     privacyOrphanSkipped,
     preservedUsers: users.length,
     preservedMemberships: members.length,
     oldSessionsAndKeysInvalidated: true,
+    agentRecovery,
   };
 }

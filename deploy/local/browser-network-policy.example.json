@@ -1,0 +1,9 @@
+{
+  "forbiddenOrigins": [
+    "https://platform.example.invalid",
+    "http://browser-broker:5317",
+    "http://browser-proxy:5318"
+  ],
+  "allowedPrivateOrigins": [],
+  "allowedWebSocketOrigins": []
+}

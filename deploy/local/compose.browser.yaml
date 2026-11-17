@@ -1,0 +1,63 @@
+# Attach the trusted API and AI worker to browser-control in the owning deployment.
+# The browser itself has ONLY this internal network; only browser-proxy has egress.
+services:
+  browser-broker:
+    image: ${AITESTHUB_BROWSER_IMAGE:?verified browser image required}
+    restart: unless-stopped
+    init: true
+    user: '1000:1000'
+    environment:
+      AITESTHUB_BROWSER_BIND_HOST: 0.0.0.0
+      AITESTHUB_BROWSER_PORT: '5317'
+      AITESTHUB_BROWSER_TOKEN_FILE: /run/secrets/browser_token
+      AITESTHUB_BROWSER_PROXY_TOKEN_FILE: /run/secrets/browser_proxy_token
+      AITESTHUB_BROWSER_PROXY_CONTROL_ORIGIN: http://browser-proxy:5318
+      AITESTHUB_BROWSER_JOURNAL_DIRECTORY: /var/lib/browser-journal
+      AITESTHUB_BROWSER_NETWORK_POLICY_FILE: /run/browser-network-policy.json
+      AITESTHUB_BROWSER_NETWORK_POLICY_SHA256: ${AITESTHUB_BROWSER_NETWORK_POLICY_SHA256:?reviewed policy hash required}
+    secrets: [browser_token, browser_proxy_token]
+    volumes:
+      - ${AITESTHUB_BROWSER_JOURNAL_ROOT:?private persistent journal required}:/var/lib/browser-journal
+      - ${AITESTHUB_BROWSER_NETWORK_POLICY_FILE:?reviewed network policy required}:/run/browser-network-policy.json:ro
+    networks: [browser-control]
+    read_only: true
+    tmpfs: ['/tmp:size=256m,nosuid,nodev,uid=1000,gid=1000']
+    shm_size: 256m
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true', 'seccomp=./browser-seccomp.json']
+    pids_limit: 256
+    mem_limit: 1536m
+    cpus: 1
+    logging: { driver: json-file, options: { max-size: '2m', max-file: '2' } }
+  browser-proxy:
+    image: ${AITESTHUB_BROWSER_APPLICATION_IMAGE:?verified application image required}
+    command: ['node', '/app/dist/packages/agent-browser-proxy/src/main.js']
+    restart: unless-stopped
+    environment:
+      AITESTHUB_BROWSER_PROXY_BIND_HOST: 0.0.0.0
+      AITESTHUB_BROWSER_PROXY_PORT: '5318'
+      AITESTHUB_BROWSER_PROXY_ORIGIN: http://browser-proxy:5318
+      AITESTHUB_BROWSER_PROXY_TOKEN_FILE: /run/secrets/browser_proxy_token
+      AITESTHUB_BROWSER_NETWORK_POLICY_FILE: /run/browser-network-policy.json
+      AITESTHUB_BROWSER_NETWORK_POLICY_SHA256: ${AITESTHUB_BROWSER_NETWORK_POLICY_SHA256:?reviewed policy hash required}
+    secrets: [browser_proxy_token]
+    volumes:
+      - ${AITESTHUB_BROWSER_NETWORK_POLICY_FILE:?reviewed network policy required}:/run/browser-network-policy.json:ro
+    networks: [browser-control, browser-egress]
+    read_only: true
+    tmpfs: ['/tmp:size=16m,noexec,nosuid,nodev']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 64
+    mem_limit: 192m
+    cpus: 0.5
+    logging: { driver: json-file, options: { max-size: '2m', max-file: '2' } }
+secrets:
+  browser_token:
+    file: ${AITESTHUB_BROWSER_TOKEN_FILE:?restricted browser token file required}
+  browser_proxy_token:
+    file: ${AITESTHUB_BROWSER_PROXY_TOKEN_FILE:?restricted proxy token file required}
+networks:
+  browser-control:
+    internal: true
+  browser-egress: {}

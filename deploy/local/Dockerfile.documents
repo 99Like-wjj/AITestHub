@@ -1,0 +1,7 @@
+ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72
+FROM ${PYTHON_IMAGE}
+COPY deploy/local/requirements.documents.txt /tmp/requirements.documents.txt
+RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r /tmp/requirements.documents.txt \
+    && rm /tmp/requirements.documents.txt
+# No application secrets, host mounts, network grant or execution entrypoint is supplied here.
+# The trusted A08 broker creates each nonroot, readonly, network-disabled execution container.

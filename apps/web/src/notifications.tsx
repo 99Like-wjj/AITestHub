@@ -30,6 +30,8 @@ const notificationLabels: Record<Notification['kind'], string> = {
   scheduleCompleted: '定时运行完成',
   issueNotDefect: '非缺陷决定',
   uploadInterrupted: '文件上传中断',
+  agentReminder: '个人提醒',
+  agentTaskReady: '定时草稿',
 };
 export function NotificationBell({
   unreadCount,

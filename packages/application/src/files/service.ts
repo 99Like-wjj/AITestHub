@@ -10,6 +10,7 @@ import type {
 import type { StoragePort } from '../../../storage/src/port.js';
 import { currentUser, requireProject } from '../access/policy.js';
 import { DomainError } from '../errors.js';
+import { conversationRow } from '../conversations/common.js';
 import { audit } from '../events.js';
 import { assertUploadCapacity } from '../recovery/capacity.js';
 import { missingFileTransfers } from './preparation.js';
@@ -39,6 +40,7 @@ const mediaTypes = new Set([
   'image/png',
   'image/jpeg',
   'image/webp',
+  'image/gif',
 ]);
 
 interface FileRow extends QueryResultRow {
@@ -90,6 +92,8 @@ function signatureMatches(mediaType: string, prefix: Buffer): boolean {
       prefix.subarray(0, 4).toString() === 'RIFF' &&
       prefix.subarray(8, 12).toString() === 'WEBP'
     );
+  if (mediaType === 'image/gif')
+    return /^GIF8[79]a$/.test(prefix.subarray(0, 6).toString('ascii'));
   if (mediaType === 'application/pdf')
     return prefix.subarray(0, 5).toString() === '%PDF-';
   if (
@@ -120,7 +124,42 @@ export class FilesService {
   ) {}
 
   async register(actor: ActorContext, raw: unknown) {
+    return this.registerFile(actor, raw);
+  }
+
+  /** Only the workspace service exposes this port, after binding its trusted conversation. */
+  async createConversationArtifact(
+    actor: ActorContext,
+    conversationId: string,
+    raw: unknown,
+    source: Readable,
+  ) {
+    const registered = await this.registerFile(actor, raw, conversationId);
+    return this.uploadFile(actor, registered.file.id, source, conversationId);
+  }
+
+  async downloadConversationArtifact(
+    actor: ActorContext,
+    conversationId: string,
+    id: string,
+  ) {
+    return this.downloadFile(actor, id, conversationId);
+  }
+
+  private async registerFile(
+    actor: ActorContext,
+    raw: unknown,
+    conversationId?: string,
+  ) {
     const input = fileRegistrationSchema.parse(raw);
+    if (
+      conversationId &&
+      (input.ownerScope !== 'personal' ||
+        input.projectId !== undefined ||
+        input.runId !== undefined ||
+        !input.localFileId.startsWith(`workspace:${conversationId}:`))
+    )
+      throw new DomainError('VALIDATION_ERROR', '会话产物登记范围无效。', 400);
     if (
       /[\x00-\x1f\x7f/\\]/.test(input.originalName) ||
       ['.', '..'].includes(input.originalName)
@@ -152,6 +191,7 @@ export class FilesService {
         input.ownerScope,
         input.projectId ?? null,
         actor.userId,
+        conversationId,
       );
       if (input.runId && input.projectId) {
         await requireProject(
@@ -276,6 +316,11 @@ export class FilesService {
           413,
           { limitBytes: policy.policy.files.maxFileBytes },
         );
+      if (conversationId)
+        await transaction.query(
+          "INSERT INTO app.resource_references(resource_id,reference_type,reference_id,created_by) VALUES($1,'conversation',$2,$3) ON CONFLICT DO NOTHING",
+          [file.id, conversationId, actor.userId],
+        );
       return { file: dto(file) };
     });
   }
@@ -304,11 +349,36 @@ export class FilesService {
   }
 
   async upload(actor: ActorContext, id: string, source: Readable) {
+    return this.uploadFile(actor, id, source);
+  }
+
+  private async uploadFile(
+    actor: ActorContext,
+    id: string,
+    source: Readable,
+    conversationId?: string,
+  ) {
     const claimed = await this.db.transaction(async (transaction) => {
+      if (conversationId)
+        await conversationRow(transaction, actor, conversationId, false, true);
       // Complete write authorization before discovering/locking another run's delivery projection.
-      await this.authorizedFile(transaction, actor, id, false, true);
+      await this.authorizedFile(
+        transaction,
+        actor,
+        id,
+        false,
+        true,
+        conversationId,
+      );
       const artifacts = await lockUiDeliveryFileArtifacts(transaction, id);
-      const file = await this.authorizedFile(transaction, actor, id, true);
+      const file = await this.authorizedFile(
+        transaction,
+        actor,
+        id,
+        true,
+        false,
+        conversationId,
+      );
       const policy = await this.policies.read(transaction, policyIntent(file));
       const maximumBytes = Number(policy.policy.files.maxFileBytes);
       if (
@@ -446,9 +516,31 @@ export class FilesService {
           503,
         );
       const result = await this.db.transaction(async (transaction) => {
-        await this.authorizedFile(transaction, actor, id, false, true);
+        if (conversationId)
+          await conversationRow(
+            transaction,
+            actor,
+            conversationId,
+            false,
+            true,
+          );
+        await this.authorizedFile(
+          transaction,
+          actor,
+          id,
+          false,
+          true,
+          conversationId,
+        );
         const artifacts = await lockUiDeliveryFileArtifacts(transaction, id);
-        await this.authorizedFile(transaction, actor, id, true);
+        await this.authorizedFile(
+          transaction,
+          actor,
+          id,
+          true,
+          false,
+          conversationId,
+        );
         const file = (
           await transaction.query<FileRow>(
             `UPDATE app.file_resources SET status='verified',storage_key=$3,verified_at=clock_timestamp(),
@@ -547,8 +639,25 @@ export class FilesService {
   }
 
   async download(actor: ActorContext, id: string) {
+    return this.downloadFile(actor, id);
+  }
+
+  private async downloadFile(
+    actor: ActorContext,
+    id: string,
+    conversationId?: string,
+  ) {
     const file = await this.db.transaction(async (transaction) => {
-      const row = await this.authorizedFile(transaction, actor, id);
+      if (conversationId)
+        await conversationRow(transaction, actor, conversationId, false, true);
+      const row = await this.authorizedFile(
+        transaction,
+        actor,
+        id,
+        false,
+        false,
+        conversationId,
+      );
       await this.policies.read(transaction, policyIntent(row));
       return row;
     });
@@ -578,6 +687,7 @@ export class FilesService {
     id: string,
     lock = false,
     write = false,
+    conversationId?: string,
   ): Promise<FileRow> {
     const file = (
       await transaction.query<FileRow>(
@@ -593,7 +703,18 @@ export class FilesService {
       file.owner_scope,
       file.project_id,
       file.owner_user_id,
+      conversationId,
     );
+    if (
+      conversationId &&
+      !(
+        await transaction.query(
+          "SELECT 1 FROM app.resource_references WHERE resource_id=$1 AND reference_type='conversation' AND reference_id=$2",
+          [id, conversationId],
+        )
+      ).rowCount
+    )
+      throw new DomainError('NOT_FOUND', '文件不属于当前会话产物。', 404);
     if ((lock || write) && file.run_id && file.project_id) {
       await requireProject(
         transaction,
@@ -624,7 +745,22 @@ export class FilesService {
     scope: 'personal' | 'project',
     projectId: string | null,
     ownerId: string,
+    conversationId?: string,
   ) {
+    if (conversationId) {
+      await conversationRow(transaction, actor, conversationId, false, true);
+      if (
+        scope !== 'personal' ||
+        projectId !== null ||
+        actor.userId !== ownerId
+      )
+        throw new DomainError(
+          'FORBIDDEN',
+          '会话产物仅限当前本人私有文件。',
+          403,
+        );
+      return;
+    }
     if (scope === 'project' && projectId) {
       await requireProject(transaction, actor, projectId, 'files.transfer');
       return;

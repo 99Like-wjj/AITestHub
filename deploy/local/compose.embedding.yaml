@@ -1,0 +1,25 @@
+# Optional fixed, offline local semantic encoder; only authorized API/worker join this network.
+services:
+  embedding:
+    image: ${AITESTHUB_EMBEDDING_IMAGE:?explicit immutable local embedding image required}
+    restart: unless-stopped
+    environment:
+      AITESTHUB_EMBEDDING_BIND_HOST: 0.0.0.0
+      AITESTHUB_EMBEDDING_PORT: '5316'
+      AITESTHUB_EMBEDDING_TOKEN_FILE: /run/secrets/embedding_token
+    secrets: [embedding_token]
+    networks: [embedding-control]
+    read_only: true
+    tmpfs: ['/tmp:size=32m,noexec,nosuid,nodev']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 32
+    mem_limit: 2g
+    cpus: 1
+    logging: { driver: json-file, options: { max-size: '2m', max-file: '2' } }
+secrets:
+  embedding_token:
+    file: ${AITESTHUB_EMBEDDING_TOKEN_FILE:?external embedding credential file required}
+networks:
+  embedding-control:
+    internal: true

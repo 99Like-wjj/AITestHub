@@ -10,6 +10,8 @@ export const notificationSchema = z.strictObject({
     'scheduleCompleted',
     'issueNotDefect',
     'uploadInterrupted',
+    'agentReminder',
+    'agentTaskReady',
   ]),
   objectId: idSchema,
   title: z.string(),

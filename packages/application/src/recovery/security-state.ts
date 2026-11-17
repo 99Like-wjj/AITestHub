@@ -5,6 +5,10 @@ import { validateModelControlStateV2 } from '../configuration/security-state-v2.
 import type { SqlExecutor } from '../../../persistence/src/database.js';
 import { canonicalJson } from '../operations/service.js';
 import { revocationPredicate } from '../schedules/repository.js';
+import {
+  agentMemoryControlSchema,
+  captureAgentMemoryControl,
+} from '../agent-memory/recovery.js';
 const rows = z.array(z.record(z.string(), z.json()));
 /** Private operational state: ciphertext/password hashes stay encrypted in the external control store, never a DTO/tool response. */
 export const securityStateSchema = z
@@ -39,6 +43,7 @@ export const securityStateSchema = z
     requirementDeletions: rows.optional(),
     accountRemovals: rows.optional(),
     automaticAuxiliaryIntents: rows.optional(),
+    agentMemory: agentMemoryControlSchema.optional(),
     external: z.strictObject({
       available: z.boolean(),
       services: rows,
@@ -49,6 +54,18 @@ export const securityStateSchema = z
     }),
   })
   .superRefine((state, context) => {
+    if (
+      state.migrations.some(
+        (row) => row.version === '0045_agent_recovery.sql',
+      ) &&
+      !state.agentMemory
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['agentMemory'],
+        message:
+          'Agent memory recovery metadata is required after migration 45.',
+      });
     if (!validateModelControlStateV2(state))
       context.addIssue({
         code: 'custom',
@@ -177,6 +194,11 @@ export async function captureSecurityState(
       'SELECT version,checksum FROM app.schema_migrations ORDER BY version',
     )
   ).rows;
+  const agentMemory = migrations.some(
+    (row) => row.version === '0045_agent_recovery.sql',
+  )
+    ? await captureAgentMemoryControl(transaction)
+    : undefined;
   const operationFences = await read(
       'recovery_operation_fences',
       'actor_id,operation,key',
@@ -228,6 +250,7 @@ export async function captureSecurityState(
     capturedAt: now.toISOString(),
     platformMasterFingerprint,
     migrations,
+    ...(agentMemory === undefined ? {} : { agentMemory }),
     users,
     projects,
     members,

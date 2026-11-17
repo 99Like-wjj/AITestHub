@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
+import type { ModelImageBlock } from '../../../contracts/src/model-content.js';
 import { z } from 'zod';
 import { sanitizeSourceLinkFields } from '../../../contracts/src/source-links.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import {
   frozenConversationReferenceSchema,
   aiToolSourceReferenceSchema,
+  freezeAiToolSource,
   type ConversationReferenceInput,
 } from '../../../contracts/src/conversations.js';
 import type {
@@ -28,6 +30,7 @@ export interface PersonalFileReader {
   ): Promise<{
     text: string | null;
     state: 'readable' | 'unsupported' | 'incomplete';
+    images?: ModelImageBlock[];
   }>;
 }
 const frozenReferenceSchema = frozenConversationReferenceSchema;
@@ -45,6 +48,7 @@ export interface ResolvedReference {
   text: string;
   fingerprint: string;
   messageIds?: string[];
+  images?: ModelImageBlock[];
 }
 interface MessageRow {
   id: string;
@@ -229,6 +233,7 @@ export class ConversationReferences {
         let state: ResolvedReference['state'] = 'available';
         let text = '';
         let messageIds: string[] | undefined;
+        const images: ModelImageBlock[] = [];
         if (ref.kind === 'conversation') {
           const messages = await this.db.transaction(async (tx) => {
             await conversationRow(tx, actor, ref.conversationId, false, true);
@@ -286,6 +291,7 @@ export class ConversationReferences {
             try {
               await this.#fileMetadata(actor, resourceId);
               const content = await this.files.readText(actor, resourceId);
+              images.push(...(content.images ?? []));
               text += `\n[Selected history attachment ${resourceId}]\n${content.text ?? '[content not parsed]'}`;
               if (content.state !== 'readable') state = 'partial';
             } catch (error: unknown) {
@@ -308,6 +314,7 @@ export class ConversationReferences {
         } else if (ref.kind === 'resource') {
           await this.#fileMetadata(actor, ref.resourceId);
           const content = await this.files.readText(actor, ref.resourceId);
+          images.push(...(content.images ?? []));
           text = content.text ?? '';
           state =
             content.state === 'readable'
@@ -349,6 +356,7 @@ export class ConversationReferences {
               actor,
               material.fileResourceId,
             );
+            images.push(...(content.images ?? []));
             if (content.state !== 'readable') state = 'partial';
             parts.push(
               `[${material.purpose}/${material.originalName}]\n${content.text ?? '[content unavailable]'} `,
@@ -399,12 +407,14 @@ export class ConversationReferences {
           identity,
           state,
           text,
+          ...(images.length ? { images } : {}),
           fingerprint: createHash('sha256')
             .update(
               canonicalJson({
                 identity,
                 state,
                 text,
+                images,
                 messageIds: messageIds ?? null,
               }),
             )
@@ -545,9 +555,9 @@ export class ConversationReferences {
           .safeParse(tool.payload);
         if (!lineage.success) return null; // Tool-derived legacy text without recorded sources is not proof of current access.
         sources.push(
-          ...lineage.data.sourceRefs.map((source) => ({
-            reference: { ...source, dataScope: 'syntheticPublicOnly' },
-          })),
+          ...lineage.data.sourceRefs.map((source) =>
+            freezeAiToolSource(source, 'syntheticPublicOnly'),
+          ),
         );
       }
       return sources;

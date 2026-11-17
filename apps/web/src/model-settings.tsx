@@ -819,6 +819,11 @@ function ServiceEditor({
             </div>
           )}
           <div className="model-entry-list">
+            {draft.models.length > 0 && (
+              <p className="caption">
+                开始 AI 任务前，需填写模型实际支持的上下文 Token 上限。
+              </p>
+            )}
             {!draft.models.length && (
               <div className="notice">
                 尚未配置模型。可先保存服务并配置 API
@@ -880,7 +885,7 @@ function ServiceEditor({
                     />
                   </label>
                   <label className="field-label">
-                    上下文上限
+                    上下文上限（Token）
                     <input
                       className="field"
                       type="number"

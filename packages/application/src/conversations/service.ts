@@ -1,4 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
+import {
+  authorizeScheduledOccurrence,
+  bindScheduledTask,
+} from '../agent-schedules/service.js';
+import {
+  scheduledDraftTemplateSchema,
+  scheduledOfficeTemplateSchema,
+  scheduledTaskTemplateSchema,
+} from '../../../contracts/src/agent-schedules.js';
+import { assertNewWorkAllowed } from '../recovery/maintenance.js';
 import { z } from 'zod';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import {
@@ -930,6 +940,60 @@ export class ConversationsService {
     );
   }
   async send(actor: ActorContext, conversationId: string, raw: unknown) {
+    return this.#send(actor, conversationId, raw);
+  }
+  async validateScheduledDraft(
+    actor: ActorContext,
+    conversationId: string,
+    raw: unknown,
+  ) {
+    const template = scheduledTaskTemplateSchema.parse(raw);
+    const accessMode =
+      'accessMode' in template ? template.accessMode : undefined;
+    const owner = { ...actor, entrypoint: 'web' as const };
+    await this.db.transaction((tx) =>
+      conversationRow(tx, owner, conversationId, false),
+    );
+    const selection = await this.configuration.resolveRuntimeSelection(
+      owner,
+      template.modelSelection,
+    );
+    assertConversationDataScope(selection, template.dataScope, accessMode);
+    await withWorkspaceModelAccess(accessMode, () =>
+      this.references.freeze(owner, template.references, conversationId),
+    );
+  }
+  /** Trusted scheduler entry only; no HTTP/model input can supply the private queue binding. */
+  async sendFromSchedule(occurrenceId: string, claimToken: string) {
+    const binding = await this.db.transaction((tx) =>
+      authorizeScheduledOccurrence(tx, occurrenceId, claimToken),
+    );
+    const rawTemplate = binding.snapshot.template;
+    const conversationId = binding.occurrence.conversation_id;
+    if (binding.snapshot.kind === 'reminder' || !rawTemplate || !conversationId)
+      throw new DomainError(
+        'PRECONDITIONS_MISSING',
+        '原定时任务不是模型任务。',
+        422,
+      );
+    const template =
+      binding.snapshot.kind === 'office'
+        ? scheduledOfficeTemplateSchema.parse(rawTemplate)
+        : scheduledDraftTemplateSchema.parse(rawTemplate);
+    const actor = { ...binding.actor, entrypoint: 'web' as const };
+    return this.#send(
+      actor,
+      conversationId,
+      { ...template, commandId: occurrenceId, operationTarget: null },
+      { occurrenceId, claimToken },
+    );
+  }
+  async #send(
+    actor: ActorContext,
+    conversationId: string,
+    raw: unknown,
+    schedule?: { occurrenceId: string; claimToken: string },
+  ) {
     const input = sendMessageInputSchema.parse(raw);
     if (input.accessMode) assertModelInputStructure(input.content);
     else assertSafeModelInput(input.content);
@@ -969,6 +1033,13 @@ export class ConversationsService {
       input.commandId,
       { conversationId, input },
       async (tx) => {
+        if (schedule) await assertNewWorkAllowed(tx, true);
+        if (schedule)
+          await authorizeScheduledOccurrence(
+            tx,
+            schedule.occurrenceId,
+            schedule.claimToken,
+          );
         await conversationRow(tx, actor, conversationId, true);
         if (
           !input.accessMode &&
@@ -1002,6 +1073,12 @@ export class ConversationsService {
         }
       },
       async (tx) => {
+        if (schedule)
+          await authorizeScheduledOccurrence(
+            tx,
+            schedule.occurrenceId,
+            schedule.claimToken,
+          );
         const conversation = await conversationRow(
           tx,
           actor,
@@ -1100,6 +1177,13 @@ export class ConversationsService {
             input.dataScope,
           ],
         );
+        if (schedule)
+          await bindScheduledTask(
+            tx,
+            schedule.occurrenceId,
+            schedule.claimToken,
+            taskId,
+          );
         const resourceIds = new Set(
           frozenReferences.flatMap((reference) =>
             reference.reference.kind === 'resource'

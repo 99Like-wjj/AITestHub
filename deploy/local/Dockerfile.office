@@ -1,0 +1,11 @@
+# Supply a registry digest or a local tag independently checked against the exact
+# Dockerfile.documents image ID. Dockerfile FROM does not accept a bare image ID.
+ARG DOCUMENTS_IMAGE
+FROM ${DOCUMENTS_IMAGE}
+COPY deploy/local/requirements.office.txt /tmp/requirements.office.txt
+RUN python -m pip install --no-cache-dir --only-binary=:all: --require-hashes -r /tmp/requirements.office.txt \
+    && rm /tmp/requirements.office.txt
+# Original Noto Sans SC, SIL OFL-1.1. Fixed public upstream commit and exact bytes.
+# Keep the original font license beside the font; do not rename or modify the font.
+RUN python -c "import hashlib,pathlib,urllib.request; root=pathlib.Path('/usr/local/share/fonts/aitesthub'); root.mkdir(parents=True); base='https://raw.githubusercontent.com/google/fonts/cc39c4c2c304bc368c9b7c311ea2bcc6013299fe/ofl/notosanssc/'; files=[('NotoSansSC%5Bwght%5D.ttf','NotoSansSC.ttf','a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da'),('OFL.txt','OFL.txt','1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9')]; [(lambda data,name,digest: ((root/name).write_bytes(data) if hashlib.sha256(data).hexdigest()==digest else (_ for _ in ()).throw(RuntimeError('FONT_DIGEST_MISMATCH'))))(urllib.request.urlopen(base+url,timeout=60).read(),name,digest) for url,name,digest in files]"
+# A08 supplies the isolated execution entrypoint; no credentials or host paths are added.

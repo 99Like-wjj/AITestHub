@@ -25,6 +25,7 @@ import { DomainError, forbidden, stale } from '../errors.js';
 import { audit } from '../events.js';
 import { assertFrozenTaskSources } from '../conversations/task-sources.js';
 import { conversationRow } from '../conversations/common.js';
+import { assertTaskCapability } from '../conversations/task-capabilities.js';
 import { ExternalMcpService } from './service.js';
 import { ExternalMcpTransportError } from './transport.js';
 import {
@@ -168,6 +169,14 @@ export class ExternalMcpInvocations {
     if (!locator)
       throw new DomainError('NOT_FOUND', '原外部调用任务不可访问。', 404);
     await conversationRow(tx, actor, locator.conversation_id, false, true);
+    if (!allowFinished)
+      await assertTaskCapability(
+        tx,
+        actor,
+        { taskId, conversationId: locator.conversation_id },
+        'externalMcp',
+        { active: true },
+      );
     const task = (
       await tx.query<{
         conversation_id: string;
@@ -297,6 +306,13 @@ export class ExternalMcpInvocations {
     )
       stale();
     await this.assertSources(tx, actor, row);
+    if (forDispatch && row.task_id && row.conversation_id)
+      await assertTaskCapability(
+        tx,
+        actor,
+        { taskId: row.task_id, conversationId: row.conversation_id },
+        'externalMcp',
+      );
     if (row.arguments === null)
       throw new DomainError(
         'PRECONDITIONS_MISSING',
