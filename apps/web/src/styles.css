@@ -432,6 +432,12 @@ a:focus-visible {
   flex: 0 0 auto;
   margin: 12px 24px;
 }
+.identity-recovery-trigger {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  padding-inline: 24px;
+}
 @media (prefers-reduced-motion: reduce) {
   .ai-retry-status,
   .ai-retry-status * {

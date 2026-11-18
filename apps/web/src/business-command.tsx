@@ -104,6 +104,18 @@ export function useBusinessCommand(session: string | null) {
       intent.uncertain = false;
       patch({ uncertain: false });
     },
+    closeRecoveredReceipt: (commandId: string) => {
+      if (
+        !alive.current ||
+        current.current !== intent ||
+        intent.busy ||
+        intent.key !== commandId
+      )
+        return;
+      intent.key = crypto.randomUUID();
+      intent.uncertain = false;
+      patch({ uncertain: false, error: undefined, errorCode: undefined });
+    },
   };
 }
 type CommandState = ReturnType<typeof useBusinessCommand>;

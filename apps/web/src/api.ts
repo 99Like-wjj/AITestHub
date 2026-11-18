@@ -1,5 +1,9 @@
 import type { z } from 'zod';
 import {
+  operationNotAccepted,
+  operationReceiptClosed,
+} from '../../../packages/contracts/src/base';
+import {
   announceIdentityChange,
   identityContextEpoch,
   currentIdentityOwner,
@@ -43,11 +47,26 @@ export function sessionDenialReason(error: ApiError): IdentityChangeReason {
 }
 
 export function isUncertainMutationError(error: unknown): error is ApiError {
+  if (!(error instanceof ApiError)) return false;
+  const rejectedAtAdmission =
+    error.status === 503 &&
+    (error.code === 'PRECONDITIONS_MISSING' ||
+      error.code === 'DEPENDENCY_UNAVAILABLE') &&
+    error.details?.operationAcceptance ===
+      operationNotAccepted.operationAcceptance;
   return (
-    error instanceof ApiError &&
+    !rejectedAtAdmission &&
     (error.status === 0 ||
       error.status >= 500 ||
       error.code === 'OPERATION_RESULT_UNKNOWN')
+  );
+}
+
+export function isClosedOperationReceipt(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError &&
+    error.code === 'BUSINESS_CONFLICT' &&
+    error.details?.receiptState === operationReceiptClosed.receiptState
   );
 }
 

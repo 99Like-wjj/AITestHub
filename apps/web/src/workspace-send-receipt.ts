@@ -1,4 +1,4 @@
-import { api, ApiError } from './api';
+import { api, ApiError, isClosedOperationReceipt } from './api';
 import { currentIdentityOwner, identityContextEpoch } from './identity-context';
 import {
   pendingIdentityCommands,
@@ -30,18 +30,26 @@ export async function readWorkspaceSendReceipt(
       );
   };
   assertOwner();
-  const result = await api(
-    `/me/conversations/${conversationId}/send-receipts/${commandId}`,
-    {},
-    sendReceiptSchema,
-  );
-  assertOwner();
-  const record = pendingIdentityCommands(ownerId).find(
-    (entry) =>
-      entry.operation === 'conversations.send' &&
-      entry.targetId === conversationId &&
-      entry.commandId === commandId,
-  );
-  if (record) resolveIdentityCommand(record);
-  return result;
+  const settleBrowserRecord = () => {
+    assertOwner();
+    const record = pendingIdentityCommands(ownerId).find(
+      (entry) =>
+        entry.operation === 'conversations.send' &&
+        entry.targetId === conversationId &&
+        entry.commandId === commandId,
+    );
+    if (record) resolveIdentityCommand(record);
+  };
+  try {
+    const result = await api(
+      `/me/conversations/${conversationId}/send-receipts/${commandId}`,
+      {},
+      sendReceiptSchema,
+    );
+    settleBrowserRecord();
+    return result;
+  } catch (error) {
+    if (isClosedOperationReceipt(error)) settleBrowserRecord();
+    throw error;
+  }
 }

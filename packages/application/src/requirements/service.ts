@@ -25,6 +25,7 @@ import { requireProject } from '../access/policy.js';
 import { DomainError, stale } from '../errors.js';
 import { audit } from '../events.js';
 import { OperationService } from '../operations/service.js';
+import { rejectMissingAcceptedReceipt } from '../recovery/receipts.js';
 import { RequirementDeletionService } from './deletion.js';
 import { prepareRequirementVersion } from './preparation.js';
 import { matchRequirementMaterials } from './material-matching.js';
@@ -644,25 +645,50 @@ export class RequirementService {
     return this.db.transaction(async (tx) => {
       await requireProject(tx, actor, projectId, 'project.read');
       await this.get(tx, projectId, id);
+      const operation = 'requirements.collaboration.' + id;
       const row = (
         await tx.query<{ status: string; response: unknown }>(
           `SELECT status,response FROM app.commands WHERE actor_id=$1 AND project_id=$2 AND operation=$4 AND key=$3`,
-          [
-            actor.userId,
-            projectId,
-            commandId,
-            `requirements.collaboration.${id}`,
-          ],
+          [actor.userId, projectId, commandId, operation],
         )
       ).rows[0];
-      if (!row)
+      if (!row) {
+        await rejectMissingAcceptedReceipt(tx, actor, operation, commandId);
+        await this.operations.assertReceiptNotClosed(tx, actor, {
+          operation,
+          commandId,
+          targetId: id,
+          projectId,
+        });
         throw new DomainError(
           'NOT_FOUND',
           '尚未取得此保存回执，保持原command查询，不自动重发。',
           404,
         );
+      }
       return { commandId, status: row.status, response: row.response };
     });
+  }
+
+  closeCollaborationReceipt(
+    actor: ActorContext,
+    projectId: string,
+    id: string,
+    commandId: string,
+  ) {
+    return this.operations.closeUnrecordedReceipt(
+      actor,
+      {
+        operation: 'requirements.collaboration.' + id,
+        commandId,
+        targetId: id,
+        projectId,
+      },
+      async (tx) => {
+        await requireProject(tx, actor, projectId, 'project.read');
+        await this.get(tx, projectId, id);
+      },
+    );
   }
 
   async archive(

@@ -40,7 +40,13 @@ import type {
   RequirementDetail,
   RequirementListItem,
 } from '../../../packages/contracts/src/requirements';
-import { api, describeError } from './api';
+import { api, ApiError, describeError, isClosedOperationReceipt } from './api';
+import {
+  identityCommandSettled,
+  pendingIdentityCommands,
+  resolveIdentityCommand,
+  type IdentityCommandSettlement,
+} from './identity-commands';
 import { uiLayers } from './ui-layers';
 import { PageHeading } from './page-heading';
 import { CommandDialog, useBusinessCommand } from './business-command';
@@ -454,13 +460,28 @@ export function RequirementsPage({
   }
   async function recoverCollaboration() {
     if (!project || !selectedId) return;
+    const commandId = collaboration.commandId;
+    const epoch = detailEpoch.current;
+    const settleBrowserRecord = () => {
+      const record = pendingIdentityCommands(me.user.id).find(
+        (item) =>
+          item.operation === 'requirements.collaboration' &&
+          item.projectId === project.id &&
+          item.targetId === selectedId &&
+          item.commandId === commandId,
+      );
+      if (record) resolveIdentityCommand(record);
+    };
     try {
       const value = await api(
-        `/projects/${project.id}/requirements/${selectedId}/collaboration-receipts/${encodeURIComponent(collaboration.commandId)}`,
+        `/projects/${project.id}/requirements/${selectedId}/collaboration-receipts/${encodeURIComponent(commandId)}`,
         {},
         requirementCollaborationStatusSchema,
       );
+      if (value.commandId !== commandId || epoch !== detailEpoch.current)
+        return;
       if (value.status === 'completed' && value.response) {
+        settleBrowserRecord();
         collaboration.confirmRecoveredReceipt();
         setCollaborationBase((current) =>
           current
@@ -474,12 +495,44 @@ export function RequirementsPage({
         );
         await refreshSelected();
         void message.success('已核对原保存回执');
+      } else if (value.status === 'failed') {
+        settleBrowserRecord();
+        collaboration.closeRecoveredReceipt(commandId);
       } else
         collaboration.setError('原保存仍未结束，保持原标识查询，不重复提交。');
     } catch (failure) {
-      collaboration.setError(describeError(failure));
+      if (epoch !== detailEpoch.current) return;
+      if (isClosedOperationReceipt(failure)) {
+        settleBrowserRecord();
+        collaboration.closeRecoveredReceipt(commandId);
+        return;
+      }
+      collaboration.setError(
+        failure instanceof ApiError && failure.status === 404
+          ? '暂未查到原回执。可在顶部「待核对操作」结束本次核对。'
+          : describeError(failure),
+      );
     }
   }
+  useEffect(() => {
+    const settle = ({ detail }: CustomEvent<IdentityCommandSettlement>) => {
+      const { record } = detail;
+      if (
+        record.userId !== me.user.id ||
+        record.operation !== 'requirements.collaboration' ||
+        record.projectId !== project?.id ||
+        record.targetId !== selectedId ||
+        record.commandId !== collaboration.commandId
+      )
+        return;
+      if (detail.outcome === 'closed')
+        collaboration.closeRecoveredReceipt(record.commandId);
+      if (detail.outcome === 'collaborationCompleted')
+        void recoverCollaboration();
+    };
+    window.addEventListener(identityCommandSettled, settle);
+    return () => window.removeEventListener(identityCommandSettled, settle);
+  }, [me.user.id, project?.id, selectedId, collaboration.commandId]);
   async function archiveRequirement() {
     if (!project || !detail || deletionPendingForSelected) return;
     setMutating(true);

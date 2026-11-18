@@ -19,6 +19,7 @@ const executionOperations = new Set([
 export function executionOperationNeedsFence(operation: string) {
   return (
     executionOperations.has(operation) ||
+    /^requirements\.collaboration\.[a-f0-9-]{36}$/.test(operation) ||
     /^ui-executions\.claim\.[a-f0-9-]{36}$/.test(operation)
   );
 }

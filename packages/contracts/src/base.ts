@@ -12,6 +12,12 @@ export const timestampSchema = z.iso.datetime({ offset: true });
 export const decimalCountSchema = z.string().regex(/^(0|[1-9][0-9]*)$/);
 export const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 export const commandIdSchema = z.string().min(8).max(128);
+export const operationNotAccepted = { operationAcceptance: 'notAccepted' } as const;
+export const operationReceiptClosed = { receiptState: 'closed' } as const;
+export const receiptCloseResultSchema = z.strictObject({
+  commandId: commandIdSchema,
+  status: z.enum(['closed', 'receiptAvailable', 'unknown']),
+});
 export const safeTextSchema = z.string().max(100_000);
 export const titleSchema = z.string().trim().min(1).max(200);
 export const kindSchema = z.enum(['UI', 'API']);

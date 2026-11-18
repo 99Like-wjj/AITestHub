@@ -91,7 +91,10 @@ export interface WorkspaceQueuePorts {
   ) => Promise<{ terminal: boolean; safeToContinue: boolean }>;
   cancel: (taskId: string, commandId: string) => Promise<void>;
   send: (conversationId: string, input: SendMessageInput) => Promise<Accepted>;
-  receipt: (conversationId: string, commandId: string) => Promise<Accepted>;
+  receipt: (
+    conversationId: string,
+    commandId: string,
+  ) => Promise<Accepted | null>;
   accepted: (
     conversationId: string,
     receipt: Accepted,
@@ -273,6 +276,14 @@ export class WorkspaceSendQueue {
             queue.items[0] !== item
           )
             return;
+          if (!receipt) {
+            item.state = 'failed';
+            item.error =
+              '原发送标识已关闭。可编辑草稿后明确发送，或移除此待发项。';
+            queue.paused = item.error;
+            this.save();
+            return;
+          }
           queue.items = queue.items.filter((entry) => entry !== item);
           queue.blockingTaskId = receipt.taskId;
           queue.paused = null;
@@ -286,11 +297,11 @@ export class WorkspaceSendQueue {
           this.save();
           return;
         }
-      } else {
+      } else if (item.state !== 'failed') {
         // Status is checked again; this cannot override an unknown/unfinished task.
         queue.paused = null;
         this.save();
-      }
+      } else return;
     } finally {
       this.recovering.delete(conversationId);
     }

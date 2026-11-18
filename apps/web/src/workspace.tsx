@@ -57,7 +57,17 @@ import type {
   SendMessageInput,
   OperationTarget,
 } from '../../../packages/contracts/src/conversations';
-import { api, ApiError, describeError, isUncertainMutationError } from './api';
+import {
+  api,
+  ApiError,
+  describeError,
+  isClosedOperationReceipt,
+  isUncertainMutationError,
+} from './api';
+import {
+  identityCommandSettled,
+  type IdentityCommandSettlement,
+} from './identity-commands';
 import { modelDisplayLabel, modelServiceCaption } from './model-display-label';
 import { resolveComposerDestination } from './workspace-first-send';
 import {
@@ -2176,54 +2186,94 @@ export function Workspace({
       });
     } else restore();
   }
+  function releasePendingSend(send: UncertainSend) {
+    if (
+      uncertainSends.current.get(send.conversationId)?.commandId !==
+      send.commandId
+    )
+      return false;
+    uncertainSends.current.delete(send.conversationId);
+    if (activeRef.current === send.conversationId) {
+      setUncertain(null);
+      setSendPreview(null);
+      setSendError(undefined);
+    }
+    return true;
+  }
+  async function applyRecoveredSend(
+    send: UncertainSend,
+    receipt: Awaited<ReturnType<typeof readWorkspaceSendReceipt>>,
+  ) {
+    if (currentIdentityOwner() !== me.user.id || !releasePendingSend(send))
+      return;
+    rememberWorkspaceModelSelection(me.user.id, send.input.modelSelection);
+    const clearComposer = clearSubmittedDraft(
+      drafts.current,
+      send.conversationId,
+      send.draft,
+    );
+    if (clearComposer) replaceDraftGeneration(send.conversationId);
+    if (activeRef.current === send.conversationId) {
+      setTaskId(receipt.receipt.taskId);
+      if (clearComposer) {
+        setDraftTarget(null);
+        setContent('');
+        setReferences([]);
+        setComposerSkills([]);
+      }
+      const result = await api(
+        `/me/conversations/${send.conversationId}`,
+        {},
+        conversationDetailSchema,
+      );
+      if (activeRef.current === send.conversationId) {
+        setDetail(result);
+        setSendError(undefined);
+      }
+    }
+  }
+  useEffect(() => {
+    const settle = ({ detail }: CustomEvent<IdentityCommandSettlement>) => {
+      const { record } = detail;
+      if (
+        record.userId !== me.user.id ||
+        record.operation !== 'conversations.send'
+      )
+        return;
+      const send = uncertainSends.current.get(record.targetId);
+      if (send?.commandId !== record.commandId) return;
+      if (detail.outcome === 'closed') releasePendingSend(send);
+      if (detail.outcome === 'conversationAccepted')
+        void applyRecoveredSend(send, detail.receipt).catch(
+          (error: unknown) => {
+            if (activeRef.current === send.conversationId)
+              setSendError(describeError(error));
+          },
+        );
+    };
+    window.addEventListener(identityCommandSettled, settle);
+    return () => window.removeEventListener(identityCommandSettled, settle);
+  }, [me.user.id]);
   async function recoverSend() {
     if (!uncertain) return;
-    const sendEpoch = identityContextEpoch();
+    const send = uncertain;
     setSending(true);
     try {
       const receipt = await readWorkspaceSendReceipt(
         me.user.id,
-        uncertain.conversationId,
-        uncertain.commandId,
+        send.conversationId,
+        send.commandId,
       );
-      if (
-        sendEpoch === identityContextEpoch() &&
-        currentIdentityOwner() === me.user.id
-      )
-        rememberWorkspaceModelSelection(
-          me.user.id,
-          uncertain.input.modelSelection,
-        );
-      const clearComposer = clearSubmittedDraft(
-        drafts.current,
-        uncertain.conversationId,
-        uncertain.draft,
-      );
-      if (clearComposer) replaceDraftGeneration(uncertain.conversationId);
-      uncertainSends.current.delete(uncertain.conversationId);
-      if (activeRef.current === uncertain.conversationId) {
-        setTaskId(receipt.receipt.taskId);
-        if (clearComposer) {
-          setDraftTarget(null);
-          setContent('');
-          setReferences([]);
-          setComposerSkills([]);
-        }
-        setUncertain(null);
-        const result = await api(
-          `/me/conversations/${uncertain.conversationId}`,
-          {},
-          conversationDetailSchema,
-        );
-        if (activeRef.current === uncertain.conversationId) {
-          setDetail(result);
-          setSendError(undefined);
-        }
-      }
+      await applyRecoveredSend(send, receipt);
     } catch (error) {
+      if (isClosedOperationReceipt(error)) {
+        releasePendingSend(send);
+        return;
+      }
+      if (activeRef.current !== send.conversationId) return;
       setSendError(
         error instanceof ApiError && error.status === 404
-          ? '当前尚未查到本次回执，不代表消息未受理。请保留本次标识继续查询，不能换新标识重复发送。'
+          ? '暂未查到原回执。可在顶部「待核对操作」结束本次核对。'
           : describeError(error),
       );
     } finally {

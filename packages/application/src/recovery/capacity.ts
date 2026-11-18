@@ -1,4 +1,5 @@
 import { statfs } from 'node:fs/promises';
+import { operationNotAccepted } from '../../../contracts/src/base.js';
 import type {
   Database,
   SqlExecutor,
@@ -92,6 +93,7 @@ export async function assertTaskCapacity(
       'PRECONDITIONS_MISSING',
       '本机剩余空间低于当前容量策略限制，未受理新的执行/AI任务；现有结果、证据与清理仍按原规则接收。',
       503,
+      operationNotAccepted,
     );
 }
 export async function assertUploadCapacity(

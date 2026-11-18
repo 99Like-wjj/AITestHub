@@ -9,7 +9,12 @@ import {
   PaperClipOutlined,
   RollbackOutlined,
 } from '@ant-design/icons';
-import { api, describeError, isUncertainMutationError } from './api';
+import {
+  api,
+  describeError,
+  isClosedOperationReceipt,
+  isUncertainMutationError,
+} from './api';
 import { WorkspaceReferencePreview } from './workspace-reference-preview';
 import { InlineMessageContent } from './inline-composer';
 import { inlineReferenceKey } from './workspace-inline-tokens';
@@ -121,9 +126,16 @@ function controller(ownerId: string) {
           { method: 'POST', body: input },
           taskAcceptedSchema,
         ),
-      receipt: async (conversationId, commandId) =>
-        (await readWorkspaceSendReceipt(ownerId, conversationId, commandId))
-          .receipt,
+      receipt: async (conversationId, commandId) => {
+        try {
+          return (
+            await readWorkspaceSendReceipt(ownerId, conversationId, commandId)
+          ).receipt;
+        } catch (error) {
+          if (isClosedOperationReceipt(error)) return null;
+          throw error;
+        }
+      },
       accepted: (conversationId, receipt, input) => {
         rememberWorkspaceModelSelection(ownerId, input.modelSelection);
         window.dispatchEvent(
@@ -225,12 +237,14 @@ export function WorkspacePendingMessages({
           showIcon
           title={state.paused}
           action={
-            <Button
-              size="small"
-              onClick={() => act(() => queue.recover(state.conversationId))}
-            >
-              核对并继续
-            </Button>
+            state.items[0]?.state !== 'failed' && (
+              <Button
+                size="small"
+                onClick={() => act(() => queue.recover(state.conversationId))}
+              >
+                核对并继续
+              </Button>
+            )
           }
         />
       )}

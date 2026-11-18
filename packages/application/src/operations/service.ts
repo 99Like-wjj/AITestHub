@@ -2,7 +2,12 @@ import { projectRequirementReceiptView } from '../../../contracts/src/domain.js'
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { ActorContext } from '../../../contracts/src/identity.js';
-import { commandIdSchema, idSchema } from '../../../contracts/src/base.js';
+import {
+  commandIdSchema,
+  idSchema,
+  operationReceiptClosed,
+  receiptCloseResultSchema,
+} from '../../../contracts/src/base.js';
 import type {
   Database,
   SqlExecutor,
@@ -60,6 +65,64 @@ interface CommandRow {
   project_id: string | null;
   created_at: Date;
   updated_at: Date;
+}
+
+interface ReceiptScope {
+  operation: string;
+  commandId: string;
+  targetId: string;
+  projectId?: string;
+}
+
+const closureOperationFor = (operation: string) =>
+  operation === 'conversations.send' ||
+  /^requirements\.collaboration\.[a-f0-9-]{36}$/.test(operation)
+    ? operation + '.receipt-close'
+    : null;
+
+function lockCommand(
+  tx: SqlExecutor,
+  actorId: string,
+  operation: string,
+  key: string,
+) {
+  return tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
+    canonicalJson([actorId, operation, key]),
+  ]);
+}
+
+async function commandFenceHash(
+  tx: SqlExecutor,
+  actorId: string,
+  operation: string,
+  key: string,
+) {
+  return (
+    await tx.query<{ request_hash: string }>(
+      'SELECT request_hash FROM app.recovery_operation_fences WHERE actor_id=$1 AND operation=$2 AND key=$3',
+      [actorId, operation, key],
+    )
+  ).rows[0]?.request_hash;
+}
+
+function throwClosedReceipt(): never {
+  throw new DomainError(
+    'BUSINESS_CONFLICT',
+    '已结束原操作核对，该提交标识已停止受理。',
+    409,
+    operationReceiptClosed,
+  );
+}
+
+function closureHash(scope: ReceiptScope) {
+  return operationRequestHash(
+    {
+      operation: scope.operation,
+      commandId: scope.commandId,
+      targetId: scope.targetId,
+    },
+    scope.projectId,
+  );
 }
 
 // Official MCP has business operation status only, never private chats or management commands.
@@ -120,9 +183,7 @@ export class OperationService {
       // Both checks precede any replay, so a stale actor/key/membership cannot recover an old response.
       await currentUser(tx, actor);
       await authorize(tx);
-      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
-        canonicalJson([actor.userId, operation, key]),
-      ]);
+      await lockCommand(tx, actor.userId, operation, key);
       const prior = (
         await tx.query<CommandRow>(
           'SELECT * FROM app.commands WHERE actor_id=$1 AND operation=$2 AND key=$3 FOR UPDATE',
@@ -157,6 +218,13 @@ export class OperationService {
         ) as T;
       }
       await missingOperationFence(tx, actor.userId, operation, key, hash);
+      const closure = closureOperationFor(operation);
+      if (
+        closure &&
+        (await recoveryFencesReady(tx)) &&
+        (await commandFenceHash(tx, actor.userId, closure, key))
+      )
+        throwClosedReceipt();
       if (executionOperationStartsTask(operation)) await assertTaskCapacity(tx);
       const command = (
         await tx.query<{ id: string }>(
@@ -183,6 +251,106 @@ export class OperationService {
         });
       return response;
     });
+  }
+
+  /** Closing records a separate operation. It serializes with the original admission
+   * and protects the original key even when a backup lacks the closure receipt. */
+  async closeUnrecordedReceipt(
+    actor: ActorContext,
+    scope: ReceiptScope,
+    authorize: (tx: SqlExecutor) => Promise<void>,
+  ): Promise<z.infer<typeof receiptCloseResultSchema>> {
+    const closure = closureOperationFor(scope.operation);
+    if (!closure)
+      throw new DomainError(
+        'UNSUPPORTED_OPERATION',
+        '此操作没有结束核对入口。',
+        422,
+      );
+    commandIdSchema.parse(scope.commandId);
+    idSchema.parse(scope.targetId);
+    const hash = closureHash(scope);
+    const { commandId, operation } = scope;
+    return this.db.transaction(async (tx) => {
+      await currentUser(tx, actor);
+      await authorize(tx);
+      await lockCommand(tx, actor.userId, operation, commandId);
+      const original = (
+        await tx.query<Pick<CommandRow, 'status' | 'response_redacted_at'>>(
+          'SELECT status,response_redacted_at FROM app.commands WHERE actor_id=$1 AND operation=$2 AND key=$3',
+          [actor.userId, operation, commandId],
+        )
+      ).rows[0];
+      if (original)
+        return {
+          commandId,
+          status:
+            !original.response_redacted_at &&
+            (original.status === 'completed' || original.status === 'failed')
+              ? 'receiptAvailable'
+              : 'unknown',
+        };
+      if (!(await recoveryFencesReady(tx)))
+        throw new DomainError(
+          'DEPENDENCY_UNAVAILABLE',
+          '回执保护尚不可用，请稍后核对。',
+          503,
+        );
+      if (await commandFenceHash(tx, actor.userId, operation, commandId))
+        return { commandId, status: 'unknown' };
+      const existing = await commandFenceHash(
+        tx,
+        actor.userId,
+        closure,
+        commandId,
+      );
+      if (existing && existing !== hash)
+        throw new DomainError(
+          'IDEMPOTENCY_CONFLICT',
+          '原核对标识与当前对象不匹配。',
+          409,
+        );
+      const result = { commandId, status: 'closed' as const };
+      if (existing) return result;
+      const closed = (
+        await tx.query<{ id: string }>(
+          "INSERT INTO app.commands(actor_id,operation,key,request_hash,project_id,response,status) VALUES($1,$2,$3,$4,$5,$6::jsonb,'completed') RETURNING id",
+          [
+            actor.userId,
+            closure,
+            commandId,
+            hash,
+            scope.projectId ?? null,
+            canonicalJson(result),
+          ],
+        )
+      ).rows[0]!;
+      await recordOperationFence(tx, {
+        actorId: actor.userId,
+        operation: closure,
+        key: commandId,
+        requestHash: hash,
+        commandId: closed.id,
+        projectId: scope.projectId ?? null,
+      });
+      return result;
+    });
+  }
+
+  async assertReceiptNotClosed(
+    tx: SqlExecutor,
+    actor: ActorContext,
+    scope: ReceiptScope,
+  ) {
+    const closure = closureOperationFor(scope.operation);
+    if (!closure || !(await recoveryFencesReady(tx))) return;
+    const hash = await commandFenceHash(
+      tx,
+      actor.userId,
+      closure,
+      scope.commandId,
+    );
+    if (hash && hash === closureHash(scope)) throwClosedReceipt();
   }
 
   async get(actor: ActorContext, lookup: OperationLookup) {

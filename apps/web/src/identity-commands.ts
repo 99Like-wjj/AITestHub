@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { sendReceiptSchema } from '../../../packages/contracts/src/conversations';
 const schema = z.strictObject({
   userId: z.uuid(),
   projectId: z.uuid().nullable(),
@@ -10,6 +11,20 @@ const schema = z.strictObject({
 export type IdentityCommand = z.infer<typeof schema>;
 const prefix = 'aitesthub:identity-command:v1:';
 export const identityCommandsChanged = 'aitesthub:identity-commands-changed';
+export const identityCommandSettled = 'aitesthub:identity-command-settled';
+export type IdentityCommandSettlement = { record: IdentityCommand } & (
+  | { outcome: 'closed' }
+  | {
+      outcome: 'conversationAccepted';
+      receipt: z.infer<typeof sendReceiptSchema>;
+    }
+  | { outcome: 'collaborationCompleted' }
+);
+declare global {
+  interface WindowEventMap {
+    [identityCommandSettled]: CustomEvent<IdentityCommandSettlement>;
+  }
+}
 const memory = new Map<string, IdentityCommand>(),
   resolved = new Set<string>(),
   owned = new Set<string>();
@@ -153,4 +168,12 @@ export function resolveIdentityCommand(record: IdentityCommand) {
     storageReliable = false;
   }
   changed();
+}
+
+export function settleIdentityCommand(settlement: IdentityCommandSettlement) {
+  resolveIdentityCommand(settlement.record);
+  if (typeof window !== 'undefined')
+    window.dispatchEvent(
+      new CustomEvent(identityCommandSettled, { detail: settlement }),
+    );
 }

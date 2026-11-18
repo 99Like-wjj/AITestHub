@@ -1275,6 +1275,11 @@ export class ConversationsService {
           'conversations.send',
           commandId,
         );
+        await this.#operations.assertReceiptNotClosed(tx, actor, {
+          operation: 'conversations.send',
+          commandId,
+          targetId: conversationId,
+        });
         throw new DomainError(
           'NOT_FOUND',
           '当前未检索到本会话发送回执，请保留原提交标识核对；不据此新建重复发送。',
@@ -1302,6 +1307,20 @@ export class ConversationsService {
       }
       return { receipt: parsed.data, currentStatus: task.state };
     });
+  }
+
+  closeSendReceipt(
+    actor: ActorContext,
+    conversationId: string,
+    commandId: string,
+  ) {
+    return this.#operations.closeUnrecordedReceipt(
+      actor,
+      { operation: 'conversations.send', commandId, targetId: conversationId },
+      async (tx) => {
+        await conversationRow(tx, actor, conversationId, false);
+      },
+    );
   }
 
   async previewDelete(

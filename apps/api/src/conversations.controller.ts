@@ -163,12 +163,19 @@ export class ConversationsController {
             .parse(req.query.origin ?? 'liveProvider'),
         ),
       );
-    const receipt = /^conversations\/([^/]+)\/send-receipts\/([^/]+)$/.exec(
-      path,
-    );
-    if (receipt?.[1] && receipt[2] && req.method === 'GET')
+    const receipt =
+      /^conversations\/([^/]+)\/send-receipts\/([^/]+)(\/close)?$/.exec(path);
+    if (receipt?.[1] && receipt[2] && !receipt[3] && req.method === 'GET')
       return res.json(
         await this.conversations.sendReceipt(
+          actor,
+          idSchema.parse(receipt[1]),
+          decodeURIComponent(receipt[2]),
+        ),
+      );
+    if (receipt?.[1] && receipt[2] && receipt[3] && req.method === 'POST')
+      return res.json(
+        await this.conversations.closeSendReceipt(
           actor,
           idSchema.parse(receipt[1]),
           decodeURIComponent(receipt[2]),

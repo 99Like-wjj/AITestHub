@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Request, Response, NextFunction } from 'express';
+import { operationNotAccepted } from '../../../contracts/src/base.js';
 import type {
   Database,
   SqlExecutor,
@@ -191,7 +192,11 @@ export class MaintenanceService {
           const domain =
             error instanceof DomainError ? error : blocked('draining');
           res.status(domain.status).json({
-            error: { code: domain.code, message: domain.message },
+            error: {
+              code: domain.code,
+              message: domain.message,
+              details: { ...domain.details, ...operationNotAccepted },
+            },
             meta: { requestId: String(res.locals.requestId ?? randomUUID()) },
           });
         });

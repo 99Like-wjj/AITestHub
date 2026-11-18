@@ -120,10 +120,21 @@ export class RequirementsController {
           await this.service.deleteUnused(actor, projectId, id, req.body),
         );
     }
-    const receipt = /^([^/]+)\/collaboration-receipts\/([^/]+)$/.exec(path);
-    if (receipt?.[1] && receipt[2] && req.method === 'GET')
+    const receipt = /^([^/]+)\/collaboration-receipts\/([^/]+)(\/close)?$/.exec(
+      path,
+    );
+    if (receipt?.[1] && receipt[2] && !receipt[3] && req.method === 'GET')
       return res.json(
         await this.service.collaborationReceipt(
+          actor,
+          projectId,
+          idSchema.parse(receipt[1]),
+          commandIdSchema.parse(decodeURIComponent(receipt[2])),
+        ),
+      );
+    if (receipt?.[1] && receipt[2] && receipt[3] && req.method === 'POST')
+      return res.json(
+        await this.service.closeCollaborationReceipt(
           actor,
           projectId,
           idSchema.parse(receipt[1]),
