@@ -485,7 +485,14 @@ export async function createApp(db: Database) {
       { provide: Database, useValue: db },
       { provide: IdentityService, useValue: new IdentityService(db) },
       { provide: ProjectService, useValue: new ProjectService(db) },
-      { provide: RequirementService, useValue: new RequirementService(db) },
+      {
+        provide: RequirementService,
+        useValue: new RequirementService(
+          db,
+          undefined,
+          auxiliary.requirementNameAdmission(),
+        ),
+      },
       {
         provide: ConfigurationService,
         useValue: configuration,

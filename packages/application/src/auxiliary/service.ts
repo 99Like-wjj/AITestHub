@@ -19,6 +19,7 @@ import {
   auxiliaryTaskReceiptSchema,
   cancelAuxiliaryInputSchema,
   type AuxiliaryRequestInput,
+  type AuxiliarySourceInput,
 } from '../../../contracts/src/auxiliary.js';
 import type {
   Database,
@@ -57,7 +58,21 @@ import {
   captureTaskSources,
   assertFrozenTaskSources,
 } from '../conversations/task-sources.js';
+import {
+  isRequirementNameTask,
+  readRequirementNameInput,
+  requirementNameAdmission,
+} from './requirement-name.js';
 export { auxiliaryModelSnapshot } from './model-snapshot.js';
+
+function assertGroupNamingIsAutomatic(input: AuxiliarySourceInput) {
+  if (input.purpose === 'alias' && !input.conversationId)
+    throw new DomainError(
+      'UNSUPPORTED_OPERATION',
+      '需求精简名由系统自动准备，个人可以编辑侧栏显示名。',
+      422,
+    );
+}
 
 export interface AuxiliaryTaskRow {
   id: string;
@@ -66,7 +81,7 @@ export interface AuxiliaryTaskRow {
   conversation_id: string | null;
   purpose: string;
   command_id: string;
-  origin: 'web' | 'internal-ai' | 'official-mcp';
+  origin: 'web' | 'internal-ai' | 'official-mcp' | 'background';
   origin_key_id: string | null;
   parent_task_id: string | null;
   request: unknown;
@@ -94,6 +109,11 @@ export class AuxiliaryService {
     private readonly fileReader?: PersonalFileReader,
   ) {
     this.operations = new OperationService(db);
+  }
+  requirementNameAdmission() {
+    return requirementNameAdmission(this.configuration, (selected, input, tx) =>
+      this.credentialAbsent(selected, input, tx),
+    );
   }
   private digest(value: unknown) {
     return createHash('sha256').update(canonicalJson(value)).digest('hex');
@@ -161,6 +181,7 @@ export class AuxiliaryService {
     });
     if (business && input.purpose === 'alias')
       throw new DomainError('FORBIDDEN', '个人精简名不开放项目工具。', 403);
+    assertGroupNamingIsAutomatic(input);
     const prepared = await this.prepare(actor, input);
     return this.db.transaction(async (tx) => {
       if (business) await this.business(tx, actor);
@@ -551,6 +572,10 @@ export class AuxiliaryService {
       )
     ).rows[0];
     if (!row) throw new DomainError('NOT_FOUND', '没有此本人辅助任务。', 404);
+    if (isRequirementNameTask(row)) {
+      await readRequirementNameInput(tx, row);
+      return row;
+    }
     if (row.conversation_id)
       await conversationRow(
         tx,
@@ -701,6 +726,7 @@ export class AuxiliaryService {
         '个人会话命名不通过项目MCP辅助通道开放。',
         403,
       );
+    assertGroupNamingIsAutomatic(input);
     const prepared = await this.prepare(actor, this.sourceInput(input));
     return this.operations.execute(
       actor,

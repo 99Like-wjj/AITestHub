@@ -73,12 +73,25 @@ interface GroupRow {
   alias: string | null;
   generated_name?: string | null;
   generated_name_source_hash?: string | null;
+  workspace_name: string | null;
+  workspace_name_title_hash: string | null;
   pinned_at: Date | null;
   sort_order: number;
   expanded: boolean;
   hidden: boolean;
   archived_at: Date | null;
   row_version: number;
+}
+const workspaceNameColumns = `to_jsonb(r)->>'workspace_name' workspace_name,to_jsonb(r)->>'workspace_name_title_hash' workspace_name_title_hash`;
+function generatedGroupName(group: GroupRow) {
+  const titleHash = createHash('sha256')
+    .update(group.title, 'utf8')
+    .digest('hex');
+  if (group.workspace_name_title_hash === titleHash && group.workspace_name)
+    return group.workspace_name;
+  return group.generated_name_source_hash === titleHash
+    ? (group.generated_name ?? null)
+    : null;
 }
 interface PreviewRow {
   id: string;
@@ -596,7 +609,7 @@ export class ConversationsService {
       const groups = projectId
         ? (
             await tx.query<GroupRow>(
-              `SELECT g.*,r.title FROM app.ai_requirement_groups g JOIN app.requirements r ON r.id=g.requirement_id
+              `SELECT g.*,r.title,${workspaceNameColumns} FROM app.ai_requirement_groups g JOIN app.requirements r ON r.id=g.requirement_id
         JOIN app.requirement_participants rp ON rp.requirement_id=r.id AND rp.user_id=g.owner_id AND rp.active
         WHERE g.owner_id=$1 AND g.project_id=$2 AND NOT g.hidden AND g.archived_at IS NULL ORDER BY g.pinned_at DESC NULLS LAST,g.sort_order,g.requirement_id`,
               [actor.userId, projectId],
@@ -615,11 +628,7 @@ export class ConversationsService {
           projectId: group.project_id,
           requirementId: group.requirement_id,
           formalTitle: group.title,
-          generatedName:
-            group.generated_name_source_hash ===
-            createHash('sha256').update(group.title, 'utf8').digest('hex')
-              ? (group.generated_name ?? null)
-              : null,
+          generatedName: generatedGroupName(group),
           alias: group.alias,
           pinnedAt: group.pinned_at?.toISOString() ?? null,
           sortOrder: group.sort_order,
@@ -784,7 +793,7 @@ export class ConversationsService {
     await personalActor(tx, actor);
     await requireProject(tx, actor, projectId, 'project.read');
     const rows = await tx.query<GroupRow & { group_exists: boolean }>(
-      `SELECT r.project_id,r.id requirement_id,r.title,g.alias,to_jsonb(g)->>'generated_name' generated_name,to_jsonb(g)->>'generated_name_source_hash' generated_name_source_hash,g.pinned_at,
+      `SELECT r.project_id,r.id requirement_id,r.title,g.alias,to_jsonb(g)->>'generated_name' generated_name,to_jsonb(g)->>'generated_name_source_hash' generated_name_source_hash,${workspaceNameColumns},g.pinned_at,
         COALESCE(g.sort_order,0) sort_order,COALESCE(g.expanded,true) expanded,COALESCE(g.hidden,false) hidden,g.archived_at,
         COALESCE(g.row_version,0) row_version,(g.requirement_id IS NOT NULL) group_exists
         FROM app.requirements r JOIN app.requirement_participants rp ON rp.requirement_id=r.id AND rp.user_id=$1 AND rp.active
@@ -796,11 +805,7 @@ export class ConversationsService {
         projectId: group.project_id,
         requirementId: group.requirement_id,
         formalTitle: group.title,
-        generatedName:
-          group.generated_name_source_hash ===
-          createHash('sha256').update(group.title, 'utf8').digest('hex')
-            ? (group.generated_name ?? null)
-            : null,
+        generatedName: generatedGroupName(group),
         alias: group.alias,
         pinnedAt: group.pinned_at?.toISOString() ?? null,
         sortOrder: group.sort_order,

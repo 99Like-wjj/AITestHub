@@ -882,6 +882,11 @@ export function RequirementComposer({
               <Form.Item
                 name="summary"
                 label={target ? '本版变更说明' : '材料说明'}
+                extra={
+                  target
+                    ? undefined
+                    : '启用系统辅助后，平台会在模型许可范围内使用标题和简短摘要生成工作台显示名。'
+                }
                 rules={[{ max: 10000, message: '说明不超过 10000 字符' }]}
               >
                 <Input.TextArea

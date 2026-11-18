@@ -130,12 +130,20 @@ export async function recordRequirementActivity(
   }
 }
 
+export type RequirementNameAdmission = (
+  tx: SqlExecutor,
+  actor: ActorContext,
+  requirement: ReturnType<typeof requirementDto>,
+  version: ReturnType<typeof versionDto>,
+) => Promise<void>;
+
 export class RequirementService {
   readonly operations: OperationService;
   readonly deletions: RequirementDeletionService;
   constructor(
     readonly db: Database,
     readonly policies: FileResourcePolicies = fileResourcePolicies,
+    private readonly admitName?: RequirementNameAdmission,
   ) {
     this.operations = new OperationService(db);
     this.deletions = new RequirementDeletionService(db);
@@ -382,10 +390,12 @@ export class RequirementService {
           input.materials,
           policy,
         );
+        const requirement = requirementDto(row);
         await audit(tx, actor, 'requirement.created', row.id, input.projectId, {
           versionId: version.id,
         });
-        return { requirement: requirementDto(row), version };
+        await this.admitName?.(tx, actor, requirement, version);
+        return { requirement, version };
       },
       input.projectId,
     );

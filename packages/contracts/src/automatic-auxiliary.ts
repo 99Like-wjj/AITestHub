@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { idSchema,commandIdSchema } from './base.js';
 import {
-auxiliaryPreflightReceiptSchema,
 auxiliaryTaskReceiptSchema,
 auxiliaryMaterialStructuralLimit,
 } from './auxiliary.js';
@@ -30,23 +29,6 @@ export const automaticAuxiliaryIntentSchema = z.strictObject({
   errorCode: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
-});
-export const automaticAuxiliaryListSchema = z.strictObject({
-  intents: z.array(automaticAuxiliaryIntentSchema),
-  hasMore: z.boolean(),
-  nextCursor: idSchema.nullable(),
-  modelAvailable: z.boolean(),
-  modelUnavailableReason: z.string().nullable(),
-});
-export const automaticAliasPreviewSchema = z.strictObject({
-  intent: automaticAuxiliaryIntentSchema,
-  preflight: auxiliaryPreflightReceiptSchema,
-});
-export const acceptAutomaticAliasInputSchema = z.strictObject({
-  commandId: commandIdSchema,
-  scopeDigest: z.string().regex(/^[a-f0-9]{64}$/),
-  dataScope: modelDataScopeSchema,
-  confirmed: z.literal(true),
 });
 export const automaticAliasReceiptSchema = z.strictObject({
   intent: automaticAuxiliaryIntentSchema,
@@ -103,9 +85,4 @@ export const fullRequirementFindReceiptSchema = z.strictObject({
     task: auxiliaryTaskReceiptSchema.nullable(),
     errorCode: z.string().nullable(),
   }),
-});
-
-export const automaticAuxiliaryListQuerySchema = z.strictObject({
-  projectId: idSchema.optional(),
-  afterId: idSchema.optional(),
 });

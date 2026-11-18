@@ -172,6 +172,7 @@ export const auxiliarySourceMetaSchema = z.strictObject({
   kind: z.enum([
     'conversation',
     'requirementGroup',
+    'requirementName',
     'requirementDraft',
     'caseRevision',
     'issue',

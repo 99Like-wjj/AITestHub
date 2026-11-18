@@ -83,7 +83,6 @@ import {
 import { onPersonalContentChanged } from './personal-content-events';
 import { uploadPersonalFile } from './file-channel';
 import { AuxiliaryAction } from './auxiliary-action';
-import { AutomaticAuxiliaryPanel } from './automatic-auxiliary-panel';
 import { currentIdentityOwner, identityContextEpoch } from './identity-context';
 import {
   encodeConversationReference,
@@ -2709,14 +2708,6 @@ export function Workspace({
                   ) : null}
                 </Fragment>
               )}
-            <AutomaticAuxiliaryPanel
-              projectId={project?.id ?? null}
-              refreshKey={
-                sidebar?.groups.map((group) => group.requirementId).join('|') ??
-                ''
-              }
-              onNamesChanged={() => void loadSidebar(undefined, true)}
-            />
           </div>
           {scroll.away && (
             <WorkspaceJumpLatest mode={jumpMode} onJump={scroll.jump} />
@@ -3245,25 +3236,15 @@ export function Workspace({
           >
             <Input autoFocus maxLength={200} disabled={pending} />
           </Form.Item>
-          {aliasTarget && (
+          {aliasTarget?.type === 'conversation' && (
             <AuxiliaryAction
               label="AI 生成精简名"
-              source={() =>
-                aliasTarget.type === 'conversation'
-                  ? {
-                      purpose: 'alias',
-                      conversationId: aliasTarget.conversation.id,
-                      baseRowVersion: aliasTarget.conversation.rowVersion,
-                      text: aliasTarget.conversation.title,
-                    }
-                  : {
-                      purpose: 'alias',
-                      projectId: aliasTarget.group.projectId,
-                      requirementId: aliasTarget.group.requirementId,
-                      baseRowVersion: aliasTarget.group.rowVersion,
-                      text: aliasTarget.group.formalTitle,
-                    }
-              }
+              source={() => ({
+                purpose: 'alias',
+                conversationId: aliasTarget.conversation.id,
+                baseRowVersion: aliasTarget.conversation.rowVersion,
+                text: aliasTarget.conversation.title,
+              })}
               onUse={(result) => {
                 if (result.purpose === 'alias')
                   aliasForm.setFieldValue('alias', result.suggestedName);
