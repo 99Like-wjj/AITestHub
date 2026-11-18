@@ -364,7 +364,11 @@ export function createAiBusinessTools(
   },
 ) {
   const registry = createBusinessRegistry(db, options.services);
-  registerInternalTools(registry, db);
+  registerInternalTools(
+    registry,
+    db,
+    options.services?.auxiliary?.requirementNameAdmission(),
+  );
   const confirmations = new ActionIntents(db, registry);
   const entries = [...registry.tools.values()].filter((entry) =>
     AI_BUSINESS_TOOL_NAMES.some((name) => name === entry.name),

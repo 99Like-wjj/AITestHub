@@ -52,7 +52,11 @@ export function registerDomainTools(
   call: SecureCall,
   services: DomainMcpServices,
 ) {
-  const requirements = new RequirementService(db);
+  const requirements = new RequirementService(
+    db,
+    undefined,
+    services.auxiliary?.requirementNameAdmission(),
+  );
   server.registerTool(
     'ath_requirement_materials',
     {

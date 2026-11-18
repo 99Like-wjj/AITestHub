@@ -14,7 +14,10 @@ import {
   requirementParticipantsInputSchema,
 } from '../../../contracts/src/requirements.js';
 import type { Database } from '../../../persistence/src/database.js';
-import { RequirementService } from '../requirements/service.js';
+import {
+  RequirementService,
+  type RequirementNameAdmission,
+} from '../requirements/service.js';
 import { ProjectService } from '../projects/service.js';
 import { OperationService } from '../operations/service.js';
 import { DomainError } from '../errors.js';
@@ -24,8 +27,13 @@ import type { BusinessToolRegistry } from './registry.js';
 export function registerInternalTools(
   registry: BusinessToolRegistry,
   db: Database,
+  admitRequirementName?: RequirementNameAdmission,
 ): void {
-  const requirements = new RequirementService(db);
+  const requirements = new RequirementService(
+    db,
+    undefined,
+    admitRequirementName,
+  );
   const projects = new ProjectService(db);
   const target = { projectId: idSchema, requirementId: idSchema };
   const description =
