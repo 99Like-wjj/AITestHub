@@ -145,6 +145,17 @@ export class ConversationsController {
       return res.json(
         await this.conversations.updatePreferences(actor, req.body),
       );
+    if (path === 'ai-preferences/workspace-access' && req.method === 'GET')
+      return res.json(
+        await this.conversations.workspaceAccessPreference(actor),
+      );
+    if (path === 'ai-preferences/workspace-access' && req.method === 'PUT')
+      return res.json(
+        await this.conversations.updateWorkspaceAccessPreference(
+          actor,
+          req.body,
+        ),
+      );
     if (path === 'usage' && req.method === 'GET')
       return res.json(
         await this.tasks.usage(

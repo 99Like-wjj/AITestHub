@@ -1,4 +1,5 @@
 import { splitComposerSkills } from '../../../contracts/src/composer-skills.js';
+import { composerReferenceMarkerPattern } from '../../../contracts/src/conversations.js';
 import { assertSafeModelInput } from '../security/model-input.js';
 import { DomainError } from '../errors.js';
 
@@ -14,9 +15,7 @@ export function truncateConversationText(value: string, limit: number): string {
   return result;
 }
 
-/** A local, owner-private label exists before any optional summary request. */
-export function fallbackConversationTitle(content: string): string {
-  const body = splitComposerSkills(content).text;
+function titleFromBody(body: string): string {
   const first = body
     .split(/[\r\n。！？!?]/u)
     .map((line) =>
@@ -39,8 +38,39 @@ export function fallbackConversationTitle(content: string): string {
   }
 }
 
+/** A local, owner-private label exists before any optional summary request. */
+export function fallbackConversationTitle(content: string): string {
+  return titleFromBody(
+    splitComposerSkills(content).text.replace(
+      composerReferenceMarkerPattern,
+      ' ',
+    ),
+  );
+}
+
+export interface ConversationTitleRow {
+  alias: string | null;
+  default_title: string;
+  first_user_title_content?: string | null;
+}
+
+export function conversationDisplayTitle(row: ConversationTitleRow): string {
+  if (row.alias !== null) return row.alias;
+  const content = row.first_user_title_content;
+  if (!content) return row.default_title;
+  if (isPlaceholderConversationTitle(row.default_title))
+    return fallbackConversationTitle(content);
+  if (row.default_title.includes('@[')) {
+    const body = splitComposerSkills(content).text;
+    const plain = body.replace(composerReferenceMarkerPattern, ' ');
+    if (body !== plain && titleFromBody(body) === row.default_title)
+      return titleFromBody(plain);
+  }
+  return row.default_title;
+}
+
 /** c is already owner/project-authorized by every caller. Historical naming is
  * a read projection, never a migration or a background replay of old chats. */
-export const conversationFirstUserTitleSql = `CASE WHEN c.alias IS NULL AND c.default_title IN ('新聊天','新对话') THEN
- (SELECT left(m.content,16000) FROM app.ai_messages m WHERE m.conversation_id=c.id AND m.role='user' AND m.deleted_at IS NULL ORDER BY m.created_at,m.id LIMIT 1)
+export const conversationFirstUserTitleSql = `CASE WHEN c.alias IS NULL AND (c.default_title IN ('新聊天','新对话') OR position('@[' in c.default_title)>0) THEN
+ (SELECT m.content FROM app.ai_messages m WHERE m.conversation_id=c.id AND m.role='user' AND m.deleted_at IS NULL ORDER BY m.created_at,m.id LIMIT 1)
  ELSE NULL END first_user_title_content`;

@@ -39,6 +39,8 @@ export const usageOriginScopeSchema = z.enum([
   'legacyUnknown',
   'all',
 ]);
+export const composerReferenceMarkerPattern =
+  /@\[(?<referenceLabel>[^\]\r\n]{1,2400})\]\(ath-ref:(?<referenceKey>[a-zA-Z]+:[a-f0-9-]{36})\)/gu;
 export const conversationReferenceInputSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('conversation'),

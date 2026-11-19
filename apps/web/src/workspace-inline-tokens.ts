@@ -1,4 +1,7 @@
-import type { ConversationReferenceInput } from '../../../packages/contracts/src/conversations';
+import {
+  composerReferenceMarkerPattern,
+  type ConversationReferenceInput,
+} from '../../../packages/contracts/src/conversations';
 import {
   platformGuidanceSkillIdSchema,
   type PlatformGuidanceSkillId,
@@ -51,6 +54,14 @@ export function inlineSkillMarker(id: PlatformGuidanceSkillId) {
   return '[/' + id + '](ath-skill:' + id + ')';
 }
 
+const composerTokenPattern = new RegExp(
+  composerReferenceMarkerPattern.source +
+    '|' +
+    /\[\/(?<skillId>[a-z][a-z0-9-]{0,79})\]\(ath-skill:\k<skillId>\)|\/(?<legacySkillId>[a-z][a-z0-9-]{0,79})(?=$|\s)/u
+      .source,
+  'gu',
+);
+
 export function replaceConversationReferenceCode(
   raw: string,
   code: string,
@@ -74,16 +85,14 @@ export function parseInlineComposerTokens(
   allowedReferences?: ReadonlySet<string>,
 ): InlineComposerToken[] {
   const found: InlineComposerToken[] = [];
-  for (const match of raw.matchAll(
-    /@\[([^\]\r\n]{1,2400})\]\(ath-ref:([a-zA-Z]+:[a-f0-9-]{36})\)|\[\/([a-z][a-z0-9-]{0,79})\]\(ath-skill:\3\)|\/([a-z][a-z0-9-]{0,79})(?=$|\s)/gu,
-  )) {
+  for (const match of raw.matchAll(composerTokenPattern)) {
     const start = match.index,
-      key = match[2];
+      key = match.groups?.referenceKey;
     if (key) {
       if (allowedReferences && !allowedReferences.has(key)) continue;
       let label: string;
       try {
-        label = decodeURIComponent(match[1] ?? '');
+        label = decodeURIComponent(match.groups?.referenceLabel ?? '');
       } catch {
         continue;
       }
@@ -98,11 +107,11 @@ export function parseInlineComposerTokens(
       });
     } else {
       const parsed = platformGuidanceSkillIdSchema.safeParse(
-        match[3] ?? match[4],
+        match.groups?.skillId ?? match.groups?.legacySkillId,
       );
       if (
         !parsed.success ||
-        (!match[3] &&
+        (!match.groups?.skillId &&
           start > 0 &&
           /[A-Za-z0-9_./:@-]/.test(raw[start - 1] ?? ''))
       )

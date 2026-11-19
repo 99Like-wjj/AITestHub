@@ -78,10 +78,13 @@
   color: var(--muted);
   font-size: 12px;
 }
-.user-composer .workspace-access-trigger.access-full {
-  color: #c86b32;
+.user-composer .composer-toolbar .workspace-access-trigger.ant-btn.access-full {
+  color: #a64b1a;
 }
-[data-theme='dark'] .user-composer .workspace-access-trigger.access-full {
+[data-theme='dark']
+  .user-composer
+  .composer-toolbar
+  .workspace-access-trigger.ant-btn.access-full {
   color: #f0955c;
 }
 .workspace-model-popover .ant-popover-inner,

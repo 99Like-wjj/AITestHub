@@ -3,19 +3,17 @@ import type { SqlExecutor } from '../../../persistence/src/database.js';
 import { currentUser, requireProject } from '../access/policy.js';
 import { DomainError } from '../errors.js';
 import {
+  conversationDisplayTitle,
   conversationFirstUserTitleSql,
-  fallbackConversationTitle,
-  isPlaceholderConversationTitle,
+  type ConversationTitleRow,
 } from './title.js';
 
-export interface ConversationRow {
+export interface ConversationRow extends ConversationTitleRow {
   id: string;
   owner_id: string;
   project_id: string | null;
   requirement_id: string | null;
   requirement_title?: string | null;
-  default_title: string;
-  alias: string | null;
   pinned_at: Date | null;
   archived_at: Date | null;
   archive_source: 'manual' | 'group' | null;
@@ -24,7 +22,6 @@ export interface ConversationRow {
   created_at: Date;
   updated_at: Date;
   active_task_status?: 'accepted' | 'running' | 'cancelling' | null;
-  first_user_title_content?: string | null;
 }
 export function conversationDto(row: ConversationRow) {
   return {
@@ -32,12 +29,7 @@ export function conversationDto(row: ConversationRow) {
     projectId: row.project_id,
     requirementId: row.requirement_id,
     requirementTitle: row.requirement_title ?? null,
-    title:
-      row.alias ??
-      (isPlaceholderConversationTitle(row.default_title) &&
-      row.first_user_title_content
-        ? fallbackConversationTitle(row.first_user_title_content)
-        : row.default_title),
+    title: conversationDisplayTitle(row),
     alias: row.alias,
     pinnedAt: row.pinned_at?.toISOString() ?? null,
     archivedAt: row.archived_at?.toISOString() ?? null,

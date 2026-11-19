@@ -25,6 +25,10 @@ import {
   conversationCreatedSchema,
   type TaskState,
 } from '../../../contracts/src/conversations.js';
+import {
+  workspaceAccessPreferenceInputSchema,
+  type WorkspaceAccessMode,
+} from '../../../contracts/src/workspace-access.js';
 import type {
   Database,
   SqlExecutor,
@@ -104,6 +108,10 @@ interface PreviewRow {
   consumed_at: Date | null;
 }
 const activeStates = ['accepted', 'running', 'cancelling'];
+interface WorkspaceAccessRow {
+  mode: WorkspaceAccessMode | null;
+  version: number;
+}
 
 export class ConversationsService {
   readonly references: ConversationReferences;
@@ -591,6 +599,45 @@ export class ConversationsService {
             rowVersion: row?.row_version,
           },
         };
+      },
+    );
+  }
+  async workspaceAccessPreference(actor: ActorContext) {
+    return this.db.transaction(async (tx) => {
+      await personalActor(tx, actor);
+      const row = (
+        await tx.query<WorkspaceAccessRow>(
+          'SELECT workspace_access_mode AS mode,workspace_access_version AS version FROM app.ai_conversation_preferences WHERE user_id=$1',
+          [actor.userId],
+        )
+      ).rows[0];
+      return { mode: row?.mode ?? null, rowVersion: row?.version ?? 0 };
+    });
+  }
+  async updateWorkspaceAccessPreference(actor: ActorContext, raw: unknown) {
+    const input = workspaceAccessPreferenceInputSchema.parse(raw);
+    return this.#operations.execute(
+      actor,
+      'conversations.workspace-access',
+      input.commandId,
+      input,
+      (tx) => personalActor(tx, actor),
+      async (tx) => {
+        await tx.query(
+          'INSERT INTO app.ai_conversation_preferences(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING',
+          [actor.userId],
+        );
+        const row = (
+          await tx.query<WorkspaceAccessRow>(
+            `UPDATE app.ai_conversation_preferences
+              SET workspace_access_mode=$2,workspace_access_version=workspace_access_version+1
+              WHERE user_id=$1 AND workspace_access_version=$3
+              RETURNING workspace_access_mode AS mode,workspace_access_version AS version`,
+            [actor.userId, input.mode, input.rowVersion],
+          )
+        ).rows[0];
+        if (!row) stale();
+        return { mode: row.mode, rowVersion: row.version };
       },
     );
   }

@@ -9,6 +9,7 @@ import { KnowledgeService } from '../knowledge/service.js';
 import type { AgentDocumentsService } from '../agent-documents/service.js';
 import type { ConversationReferences } from '../conversations/references.js';
 import { conversationRow } from '../conversations/common.js';
+import { conversationDisplayTitle } from '../conversations/title.js';
 import { DomainError } from '../errors.js';
 import { retrievalDigest } from './ranking.js';
 
@@ -176,7 +177,7 @@ export class RetrievalSources {
         403,
       );
     return {
-      title: (conversation.alias ?? conversation.default_title).slice(0, 500),
+      title: conversationDisplayTitle(conversation).slice(0, 500),
       stamp: retrievalDigest(messages),
       sourceHash: retrievalDigest(messages),
       messages,

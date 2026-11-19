@@ -158,13 +158,22 @@ export function workspaceTurnText(task: Task | null, fallbackText: string) {
   return { body, commentary, legacyText, orphanedFragments, markdown };
 }
 
-export function workspaceElapsed(start: string, end: string | number) {
+export function workspaceElapsed(
+  start: string,
+  end: string | number,
+  precision: 'seconds' | 'tenths' = 'seconds',
+) {
   const startMs = Date.parse(start);
   const endMs = typeof end === 'string' ? Date.parse(end) : end;
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
-  const seconds = Math.floor(Math.max(0, endMs - startMs) / 1000);
-  if (seconds < 60) return `${seconds}秒`;
-  return `${Math.floor(seconds / 60)}分${seconds % 60}秒`;
+  const milliseconds = Math.max(0, endMs - startMs);
+  const rounded =
+    precision === 'tenths'
+      ? Math.max(1, Math.ceil(milliseconds / 100)) * 100
+      : Math.floor(milliseconds / 1000) * 1000;
+  const seconds = (rounded % 60_000) / 1000;
+  if (rounded < 60_000) return `${seconds}秒`;
+  return `${Math.floor(rounded / 60_000)}分${seconds}秒`;
 }
 
 const toolLabels: Record<ToolState, string> = {
@@ -463,6 +472,7 @@ export function WorkspaceTurn({
                   const duration = workspaceElapsed(
                     tool.startedAt,
                     tool.state === 'started' && running ? now : tool.updatedAt,
+                    'tenths',
                   );
                   return (
                     <li

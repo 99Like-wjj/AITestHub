@@ -116,8 +116,7 @@ import './workspace-ai-controls.css';
 import { WorkspaceContextPicker } from './workspace-context-picker';
 import {
   WorkspaceAccessPicker,
-  readWorkspaceAccess,
-  saveWorkspaceAccess,
+  useWorkspaceAccessPreference,
 } from './workspace-access';
 import { WorkspaceModelPicker } from './workspace-model-picker';
 import { WorkspaceContextDrawer } from './workspace-context-drawer';
@@ -311,13 +310,9 @@ export function Workspace({
     scope: string;
     value: OperationTarget | null;
   } | null>(null);
-  const [accessMode, setAccessMode] = useState(() =>
-    readWorkspaceAccess(me.user.id),
-  );
+  const access = useWorkspaceAccessPreference(me.user.id);
+  const accessMode = access.mode;
   const dataScope = workspaceDataScope(accessMode);
-  useEffect(() => {
-    setAccessMode(readWorkspaceAccess(me.user.id));
-  }, [me.user.id]);
   const [references, setReferences] = useState<PreparedReference[]>([]);
   const targetProjectId = project?.id ?? null;
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -1884,6 +1879,7 @@ export function Workspace({
     const sendEpoch = identityContextEpoch();
     if (currentIdentityOwner() !== me.user.id) return;
     if (
+      !access.ready ||
       Boolean(targetProjectId && !targetProject) ||
       (!content.trim() && !composerSkills.length) ||
       sending ||
@@ -2138,16 +2134,13 @@ export function Workspace({
       restoreDraftTarget(conversationId, draft);
       setContent(draft.content);
       setReferences(draft.references);
-      const restoredAccess = restored.input.accessMode ?? 'restricted';
-      setAccessMode(restoredAccess);
-      saveWorkspaceAccess(me.user.id, restoredAccess);
       setModelPreference({
         schemaVersion: 'ath.workspace-model-preference.v1',
         ownerId: me.user.id,
         ...restored.input.modelSelection,
         effort: restored.input.modelSelection.effort ?? null,
       });
-      if (restoredAccess === 'full') onProjectChange(originalTarget);
+      if (restored.input.accessMode === 'full') onProjectChange(originalTarget);
       candidateInsertion.current = null;
       closeCandidates();
       setCaret(draft.content.length);
@@ -2989,6 +2982,20 @@ export function Workspace({
               />
             )}
             {modelError && <Alert type="error" title={modelError} showIcon />}
+            {access.error && (
+              <Alert
+                type="warning"
+                title={access.error}
+                showIcon
+                action={
+                  !access.ready && (
+                    <Button size="small" onClick={() => void access.reload()}>
+                      重新读取
+                    </Button>
+                  )
+                }
+              />
+            )}
             {selectedModelId && !selectionCurrent && (
               <Alert
                 type="warning"
@@ -3168,19 +3175,26 @@ export function Workspace({
                     icon={<PlusOutlined />}
                     aria-label="添加附件或引用"
                     disabled={
-                      creating || sending || accessMode === 'restricted'
+                      creating ||
+                      sending ||
+                      !access.ready ||
+                      accessMode === 'restricted'
                     }
                   />
                 </Dropdown>
                 <WorkspaceAccessPicker
                   mode={accessMode}
-                  disabled={creating || sending || Boolean(uncertain)}
+                  loading={access.pending}
+                  disabled={
+                    creating || sending || Boolean(uncertain) || !access.ready
+                  }
                   onChange={(mode) => {
-                    setDraftTarget(null);
-                    setAccessMode(mode);
-                    saveWorkspaceAccess(me.user.id, mode);
-                    setSendError(undefined);
-                    closeCandidates();
+                    void access.change(mode).then((saved) => {
+                      if (!saved) return;
+                      setDraftTarget(null);
+                      setSendError(undefined);
+                      closeCandidates();
+                    });
                   }}
                 />
               </Space>
@@ -3219,6 +3233,7 @@ export function Workspace({
                     (taskMatches && stream.task?.status === 'cancelling')
                   }
                   sendDisabled={
+                    !access.ready ||
                     pending ||
                     creating ||
                     sending ||

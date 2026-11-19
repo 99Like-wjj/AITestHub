@@ -16,6 +16,11 @@ import {
   type FilePreviewResult,
 } from '../../../contracts/src/file-preview.js';
 import { personalActor, conversationRow } from '../conversations/common.js';
+import {
+  conversationDisplayTitle,
+  conversationFirstUserTitleSql,
+  type ConversationTitleRow,
+} from '../conversations/title.js';
 import { requireProject } from '../access/policy.js';
 import { DomainError } from '../errors.js';
 import {
@@ -26,19 +31,19 @@ import {
   type EntryRow,
 } from './service.js';
 
-interface CenterRow extends EntryRow {
+interface CenterRow extends EntryRow, ConversationTitleRow {
   conversation_id: string;
-  conversation_title: string;
   project_id: string | null;
   project_name: string | null;
   requirement_id: string | null;
   requirement_title: string | null;
   sort_at: Date;
 }
+const centerConversationTitle = `c.alias,c.default_title,${conversationFirstUserTitleSql}`;
 const centerProjection =
   workspaceProjection.replace(
     'SELECT e.*,',
-    'SELECT c.alias,c.default_title,COALESCE(c.alias,c.default_title) conversation_title,c.project_id,p.name project_name,c.requirement_id,r.title requirement_title,e.*,',
+    `SELECT ${centerConversationTitle},c.project_id,p.name project_name,c.requirement_id,r.title requirement_title,e.*,`,
   ) +
   ' JOIN app.ai_conversations c ON c.id=e.conversation_id LEFT JOIN app.projects p ON p.id=c.project_id LEFT JOIN app.requirements r ON r.id=c.requirement_id AND r.project_id=c.project_id';
 const access = `e.owner_id=$1 AND c.owner_id=$1 AND c.deleted_at IS NULL AND
@@ -48,7 +53,7 @@ function centerDto(row: CenterRow) {
   return fileCenterEntrySchema.parse({
     ...workspaceEntryDto(row),
     conversationId: row.conversation_id,
-    conversationTitle: row.conversation_title,
+    conversationTitle: conversationDisplayTitle(row),
     projectId: row.project_id,
     projectName: row.project_name,
     requirementId: row.requirement_id,
@@ -144,17 +149,18 @@ export class FileCenterService {
     const q = await this.query(actor, raw),
       cursor = q.cursor ? idSchema.parse(q.cursor) : null;
     const rows = (
-      await this.workspace.db.query<{
-        conversation_id: string;
-        conversation_title: string;
-        project_id: string | null;
-        project_name: string | null;
-        requirement_id: string | null;
-        requirement_title: string | null;
-        created_at: Date;
-        file_count: string;
-      }>(
-        `SELECT c.id conversation_id,COALESCE(c.alias,c.default_title) conversation_title,c.project_id,p.name project_name,
+      await this.workspace.db.query<
+        ConversationTitleRow & {
+          conversation_id: string;
+          project_id: string | null;
+          project_name: string | null;
+          requirement_id: string | null;
+          requirement_title: string | null;
+          created_at: Date;
+          file_count: string;
+        }
+      >(
+        `SELECT c.id conversation_id,${centerConversationTitle},c.project_id,p.name project_name,
       c.requirement_id,r.title requirement_title,c.created_at,count(*)::text file_count
       FROM app.agent_workspace_entries e JOIN app.agent_workspace_versions v ON v.entry_id=e.id AND v.revision=e.revision
       JOIN app.file_resources f ON f.id=v.resource_id JOIN app.ai_conversations c ON c.id=e.conversation_id
@@ -167,7 +173,7 @@ export class FileCenterService {
     return fileCenterTreeSchema.parse({
       conversations: rows.slice(0, q.limit).map((row) => ({
         conversationId: row.conversation_id,
-        conversationTitle: row.conversation_title,
+        conversationTitle: conversationDisplayTitle(row),
         projectId: row.project_id,
         projectName: row.project_name,
         requirementId: row.requirement_id,
@@ -210,18 +216,19 @@ export class FileCenterService {
       })
       .parse(raw);
     const rows = (
-      await this.workspace.db.query<{
-        id: string;
-        conversation_id: string;
-        conversation_title: string;
-        project_id: string | null;
-        project_name: string | null;
-        requirement_id: string | null;
-        requirement_title: string | null;
-        message_id: string | null;
-        kind: string;
-      }>(
-        `SELECT DISTINCT e.id,e.conversation_id,COALESCE(c.alias,c.default_title) conversation_title,
+      await this.workspace.db.query<
+        ConversationTitleRow & {
+          id: string;
+          conversation_id: string;
+          project_id: string | null;
+          project_name: string | null;
+          requirement_id: string | null;
+          requirement_title: string | null;
+          message_id: string | null;
+          kind: string;
+        }
+      >(
+        `SELECT DISTINCT e.id,e.conversation_id,${centerConversationTitle},
       c.project_id,p.name project_name,c.requirement_id,r.title requirement_title,m.id message_id,e.kind
       FROM app.agent_workspace_entries e JOIN app.agent_workspace_versions v ON v.entry_id=e.id
       JOIN app.file_resources f ON f.id=v.resource_id JOIN app.ai_conversations c ON c.id=e.conversation_id
@@ -238,7 +245,7 @@ export class FileCenterService {
       associations: rows.slice(0, q.limit).map((row) => ({
         entryId: row.id,
         conversationId: row.conversation_id,
-        conversationTitle: row.conversation_title,
+        conversationTitle: conversationDisplayTitle(row),
         projectId: row.project_id,
         projectName: row.project_name,
         requirementId: row.requirement_id,
