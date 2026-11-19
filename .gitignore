@@ -36,6 +36,7 @@ deployment-profiles/
 # Only the reviewed source schema snapshot is publishable
 /tooling/local-client/contracts/*
 !/tooling/local-client/contracts/8869d4dc-bb5c-45fe-a8d1-98913be7bb01/
+!/tooling/local-client/contracts/ui-archive-v1.json
 /tooling/local-client/verification-evidence/
 
 # Historical one-off tools keep their recorded bytes.
