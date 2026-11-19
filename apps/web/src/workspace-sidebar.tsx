@@ -103,14 +103,6 @@ export function conversationMenuItems(
     { key: 'archive', icon: <InboxOutlined />, label: '归档' },
   ];
 }
-function RunningTask({ label }: { label: string }) {
-  return (
-    <span className="sidebar-task-spinner" role="status" aria-label={label}>
-      <LoadingOutlined spin aria-hidden="true" />
-    </span>
-  );
-}
-
 export function ConversationMenu({
   conversation,
   onAction,
@@ -205,11 +197,12 @@ function ConversationRow({
   const [previewOpen, setPreviewOpen] = useState(false),
     [menuOpen, setMenuOpen] = useState(false);
   const metadata = conversationPreviewMetadata(conversation, projects);
+  const running = conversationIsRunning(conversation);
   return (
     <div
       className={`conversation-row chat-item sidebar-action-row ${selected ? 'selected active' : ''}`}
       data-conversation-row={conversation.id}
-      data-task-running={conversationIsRunning(conversation) || undefined}
+      data-task-running={running || undefined}
     >
       <Popover
         trigger={['hover', 'focus']}
@@ -247,8 +240,14 @@ function ConversationRow({
           )}
         </Button>
       </Popover>
-      {conversationIsRunning(conversation) && (
-        <RunningTask label="此对话的 AI 任务正在运行" />
+      {running && (
+        <span
+          className="sidebar-task-spinner"
+          role="status"
+          aria-label="此对话的 AI 任务正在运行"
+        >
+          <LoadingOutlined spin aria-hidden="true" />
+        </span>
       )}
       <span className="sidebar-row-actions">
         <ConversationMenu
@@ -460,13 +459,6 @@ export function WorkspaceSidebar({
                 {sidebar.groups.map((group) => {
                   const title =
                     group.alias ?? group.generatedName ?? group.formalTitle;
-                  const running =
-                    group.conversations.some(conversationIsRunning) ||
-                    sidebar.pinned.some(
-                      (conversation) =>
-                        conversation.requirementId === group.requirementId &&
-                        conversationIsRunning(conversation),
-                    );
                   return (
                     <div
                       className="requirement-chat-group req-group"
@@ -500,7 +492,6 @@ export function WorkspaceSidebar({
                       <div
                         className="requirement-chat-heading req-group-title sidebar-action-row"
                         data-requirement-row={group.requirementId}
-                        data-task-running={running || undefined}
                       >
                         <Button
                           type="text"
@@ -535,9 +526,6 @@ export function WorkspaceSidebar({
                         >
                           {title}
                         </Button>
-                        {running && (
-                          <RunningTask label="此需求下的 AI 对话正在运行" />
-                        )}
                         <span className="sidebar-row-actions">
                           <RequirementMenu
                             group={group}
