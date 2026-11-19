@@ -97,6 +97,28 @@ export class ApiExecutionController {
       return res
         .status(202)
         .json(await this.service.debug.start(actor, projectId, req.body));
+    if (path === 'regression-qualifications') {
+      if (req.method === 'GET')
+        return res.json(await this.service.regression.list(actor, projectId));
+      if (req.method === 'POST')
+        return res.json(
+          await this.service.regression.save(actor, projectId, req.body),
+        );
+    }
+    if (path === 'regression-qualifications/withdraw' && req.method === 'POST')
+      return res.json(
+        await this.service.regression.withdraw(actor, projectId, req.body),
+      );
+    const savedQualification =
+      /^regression-qualification-receipts\/([^/]+)$/.exec(path);
+    if (savedQualification?.[1] && req.method === 'GET')
+      return res.json(
+        await this.service.regression.saveReceipt(
+          actor,
+          projectId,
+          commandIdSchema.parse(decodeURIComponent(savedQualification[1])),
+        ),
+      );
     const receipt = /^debug-receipts\/([^/]+)$/.exec(path);
     if (receipt?.[1] && req.method === 'GET')
       return res.json(

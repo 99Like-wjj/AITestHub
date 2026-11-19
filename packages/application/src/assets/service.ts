@@ -392,6 +392,15 @@ export class AssetService {
       return content;
     }
     const content = caseContentSchema.parse(raw);
+    if (
+      content.kind === 'UI' &&
+      (!content.steps?.length || !content.expected.trim())
+    )
+      throw new DomainError(
+        'VALIDATION_ERROR',
+        'UI 用例需要文字业务步骤和可判定的整体预期。',
+        400,
+      );
     if (content.kind !== kind || content.scenarioId !== parent?.id) {
       throw new DomainError(
         'VALIDATION_ERROR',
@@ -459,7 +468,7 @@ export class AssetService {
     });
     return asset;
   }
-  private async reviseInTransaction(
+  async reviseInTransaction(
     transaction: SqlExecutor,
     actor: ActorContext,
     projectId: string,

@@ -10,6 +10,8 @@ import {
   Select,
   Skeleton,
   Space,
+  Table,
+  Tag,
   Tree,
 } from 'antd';
 import { z } from 'zod';
@@ -21,21 +23,22 @@ import {
   assetReceiptSchema,
   reviseAssetInputSchema,
 } from '../../../packages/contracts/src/assets';
+import {
+  apiRegressionQualificationListSchema,
+  apiRegressionQualificationSchema,
+  apiRegressionWithdrawReceiptSchema,
+} from '../../../packages/contracts/src/api-execution';
 import type { Asset } from '../../../packages/contracts/src/assets';
 import { idSchema } from '../../../packages/contracts/src/base';
 import { api, describeError } from './api';
 import { ApiCaseFields } from './api-case-fields';
+import { ApiCoverage } from './api-coverage';
 import { apiDraftFromContent, serializeApiDraft } from './api-draft';
 import type { ApiDraft } from './api-draft';
 import { ApiDiagnosticPage, ApiDraftDebugger } from './api-draft-debugger';
 import type { DiagnosticDraft } from './api-draft-debugger';
 import { AssetEditor } from './asset-editor';
 import type { AssetEditorTarget } from './asset-editor';
-import {
-  AssetReviewPanel,
-  reviewLabels,
-  reviewTones,
-} from './asset-review-panel';
 import { useBusinessCommand } from './business-command';
 import { AppIcon } from './app-icon';
 import { PageHeading } from './page-heading';
@@ -45,6 +48,7 @@ import { ArchivedRequirementsToggle } from './archived-requirements-toggle';
 import type { Project } from './types';
 
 type Navigation = z.infer<typeof assetNavigationSchema>;
+type Qualification = z.infer<typeof apiRegressionQualificationSchema>;
 const hasRestoration = () => {
   const query = new URLSearchParams(window.location.hash.split('?')[1]);
   return (
@@ -60,7 +64,7 @@ export function ApiWorkbenchPage({
   project: Project | null;
   userId: string;
 }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [assets, setAssets] = useState<Asset[]>([]);
   const [navigation, setNavigation] = useState<Navigation>({
     requirements: [],
@@ -83,7 +87,10 @@ export function ApiWorkbenchPage({
   const [editor, setEditor] = useState<AssetEditorTarget | null>(null);
   const [diagnostic, setDiagnostic] = useState<DiagnosticDraft | null>(null);
   const [lookup, setLookup] = useState(hasRestoration);
-  const [review, setReview] = useState(false);
+  const [qualifications, setQualifications] = useState<Qualification[]>([]);
+  const [caseView, setCaseView] = useState<'cases' | 'pending' | 'coverage'>(
+    'cases',
+  );
   const [revisionSession, setRevisionSession] = useState<string | null>(null);
   const command = useBusinessCommand(revisionSession);
   const recoveryKey = project
@@ -128,7 +135,6 @@ export function ApiWorkbenchPage({
         : null,
     );
     setDirty(false);
-    setReview(false);
     setRevisionSession(
       asset
         ? `${project?.id}:${asset.id}:${asset.revisionId}:${crypto.randomUUID()}`
@@ -153,7 +159,7 @@ export function ApiWorkbenchPage({
     const generation = ++epoch.current;
     setLoading(true);
     try {
-      const [map, list] = await Promise.all([
+      const [map, list, available] = await Promise.all([
         api(
           `/projects/${project.id}/assets/navigation?kind=API&includeArchivedRequirements=${includeArchivedRequirements}`,
           signal ? { signal } : {},
@@ -164,25 +170,33 @@ export function ApiWorkbenchPage({
           signal ? { signal } : {},
           assetListSchema,
         ),
+        api(
+          `/projects/${project.id}/api-executions/regression-qualifications`,
+          signal ? { signal } : {},
+          apiRegressionQualificationListSchema,
+        ),
       ]);
       if (signal?.aborted || generation !== epoch.current) return false;
       setNavigation(map);
       setAssets(list.assets);
+      setQualifications(available.qualifications);
       if (initialize)
         setExpandedKeys(
           map.requirements.map((item) => `requirement:${item.id}`),
         );
       setError(undefined);
       if (initialize) {
-        const selected = idSchema.safeParse(
-          new URLSearchParams(window.location.hash.split('?')[1]).get('caseId'),
+        const query = new URLSearchParams(window.location.hash.split('?')[1]);
+        const targetId = idSchema.safeParse(
+          query.get('caseId') ?? query.get('assetId'),
         );
-        let selectedAsset =
-          list.assets.find(
-            (asset) =>
-              asset.targetType === 'case' &&
-              (!selected.success || asset.id === selected.data),
-          ) ?? null;
+        const selected = idSchema.safeParse(query.get('caseId'));
+        let selectedAsset = selected.success
+          ? (list.assets.find(
+              (asset) =>
+                asset.targetType === 'case' && asset.id === selected.data,
+            ) ?? null)
+          : null;
         if (selected.success && !selectedAsset) {
           const historical = await api(
             `/projects/${project.id}/assets/${selected.data}`,
@@ -198,6 +212,31 @@ export function ApiWorkbenchPage({
           selectedAsset = historical.asset;
         }
         activate(selectedAsset);
+        const versionFilter = idSchema.safeParse(query.get('versionId'));
+        if (
+          !selectedAsset &&
+          versionFilter.success &&
+          map.requirements.some((entry) =>
+            entry.versions.some((version) => version.id === versionFilter.data),
+          )
+        )
+          setVersionId(versionFilter.data);
+        if (!selectedAsset && targetId.success) {
+          const target = list.assets.find(
+            (asset) => asset.id === targetId.data,
+          );
+          if (target?.targetType === 'case') activate(target);
+          else if (
+            target?.targetType === 'scenario' ||
+            target?.targetType === 'set'
+          ) {
+            setVersionId(target.requirementVersionId);
+            setBatchId(target.setId);
+            setSceneId(
+              target.targetType === 'scenario' ? target.id : undefined,
+            );
+          }
+        }
         loadedProject.current = project.id;
       }
       return true;
@@ -213,6 +252,7 @@ export function ApiWorkbenchPage({
     const controller = new AbortController();
     const initialize = loadedProject.current !== project?.id;
     setAssets([]);
+    setQualifications([]);
     setNavigation({ requirements: [] });
     if (initialize) activate(null);
     void load(controller.signal, initialize);
@@ -326,7 +366,7 @@ export function ApiWorkbenchPage({
     );
     if (!response) return false;
     await saved(response.asset);
-    void message.success('已保存新修订，等待人工评审。');
+    void message.success('已保存草稿修订。完整调试通过后可保存为可回归。');
     return true;
   }
   function clearRecovery() {
@@ -387,6 +427,7 @@ export function ApiWorkbenchPage({
         content: serializeApiDraft(draft),
         sourceCaseId: active.id,
         sourceCaseRevisionId: active.revisionId,
+        sourceCaseRowVersion: active.rowVersion,
       });
       setError(undefined);
     } catch (failure) {
@@ -397,6 +438,26 @@ export function ApiWorkbenchPage({
               .join('；')
           : describeError(failure),
       );
+    }
+  }
+  function validateDraft() {
+    if (!draft) return;
+    try {
+      const content = serializeApiDraft(draft);
+      const hasJudgment = content.steps.some(
+        (step) => step.assertions.length || step.preScript || step.postScript,
+      );
+      setError(undefined);
+      if (hasJudgment)
+        void message.success(
+          '请求、变量和断言结构检查完成。真实结果以调试回执为准。',
+        );
+      else
+        void message.warning(
+          '当前用例没有业务断言，可查看调试响应，调试不能判定通过。',
+        );
+    } catch (failure) {
+      setError(describeError(failure));
     }
   }
   function create(targetType: 'set' | 'scenario' | 'case') {
@@ -419,14 +480,74 @@ export function ApiWorkbenchPage({
     );
   }
   const keyword = query.trim().toLocaleLowerCase();
+  const qualificationsByCase = new Map(
+    qualifications.map((item) => [item.caseId, item]),
+  );
+  const activeQualification = active
+    ? qualificationsByCase.get(active.id)
+    : undefined;
+  const visibleCases = assets.filter(
+    (asset) =>
+      asset.targetType === 'case' &&
+      (!versionId || asset.requirementVersionId === versionId) &&
+      (!batchId || asset.setId === batchId) &&
+      (!sceneId || asset.parentId === sceneId) &&
+      (!keyword ||
+        asset.title.toLocaleLowerCase().includes(keyword) ||
+        asset.id.includes(keyword)) &&
+      (caseView !== 'pending' ||
+        qualificationsByCase.get(asset.id)?.revisionId !== asset.revisionId),
+  );
+  function stopUsing(qualification: Qualification) {
+    if (!project || !tester) return;
+    const commandId = crypto.randomUUID();
+    let reason = '';
+    modal.confirm({
+      title: `停止使用可回归修订 r${qualification.revisionNo}`,
+      content: (
+        <Space direction="vertical">
+          <span>后续运行将重新解析资格。原运行和资格证据仍可查阅。</span>
+          <Input.TextArea
+            aria-label="停用原因"
+            maxLength={1000}
+            onChange={(event) => {
+              reason = event.target.value.trim();
+            }}
+          />
+        </Space>
+      ),
+      okText: '停止使用',
+      cancelText: '取消',
+      onOk: async () => {
+        if (!reason) {
+          void message.error('请填写停用原因。');
+          throw new Error('Missing withdrawal reason');
+        }
+        try {
+          await api(
+            `/projects/${project.id}/api-executions/regression-qualifications/withdraw`,
+            {
+              method: 'POST',
+              body: { commandId, snapshotId: qualification.snapshotId, reason },
+            },
+            apiRegressionWithdrawReceiptSchema,
+          );
+          await load();
+        } catch (error) {
+          void message.error(describeError(error));
+          throw error;
+        }
+      },
+    });
+  }
   if (!project)
     return <Empty description="请选择当前有效项目后维护接口用例。" />;
   return (
     <>
       <PageHeading
         eyebrow="API REGRESSION"
-        title="接口回归工作台"
-        description="按独立接口场景组织可维护用例，请求步骤保留在用例内部。"
+        title="接口用例管理"
+        description="配置请求与断言，在项目认可的环境完整调试通过后保存为可回归。"
         actions={
           <>
             <Button
@@ -709,6 +830,7 @@ export function ApiWorkbenchPage({
                     </p>
                   </div>
                   <div className="row">
+                    <Button onClick={validateDraft}>检查配置</Button>
                     <Button
                       icon={<AppIcon name="check" />}
                       disabled={
@@ -720,7 +842,7 @@ export function ApiWorkbenchPage({
                       loading={command.pending}
                       onClick={() => void save()}
                     >
-                      保存修改
+                      保存草稿
                     </Button>
                     <Button
                       type="primary"
@@ -733,18 +855,34 @@ export function ApiWorkbenchPage({
                       }
                       onClick={prepareDiagnostic}
                     >
-                      调试
+                      运行调试
                     </Button>
                   </div>
                 </div>
                 <div className="row wrap mt">
-                  <span className={`badge ${reviewTones[active.reviewState]}`}>
-                    {reviewLabels[active.reviewState]}
-                  </span>
+                  <Tag
+                    color={
+                      activeQualification?.revisionId === active.revisionId
+                        ? 'success'
+                        : 'warning'
+                    }
+                  >
+                    {activeQualification?.revisionId === active.revisionId
+                      ? '当前修订可回归'
+                      : '当前修订待调试'}
+                  </Tag>
                   <span className="caption">
                     编辑 r{active.revisionNo} · {draft.requests.length} 个请求
                   </span>
                   {dirty && <span className="badge amber">未保存</span>}
+                  {activeQualification && (
+                    <Tag color="success">
+                      可回归 r{activeQualification.revisionNo}
+                      {activeQualification.source === 'legacyApproval'
+                        ? ' · 历史已审'
+                        : ' · 调试通过'}
+                    </Tag>
+                  )}
                 </div>
               </div>
               {command.error && (
@@ -857,46 +995,141 @@ export function ApiWorkbenchPage({
                   </div>
                 }
               />
-              <div className="api-editor-footer between">
-                <p className="caption">
-                  调试不等于评审通过。未审修改不会覆盖原有效已审版本。
-                </p>
-                <Button
-                  icon={<AppIcon name="check" />}
-                  disabled={dirty || command.pending || command.uncertain}
-                  onClick={() => setReview(true)}
-                >
-                  内容评审
+              <Space className="api-editor-footer" wrap>
+                <Button onClick={() => guard(() => activate(null))}>
+                  返回用例库
                 </Button>
-              </div>
+                {activeQualification?.debugRunId && (
+                  <Button
+                    onClick={() =>
+                      guard(() => {
+                        window.location.hash = `api-regression?projectId=${project.id}&caseId=${active.id}&debugRunId=${activeQualification.debugRunId}`;
+                        setLookup(true);
+                      }, true)
+                    }
+                  >
+                    查看资格调试证据
+                  </Button>
+                )}
+                {tester && activeQualification && (
+                  <>
+                    <Button
+                      onClick={() =>
+                        guard(() => {
+                          window.location.hash = `plans?kind=API&caseId=${active.id}`;
+                        })
+                      }
+                    >
+                      加入回归计划
+                    </Button>
+                    <Button
+                      danger
+                      onClick={() => stopUsing(activeQualification)}
+                    >
+                      停止使用此资格
+                    </Button>
+                  </>
+                )}
+              </Space>
             </div>
           ) : (
             <div className="card pad">
-              <Empty
-                description={
-                  loading ? (
-                    '正在读取接口用例…'
-                  ) : scene ? (
-                    <Space direction="vertical">
-                      <span>{`已选择场景「${scene.title}」，可新建接口用例。`}</span>
-                      <Button
-                        onClick={() => {
-                          const query = new URLSearchParams({
-                            projectId: project.id,
-                            kind: 'API',
-                            assetId: scene.id,
-                          });
-                          window.location.hash = `cases?${query}`;
-                        }}
-                      >
-                        在用例中心维护此场景
-                      </Button>
-                    </Space>
-                  ) : (
-                    '选择接口用例进行维护，或先选择需求版本、批次和场景。'
-                  )
-                }
-              />
+              <Space className="mb" wrap>
+                <Button
+                  type={caseView === 'cases' ? 'primary' : 'default'}
+                  onClick={() => setCaseView('cases')}
+                >
+                  用例库
+                </Button>
+                <Button
+                  type={caseView === 'pending' ? 'primary' : 'default'}
+                  onClick={() => setCaseView('pending')}
+                >
+                  待调试
+                </Button>
+                <Button
+                  type={caseView === 'coverage' ? 'primary' : 'default'}
+                  onClick={() => setCaseView('coverage')}
+                >
+                  覆盖矩阵
+                </Button>
+              </Space>
+              {caseView === 'coverage' ? (
+                <ApiCoverage
+                  projectId={project.id}
+                  cases={visibleCases}
+                  assets={assets}
+                  readyCaseIds={new Set(qualificationsByCase.keys())}
+                  openScenario={(id) => {
+                    const scenario = assets.find((item) => item.id === id);
+                    if (!scenario) return;
+                    setVersionId(scenario.requirementVersionId);
+                    setBatchId(scenario.setId);
+                    setSceneId(scenario.id);
+                    setCaseView('cases');
+                  }}
+                />
+              ) : (
+                <Table
+                  size="small"
+                  rowKey="id"
+                  loading={loading}
+                  dataSource={visibleCases}
+                  scroll={{ x: 620 }}
+                  columns={[
+                    {
+                      title: '接口用例',
+                      render: (_, asset) => (
+                        <Space direction="vertical" size={0}>
+                          <Button
+                            type="link"
+                            onClick={() => guard(() => activate(asset))}
+                          >
+                            {asset.title}
+                          </Button>
+                          <span className="caption">
+                            {
+                              assets.find((item) => item.id === asset.parentId)
+                                ?.title
+                            }
+                          </span>
+                        </Space>
+                      ),
+                    },
+                    {
+                      title: '执行步骤 / 断言',
+                      render: (_, asset) => {
+                        const content = asset.content;
+                        if (!('dslVersion' in content)) return null;
+                        return `${content.steps.length} / ${content.steps.reduce((count, step) => count + step.assertions.length, 0)}`;
+                      },
+                    },
+                    {
+                      title: '当前修订',
+                      render: (_, asset) => `r${asset.revisionNo}`,
+                    },
+                    {
+                      title: '可回归修订',
+                      render: (_, asset) => {
+                        const available = qualificationsByCase.get(asset.id);
+                        if (!available) return <Tag>待调试</Tag>;
+                        return (
+                          <Tag color="success">
+                            r{available.revisionNo} ·{' '}
+                            {available.source === 'legacyApproval'
+                              ? '历史已审'
+                              : '调试通过'}
+                          </Tag>
+                        );
+                      },
+                    },
+                  ]}
+                  locale={{
+                    emptyText:
+                      '当前范围没有接口用例。可先选择需求、版本和场景。',
+                  }}
+                />
+              )}
             </div>
           )}
           <Collapse
@@ -925,6 +1158,12 @@ export function ApiWorkbenchPage({
       <ApiDraftDebugger
         projectId={project.id}
         draft={diagnostic}
+        userId={userId}
+        onQualified={async (asset) => {
+          setDiagnostic(null);
+          await saved(asset);
+          void message.success('已保存为可回归修订。');
+        }}
         onClose={() => setDiagnostic(null)}
       />
       <Modal
@@ -979,26 +1218,6 @@ export function ApiWorkbenchPage({
             ? `原回执仍未知，请保留提交标识 ${command.commandId}。`
             : ''}
         </p>
-      </Modal>
-      <Modal
-        width={1030}
-        title="接口用例评审"
-        open={review}
-        onCancel={() => setReview(false)}
-        footer={null}
-        zIndex={uiLayers.detail}
-      >
-        {active && (
-          <AssetReviewPanel
-            projectId={project.id}
-            asset={active}
-            revisionId={active.revisionId}
-            tester={tester}
-            onChanged={async () => {
-              await load();
-            }}
-          />
-        )}
       </Modal>
     </>
   );

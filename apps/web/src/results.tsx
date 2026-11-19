@@ -30,6 +30,11 @@ import { EvidenceViewer } from './evidence-viewer';
 import type { Project } from './types';
 import { PageHeading } from './page-heading';
 import { ExecutionRecords } from './execution-records';
+import { UiArchiveDialog } from './ui-archive-dialog';
+import {
+  ArchiveFindingDialog,
+  type ArchiveFinding,
+} from './archive-finding-dialog';
 import { ReportHandlingPanel } from './report-handling-panel';
 import { UiDeliveryPanel } from './ui-delivery-panel';
 import { uiLayers } from './ui-layers';
@@ -110,6 +115,8 @@ export function ResultsPage({
   userId: string;
 }) {
   const [recordsVersion, setRecordsVersion] = useState(0);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveFinding, setArchiveFinding] = useState<ArchiveFinding>();
   const [lookupOpen, setLookupOpen] = useState(() =>
     Boolean(
       new URLSearchParams(window.location.hash.split('?')[1]).get('runId'),
@@ -414,6 +421,28 @@ export function ResultsPage({
         title="执行与报告"
         description="保留当轮范围、实际修订、业务结论与独立交付状态。"
       />
+      {project.roles.includes('tester') && (
+        <div className="toolbar mb">
+          <Button onClick={() => setArchiveOpen(true)}>上传本地独立归档</Button>
+        </div>
+      )}
+      <UiArchiveDialog
+        key={project.id}
+        project={project}
+        open={archiveOpen}
+        onClose={() => setArchiveOpen(false)}
+        onSaved={(id) => {
+          setArchiveOpen(false);
+          setRecordsVersion((x) => x + 1);
+          openReport(id);
+        }}
+      />
+      <ArchiveFindingDialog
+        project={project}
+        finding={archiveFinding}
+        onClose={() => setArchiveFinding(undefined)}
+        onSaved={() => void loadReport()}
+      />
       <ExecutionRecords
         userId={userId}
         project={project}
@@ -537,7 +566,7 @@ export function ResultsPage({
                     ]}
                   />
                 )}
-                {run?.kind === 'UI' && (
+                {run?.kind === 'UI' && run.scope.sourceType !== 'uiArchive' && (
                   <UiDeliveryPanel
                     key={run.runId}
                     projectId={project.id}
@@ -852,6 +881,14 @@ export function ResultsPage({
                     })),
                   ]}
                 />
+                {facts.scope.sourceType === 'uiArchive' && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    title="独立执行归档"
+                    description="此报告记录本地已发生的事实。可登记问题，统计独立于正式计划与复测。"
+                  />
+                )}
                 <Table
                   rowKey={(row) => row.scopeItem.runItemId}
                   pagination={{ pageSize: 10 }}
@@ -869,6 +906,14 @@ export function ResultsPage({
                           <Typography.Text strong>
                             {row.scopeItem.content.title}
                           </Typography.Text>
+                          {'localItemId' in row.scopeItem && (
+                            <div className="caption">
+                              {row.scopeItem.localItemId} ·{' '}
+                              {row.scopeItem.caseId
+                                ? '关联平台用例修订'
+                                : '本地条目'}
+                            </div>
+                          )}
                         </>
                       ),
                     },
@@ -918,6 +963,31 @@ export function ResultsPage({
                             >
                               事实、人工结论与证据
                             </Button>
+                            {'localItemId' in row.scopeItem &&
+                              project.roles.includes('tester') &&
+                              revisionId === 'current' && (
+                                <Button
+                                  onClick={() =>
+                                    setArchiveFinding({
+                                      title: row.scopeItem.content.title,
+                                      runId: facts.runId,
+                                      resultId: row.result!.id,
+                                      requirementId:
+                                        'requirementId' in row.scopeItem
+                                          ? row.scopeItem.requirementId
+                                          : '',
+                                      requirementVersionId:
+                                        row.scopeItem.requirementVersionId,
+                                      observations:
+                                        row.result!.content.actualObservations,
+                                      evidenceRefs:
+                                        row.result!.content.evidenceRefs,
+                                    })
+                                  }
+                                >
+                                  登记问题
+                                </Button>
+                              )}
                             {row.result.assessmentBasisChanged && (
                               <Typography.Text type="warning">
                                 人工结论基准与当前采集修订不同
@@ -930,14 +1000,15 @@ export function ResultsPage({
                     },
                   ]}
                 />
-                {facts.kind === 'UI' && (
-                  <UiDeliveryPanel
-                    key={facts.runId}
-                    projectId={project.id}
-                    runId={facts.runId}
-                    scopeItems={facts.scope.items}
-                  />
-                )}
+                {facts.kind === 'UI' &&
+                  facts.scope.sourceType !== 'uiArchive' && (
+                    <UiDeliveryPanel
+                      key={facts.runId}
+                      projectId={project.id}
+                      runId={facts.runId}
+                      scopeItems={facts.scope.items}
+                    />
+                  )}
                 {currentHandling && (
                   <ReportHandlingPanel
                     projectId={project.id}

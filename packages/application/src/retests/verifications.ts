@@ -24,7 +24,11 @@ export async function recordRetestVerifications(
       [projectId, runId],
     )
   ).rows[0];
-  if (!run || !['completed', 'terminated', 'interrupted'].includes(run.state))
+  if (
+    !run ||
+    run.source === 'uiArchive' ||
+    !['completed', 'terminated', 'interrupted'].includes(run.state)
+  )
     return;
   if (run.kind === 'UI') {
     const gate = await uiDeliveryGate(tx, runId);
@@ -51,7 +55,9 @@ export async function recordRetestVerifications(
     ]),
   );
   if (scope.items.some((item) => !facts.has(item.runItemId))) return;
-  for (const issueId of new Set(scope.items.flatMap((item) => item.issueIds))) {
+  for (const issueId of [
+    ...new Set(scope.items.flatMap((item) => item.issueIds)),
+  ].sort()) {
     if (
       !(
         await tx.query(
@@ -61,6 +67,11 @@ export async function recordRetestVerifications(
       ).rowCount
     )
       continue;
+    // Serialize verification insertion with explicit closing of this issue.
+    await tx.query(
+      'SELECT 1 FROM app.issues WHERE project_id=$1 AND id=$2 FOR UPDATE',
+      [projectId, issueId],
+    );
     const items = scope.items
       .filter((item) => item.issueIds.includes(issueId))
       .map((item) => facts.get(item.runItemId)!);

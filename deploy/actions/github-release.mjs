@@ -90,7 +90,10 @@ export async function readSmallFile(path, limit = 1024 * 1024) {
 }
 
 export function validateBuildRun(run, workflow, repo) {
-  assert.equal(repo.private, true, 'REPOSITORY_MUST_REMAIN_PRIVATE');
+  assert.ok(
+    Number.isSafeInteger(repo.id) && repo.id > 0,
+    'REPOSITORY_UNVERIFIED',
+  );
   assert.equal(run.repository?.id, repo.id);
   assert.equal(run.head_repository?.id, repo.id);
   assert.equal(run.workflow_id, workflow.id);

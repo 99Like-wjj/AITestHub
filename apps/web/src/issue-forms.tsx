@@ -50,7 +50,7 @@ interface IssueFields {
   outcome: 'passed' | 'failed';
   attachmentFileIds: string[];
   returnToInProgress: boolean;
-  resolution: 'fixed' | 'notDefect';
+  resolution: 'fixed' | 'notDefect' | 'cannotReproduce';
 }
 export function RequirementFields({
   requirements,
@@ -151,7 +151,12 @@ function AssigneeField({
   );
 }
 export type EditorTarget =
-  | { session: string; kind: 'new' }
+  | {
+      session: string;
+      kind: 'new';
+      requirementId?: string;
+      requirementVersionId?: string | null;
+    }
   | { session: string; kind: 'edit'; issue: Issue }
   | { session: string; kind: 'confirm'; problem: Problem };
 export function IssueEditor({
@@ -199,8 +204,12 @@ export function IssueEditor({
           : basis && 'suggestedSeverity' in basis
             ? basis.suggestedSeverity
             : 'normal',
-      requirementId: basis?.requirementId ?? '',
-      requirementVersionId: basis?.requirementVersionId ?? null,
+      requirementId:
+        basis?.requirementId ??
+        (target.kind === 'new' ? (target.requirementId ?? '') : ''),
+      requirementVersionId:
+        basis?.requirementVersionId ??
+        (target.kind === 'new' ? (target.requirementVersionId ?? null) : null),
       assigneeId: target.kind === 'edit' ? target.issue.assigneeId : null,
       resultIds: [],
       target: 'new',
@@ -505,6 +514,12 @@ export function IssueActionEditor({
   const staleHandling =
     target?.kind === 'handling' && command.errorCode === 'STALE_BASE_REVISION';
   const outcome = Form.useWatch('outcome', form) as string | undefined;
+  const resolution = Form.useWatch('resolution', form) as
+    IssueFields['resolution'] | undefined;
+  const needsBasis =
+    target?.kind === 'close' &&
+    resolution !== undefined &&
+    resolution !== 'fixed';
   useEffect(() => {
     refreshController.current?.abort();
     setHandlingBasis(null);
@@ -823,13 +838,28 @@ export function IssueActionEditor({
                 <Select
                   disabled={command.pending}
                   options={[
-                    { value: 'fixed', label: '按已确认处理关闭' },
-                    { value: 'notDefect', label: '明确为非缺陷并关闭' },
+                    { value: 'fixed', label: '修复关闭（须本次复测通过）' },
+                    { value: 'notDefect', label: '非缺陷' },
+                    { value: 'cannotReproduce', label: '无法复现' },
                   ]}
                 />
               </Form.Item>
             )}
-            <Form.Item name="note" label="说明（可留空）">
+            <Form.Item
+              name="note"
+              label={needsBasis ? '关闭依据' : '说明（可留空）'}
+              rules={
+                needsBasis
+                  ? [
+                      {
+                        required: true,
+                        whitespace: true,
+                        message: '请填写实际判断依据',
+                      },
+                    ]
+                  : []
+              }
+            >
               <Input.TextArea
                 rows={4}
                 maxLength={10000}

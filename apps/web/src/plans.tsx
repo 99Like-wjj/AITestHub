@@ -24,6 +24,8 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons';
 import { z } from 'zod';
+import { idSchema } from '../../../packages/contracts/src/base';
+import { apiRegressionQualificationListSchema } from '../../../packages/contracts/src/api-execution';
 import { requirementEligibleParticipantsSchema } from '../../../packages/contracts/src/requirements';
 import {
   apiQueueReceiptSchema,
@@ -65,6 +67,35 @@ type UiScope = z.infer<typeof uiPlanScopeSchema>;
 type StartPreview = z.infer<typeof apiStartPreviewSchema>;
 type QueueReceipt = z.infer<typeof apiQueueReceiptSchema>;
 type Navigation = z.infer<typeof assetNavigationSchema>;
+type PlanHandoff = {
+  kind: 'UI' | 'API';
+  caseIds: string[];
+  versionId: string | undefined;
+};
+
+function readPlanHandoff(projectId?: string): PlanHandoff | null {
+  if (!projectId) return null;
+  const [path, search] = window.location.hash.replace(/^#\/?/, '').split('?');
+  if (path !== 'plans') return null;
+  const query = new URLSearchParams(search);
+  const linkedProject = query.get('projectId');
+  const kind = query.get('kind');
+  if (
+    (linkedProject && linkedProject !== projectId) ||
+    (kind !== 'UI' && kind !== 'API')
+  )
+    return null;
+  const caseIds = [...new Set(query.getAll('caseId'))].filter(
+    (id) => idSchema.safeParse(id).success,
+  );
+  if (!caseIds.length || caseIds.length > 10000) return null;
+  const version = idSchema.safeParse(query.get('versionId'));
+  return {
+    kind,
+    caseIds,
+    versionId: version.success ? version.data : undefined,
+  };
+}
 interface PlanFields {
   name: string;
   environmentId: string;
@@ -192,6 +223,7 @@ function PlanEditor({
   projectId,
   kind,
   plan,
+  handoff,
   open,
   onClose,
   onSaved,
@@ -199,6 +231,7 @@ function PlanEditor({
   projectId: string;
   kind: 'UI' | 'API';
   plan: Plan | null;
+  handoff: PlanHandoff | null;
   open: boolean;
   onClose: () => void;
   onSaved: () => Promise<void>;
@@ -213,11 +246,16 @@ function PlanEditor({
   const [eligibility, setEligibility] = useState<
     z.infer<typeof uiPlanEligibilitySchema>['items']
   >([]);
+  const [apiQualifications, setApiQualifications] = useState<
+    z.infer<typeof apiRegressionQualificationListSchema>['qualifications']
+  >([]);
   const [navigation, setNavigation] = useState<Navigation>({
     requirements: [],
   });
   const [environments, setEnvironments] = useState<TestConfigurationView[]>([]);
   const [caseIds, setCaseIds] = useState<string[]>([]);
+  const [refreshCaseIds, setRefreshCaseIds] = useState<string[]>([]);
+  const [excludedHandoffCount, setExcludedHandoffCount] = useState(0);
   const [caseVisible, setCaseVisible] = useState(50);
   const [loading, setLoading] = useState(false);
   const command = usePlanningCommand(
@@ -241,6 +279,8 @@ function PlanEditor({
     setDirty(false);
     setDiscard(false);
     setLoading(true);
+    setExcludedHandoffCount(0);
+    setRefreshCaseIds([]);
     setCaseVisible(50);
     form.setFieldsValue({
       name: plan?.name ?? '',
@@ -274,13 +314,45 @@ function PlanEditor({
             uiPlanEligibilitySchema,
           )
         : Promise.resolve({ items: [] }),
+      kind === 'API'
+        ? api(
+            `/projects/${projectId}/api-executions/regression-qualifications`,
+            { signal: controller.signal },
+            apiRegressionQualificationListSchema,
+          )
+        : Promise.resolve({ qualifications: [] }),
     ])
-      .then(([data, map, configs, qualified]) => {
+      .then(([data, map, configs, qualified, apiQualified]) => {
         if (!controller.signal.aborted) {
           setAssets(data.assets);
           setNavigation(map);
           setEnvironments(configs.configurations);
           setEligibility(qualified.items);
+          setApiQualifications(apiQualified.qualifications);
+          if (!plan && handoff?.kind === kind) {
+            const candidates = handoff.caseIds.flatMap((id) => {
+              const item = data.assets.find((asset) => asset.id === id);
+              return item?.targetType === 'case' && !item.removedAt
+                ? [item]
+                : [];
+            });
+            const versionId =
+              handoff.versionId ?? candidates[0]?.requirementVersionId;
+            if (kind === 'UI' && versionId)
+              form.setFieldValue('requirementVersionId', versionId);
+            const selected = candidates.filter((item) =>
+              kind === 'UI'
+                ? item.requirementVersionId === versionId &&
+                  qualified.items.some(
+                    (entry) => entry.caseId === item.id && entry.eligible,
+                  )
+                : apiQualified.qualifications.some(
+                    (entry) => entry.caseId === item.id,
+                  ),
+            );
+            setCaseIds(selected.map((item) => item.id));
+            setExcludedHandoffCount(handoff.caseIds.length - selected.length);
+          }
         }
       })
       .catch((err: unknown) => {
@@ -290,7 +362,7 @@ function PlanEditor({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [open, plan, projectId, kind, form]);
+  }, [open, plan, handoff, projectId, kind, form]);
   function requestClose() {
     if (pending) return;
     if (dirty) setDiscard(true);
@@ -324,6 +396,7 @@ function PlanEditor({
               ...input,
               rowVersion: plan.rowVersion,
               basePlanRevisionId: plan.planRevisionId,
+              ...(refreshCaseIds.length ? { refreshCaseIds } : {}),
             })
           : createPlanInputSchema.parse(input);
         return api(
@@ -345,11 +418,24 @@ function PlanEditor({
       !asset.removedAt &&
       (kind === 'API' || asset.requirementVersionId === selectedVersion),
   );
-  const invalidSelection =
-    kind === 'UI' &&
-    caseIds.some(
-      (id) => !eligibility.find((item) => item.caseId === id)?.eligible,
-    );
+  const originalIds = new Set(plan?.items.map((item) => item.caseId));
+  const eligibleUi = new Map(eligibility.map((item) => [item.caseId, item]));
+  const apiReady = new Map(
+    apiQualifications.map((item) => [item.caseId, item]),
+  );
+  const requirementNames = new Map(
+    navigation.requirements.flatMap((requirement) =>
+      requirement.versions.map((version) => [
+        version.id,
+        `${requirement.title} · v${version.versionNo}`,
+      ]),
+    ),
+  );
+  const invalidSelection = caseIds.some(
+    (id) =>
+      (!originalIds.has(id) || refreshCaseIds.includes(id)) &&
+      (kind === 'UI' ? !eligibleUi.get(id)?.eligible : !apiReady.has(id)),
+  );
   return (
     <>
       <Modal
@@ -400,12 +486,12 @@ function PlanEditor({
           title={
             kind === 'UI'
               ? 'UI 计划保存时固定已审快照，不会随草稿或新需求版本漂移。'
-              : '接口计划保存逻辑用例 ID，真正开始时再取最新有效已审并冻结。'
+              : '接口计划关联用例，真正开始时锁定最新有效的可回归修订。'
           }
           description={
             kind === 'UI'
-              ? '同一需求版本；整批门槛通过后可选子集。跨新需求版本请新建计划，本地 AI 由用户发起。'
-              : '可跨本项目需求选择接口用例；未审新草稿不覆盖旧已审。未配置/失效引用在开始预览明确展示。'
+              ? '同一需求版本下可逐条选入。修改计划时，原固定项只有勾选更新才会换修订。'
+              : '可选择本项目各需求的接口用例。开始预览显示试跑资格和目标环境缺口。'
           }
           className="section-alert"
         />
@@ -414,8 +500,14 @@ function PlanEditor({
             type="warning"
             showIcon
             className="section-alert"
-            title="所选范围当前未满足整集评审条件，不能主动更新。"
-            description="原计划固定范围仍保留；仅改名称请使用列表中的“改名”。"
+            title="新增或待换版的用例缺少当前执行资格。"
+          />
+        )}
+        {excludedHandoffCount > 0 && !loading && (
+          <Alert
+            type="warning"
+            className="section-alert"
+            title={`带入的 ${excludedHandoffCount} 条用例缺少资格或不在当前需求版本。`}
           />
         )}
         {(error || command.error) && (
@@ -504,7 +596,7 @@ function PlanEditor({
         <Typography.Paragraph>
           已明确选择 {caseIds.length} 条。
           {kind === 'UI'
-            ? '当前未通过内容不可新选；完整批次门槛仍由服务在保存时检查。'
+            ? '新增或换版时使用当前已批准的用例。'
             : '开始前会展示全部缺口，手动有效子集须再次明确选择。'}
         </Typography.Paragraph>
         <div className="mt" aria-busy={loading}>
@@ -515,51 +607,89 @@ function PlanEditor({
           )}
           {cases.slice(0, caseVisible).map((asset) => {
             const selected = caseIds.includes(asset.id),
-              qualification = eligibility.find(
-                (item) => item.caseId === asset.id,
-              ),
-              eligible = kind === 'API' || qualification?.eligible === true,
+              qualification = eligibleUi.get(asset.id),
+              ready = apiReady.get(asset.id),
+              eligible =
+                kind === 'API'
+                  ? Boolean(ready)
+                  : qualification?.eligible === true,
               unavailable = !eligible && !selected;
             return (
-              <label className="checkrow" key={asset.id}>
-                <input
-                  type="checkbox"
-                  checked={selected}
-                  disabled={locked || unavailable}
-                  onChange={(event) => {
-                    setCaseIds(
-                      event.target.checked
-                        ? [...caseIds, asset.id]
-                        : caseIds.filter((id) => id !== asset.id),
-                    );
-                    setDirty(true);
-                  }}
-                />
-                <span className="grow">
-                  {asset.title}
-                  <small>
-                    {asset.id} ·{' '}
-                    {assets.find((item) => item.id === asset.setId)?.title ??
-                      asset.setId}{' '}
-                    · 当前编辑 r{asset.revisionNo} ·{' '}
-                    {reviewLabels[asset.reviewState]}
-                    {kind === 'UI' && !eligible && (
-                      <span role="status">
-                        {' '}
-                        ·{' '}
-                        {qualification?.reasons.join('；') || '资格尚未核实。'}
-                      </span>
-                    )}
-                  </small>
-                </span>
-                <span className="badge">
-                  {!eligible
-                    ? selected && plan
-                      ? '原固定项 · 当前不可更新'
-                      : '不符合整集门槛'
-                    : '可选择'}
-                </span>
-              </label>
+              <div key={asset.id}>
+                <label className="checkrow" key={asset.id}>
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    disabled={locked || unavailable}
+                    onChange={(event) => {
+                      setCaseIds(
+                        event.target.checked
+                          ? [...caseIds, asset.id]
+                          : caseIds.filter((id) => id !== asset.id),
+                      );
+                      if (!event.target.checked)
+                        setRefreshCaseIds((current) =>
+                          current.filter((id) => id !== asset.id),
+                        );
+                      setDirty(true);
+                    }}
+                  />
+                  <span className="grow">
+                    {asset.title}
+                    <small>
+                      {asset.id} ·{' '}
+                      {assets.find((item) => item.id === asset.setId)?.title ??
+                        asset.setId}{' '}
+                      {kind === 'API' &&
+                      requirementNames.has(asset.requirementVersionId)
+                        ? `· ${requirementNames.get(asset.requirementVersionId)} `
+                        : ''}
+                      · 当前编辑 r{asset.revisionNo} ·{' '}
+                      {kind === 'UI'
+                        ? reviewLabels[asset.reviewState]
+                        : ready
+                          ? `可回归 r${ready.revisionNo}${ready.source === 'legacyApproval' ? '（历史已审）' : ''}`
+                          : '暂无可回归修订'}
+                      {kind === 'UI' && !eligible && (
+                        <span role="status">
+                          {' '}
+                          ·{' '}
+                          {qualification?.reasons.join('；') ||
+                            '资格尚未核实。'}
+                        </span>
+                      )}
+                    </small>
+                  </span>
+                  <span className="badge">
+                    {kind === 'UI' && selected && originalIds.has(asset.id)
+                      ? refreshCaseIds.includes(asset.id)
+                        ? '更新修订'
+                        : '保留原修订'
+                      : eligible
+                        ? '可选择'
+                        : '暂不可新选'}
+                  </span>
+                </label>
+                {kind === 'UI' &&
+                  eligible &&
+                  selected &&
+                  originalIds.has(asset.id) && (
+                    <Checkbox
+                      checked={refreshCaseIds.includes(asset.id)}
+                      disabled={locked}
+                      onChange={(event) => {
+                        setRefreshCaseIds((ids) =>
+                          event.target.checked
+                            ? [...ids, asset.id]
+                            : ids.filter((id) => id !== asset.id),
+                        );
+                        setDirty(true);
+                      }}
+                    >
+                      将 {asset.title} 更新到当前已批准修订
+                    </Checkbox>
+                  )}
+              </div>
             );
           })}
           {!loading && !cases.length && (
@@ -655,7 +785,8 @@ export function PlansPage({
   userId: string;
 }) {
   const { message } = App.useApp();
-  const [kind, setKind] = useState<'UI' | 'API'>('UI');
+  const [handoff, setHandoff] = useState(() => readPlanHandoff(project?.id));
+  const [kind, setKind] = useState<'UI' | 'API'>(() => handoff?.kind ?? 'UI');
   const [plans, setPlans] = useState<Plan[]>([]);
   const [creatorNames, setCreatorNames] = useState<Record<string, string>>({});
   useEffect(() => {
@@ -708,6 +839,15 @@ export function PlansPage({
   const tester = Boolean(userId && project?.roles.includes('tester'));
   const listGeneration = useRef(0);
   const detailGeneration = useRef(0);
+  useEffect(() => {
+    const onHashChange = () => {
+      const linked = readPlanHandoff(project?.id);
+      setHandoff(linked);
+      if (linked) setKind(linked.kind);
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, [project?.id]);
   async function load(signal?: AbortSignal) {
     const generation = ++listGeneration.current;
     if (!project) {
@@ -785,6 +925,11 @@ export function PlansPage({
       detailGeneration.current += 1;
     };
   }, [project?.id, kind]);
+  useEffect(() => {
+    if (!tester || !handoff || handoff.kind !== kind) return;
+    setEditing(null);
+    setEditorOpen(true);
+  }, [tester, handoff, kind]);
   async function inspect(plan: Plan): Promise<boolean> {
     if (!project) return false;
     const generation = ++detailGeneration.current;
@@ -993,7 +1138,10 @@ export function PlansPage({
             aria-selected={kind === value}
             className={`tab ${kind === value ? 'active' : ''}`}
             key={value}
-            onClick={() => setKind(value)}
+            onClick={() => {
+              setHandoff(null);
+              setKind(value);
+            }}
           >
             {value === 'UI' ? 'UI 自主测试' : '接口回归'}
           </button>
@@ -1107,7 +1255,7 @@ export function PlansPage({
             </div>
             <div className="row wrap mt">
               <span className="badge">
-                {plan.kind === 'UI' ? '固定已审版本' : '开始时取最新已审'}
+                {plan.kind === 'UI' ? '固定已审版本' : '开始时取最新可回归'}
               </span>
               <span className="caption">
                 {plan.kind === 'UI'
@@ -1148,8 +1296,12 @@ export function PlansPage({
         projectId={project.id}
         kind={kind}
         plan={editing}
+        handoff={handoff}
         open={editorOpen}
-        onClose={() => setEditorOpen(false)}
+        onClose={() => {
+          setEditorOpen(false);
+          setHandoff(null);
+        }}
         onSaved={() => load()}
       />
       <PlanNameEditor
@@ -1202,7 +1354,7 @@ export function PlansPage({
                     <Space direction="vertical">
                       <Typography.Text type="secondary">
                         {detail.plan.kind === 'API'
-                          ? '逻辑用例引用；真正开始时解析最新有效已审修订。'
+                          ? '按项目保存用例引用，实际开始时锁定最新可回归修订。'
                           : '以下名称来自原固定已审快照。'}
                       </Typography.Text>
                       {detail.display.cases.map((item) => (
@@ -1210,7 +1362,11 @@ export function PlansPage({
                           <Button
                             type="link"
                             onClick={() => {
-                              window.location.hash = `cases?${new URLSearchParams({ projectId: project.id, kind: detail.plan.kind, assetId: item.caseId })}`;
+                              const page =
+                                detail.plan.kind === 'API'
+                                  ? 'api-regression'
+                                  : 'cases';
+                              window.location.hash = `${page}?${new URLSearchParams({ projectId: project.id, kind: detail.plan.kind, assetId: item.caseId })}`;
                             }}
                           >
                             {item.title ?? '历史用例（名称当前不可读取）'}
@@ -1382,7 +1538,7 @@ export function PlansPage({
         destroyOnHidden
       >
         <Typography.Paragraph>
-          逐条展示当前资格；手动子集必须明确选择。真正开始仍会重新解析最新有效已审与环境，本预览不提前冻结执行结果。
+          逐条展示当前资格。手动执行子集时请确认范围。实际开始时锁定最新可回归修订并校验目标环境。
         </Typography.Paragraph>
         {(queueError || queueCommand.error) && (
           <Alert

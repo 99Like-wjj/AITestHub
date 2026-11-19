@@ -142,12 +142,18 @@ export const scenarioContentSchema = z.strictObject({
   sharedPreconditions: z.array(z.string().max(10_000)).max(100),
   basisRefs: z.array(basisRefSchema).max(100),
 });
+const uiBusinessStepsSchema = z.array(z.strictObject({
+  action: z.string().trim().min(1).max(10_000),
+  expected: z.string().trim().min(1).max(10_000).optional(),
+})).min(1).max(100);
+
 export const uiCaseContentSchema = z.strictObject({
   kind: z.literal('UI'),
   scenarioId: idSchema,
   title: titleSchema,
   testPoint: safeTextSchema,
   preconditions: z.array(z.string().max(10_000)).max(100),
+  steps: uiBusinessStepsSchema.optional(),
   expected: safeTextSchema,
   basisRefs: z.array(basisRefSchema).max(100),
 });

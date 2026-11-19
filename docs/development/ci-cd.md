@@ -20,7 +20,7 @@ Build image 的每次运行产生独立制品 `aitesthub-release-运行编号-�
 
 `imageRef` 是 GHCR 的不可变 manifest/index 引用；`imageId` 是规范 OCI config digest。Docker classic、containerd 和 Desktop 的 inspect.Id 可能不同，因此各端独立解析导出的 config 字节，同时核对 RepoDigest、平台、源码标签、运行容器使用的本机 daemon ID 和运行文件。不得把 manifest、config 或容器 ID 混称为同一摘要。
 
-镜像仓库保持私有。新仓库首次推送后的可见性由构建工具核对，已有公开目标会拒绝。镜像本身不夹带实例配置或部署秘密。云端拉取使用当前 Actions 任务的短期令牌，通过 stdin 传入临时 Docker 配置，拉取后删除本轮配置。
+源码仓库可为公开或私有，镜像包始终保持私有。公开源码构建前须确认包已是私有且链接到本仓库。首次创建包的流程适用于私有源码仓库。推送后再次核对包可见性及来源。镜像不夹带实例配置或部署秘密。公开仓库的发布摘要仅含源码及镜像身份、校验和。云端拉取使用当前 Actions 任务的短期令牌，通过 stdin 传入临时 Docker 配置，拉取后删除本轮配置。
 
 ## 本地确认与发布操作
 

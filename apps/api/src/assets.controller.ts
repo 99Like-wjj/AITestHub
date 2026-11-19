@@ -12,6 +12,7 @@ import {
 } from '../../../packages/contracts/src/base.js';
 import { AssetService } from '../../../packages/application/src/assets/service.js';
 import { ReviewService } from '../../../packages/application/src/assets/reviews.js';
+import { UiReviewService } from '../../../packages/application/src/assets/ui-review.js';
 import { IdentityService } from '../../../packages/application/src/identity/service.js';
 import { DomainError } from '../../../packages/application/src/errors.js';
 
@@ -102,6 +103,62 @@ export class AssetsController {
       return res.json(await this.reviews.preview(actor, projectId, req.body));
     if (path === 'approve' && req.method === 'POST')
       return res.json(await this.reviews.commit(actor, projectId, req.body));
+    if (path === 'ui-review-meetings' && req.method === 'GET')
+      return res.json(
+        await new UiReviewService(this.assets.db).list(
+          actor,
+          projectId,
+          idSchema.parse(req.query.requirementVersionId),
+        ),
+      );
+    if (path === 'ui-review-meetings' && req.method === 'POST')
+      return res
+        .status(201)
+        .json(
+          await new UiReviewService(this.assets.db).create(
+            actor,
+            projectId,
+            req.body,
+          ),
+        );
+    const meetingReceipt = /^ui-review-meetings\/receipt\/([^/]+)$/.exec(path);
+    if (meetingReceipt?.[1] && req.method === 'GET') {
+      const operation = req.query.operation;
+      if (
+        operation !== 'reviews.meeting-create' &&
+        operation !== 'reviews.meeting-update'
+      )
+        throw new DomainError('NOT_FOUND', '此评审操作不可查询。', 404);
+      const result = await new UiReviewService(this.assets.db).operations.get(
+        actor,
+        {
+          operation,
+          key: commandIdSchema.parse(decodeURIComponent(meetingReceipt[1])),
+        },
+      );
+      if (result.command.projectId !== projectId)
+        throw new DomainError('NOT_FOUND', '此范围内没有该评审回执。', 404);
+      return res.json({
+        status: result.command.status,
+        response: result.command.response ?? null,
+      });
+    }
+    const meeting = /^ui-review-meetings\/([^/]+)$/.exec(path);
+    if (meeting?.[1]) {
+      const review = new UiReviewService(this.assets.db);
+      const id = idSchema.parse(meeting[1]);
+      if (req.method === 'GET')
+        return res.json(
+          await review.get(
+            actor,
+            projectId,
+            id,
+            idSchema.optional().parse(req.query.caseId),
+          ),
+        );
+      if (req.method === 'POST')
+        return res.json(await review.update(actor, projectId, id, req.body));
+    }
     const target =
       /^([^/]+)(?:\/(opinions|optimization-notes|latest-approved)(?:\/([^/]+))?)?$/.exec(
         path,

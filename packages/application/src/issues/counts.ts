@@ -26,12 +26,13 @@ export async function readIssueCounts(
       }>(
         `WITH formal AS (
       SELECT i.requirement_id,i.assignee_id,i.state FROM app.issues i WHERE ${filter.where}
-      AND (NOT $13::boolean OR (i.assignee_id IS NULL AND i.state<>'closed'))
+      AND (NOT $14::boolean OR (i.assignee_id IS NULL AND i.state<>'closed'))
     ),pending AS (
       SELECT p.requirement_id FROM app.problem_candidates p WHERE p.project_id=$1 AND p.state='pendingConfirmation'
-      AND ($14::text IS NULL OR p.state=$14) AND (NOT $15::boolean OR EXISTS(SELECT 1 FROM app.requirement_participants rp WHERE rp.requirement_id=p.requirement_id AND rp.user_id=$3 AND rp.active))
+      AND ($15::text IS NULL OR p.state=$15) AND (NOT $16::boolean OR EXISTS(SELECT 1 FROM app.requirement_participants rp WHERE rp.requirement_id=p.requirement_id AND rp.user_id=$3 AND rp.active))
       AND ($10='' OR position(lower($10) in lower(p.title||' '||p.description))>0)
       AND ($12 OR NOT EXISTS(SELECT 1 FROM app.requirements ar WHERE ar.id=p.requirement_id AND ar.project_id=p.project_id AND ar.archived_at IS NOT NULL))
+      AND ($13::text IS NULL OR ($13='unspecified' AND p.requirement_version_id IS NULL) OR p.requirement_version_id::text = $13)
     ),formal_groups AS (
       SELECT requirement_id,count(*) formal,count(*) FILTER(WHERE assignee_id IS NULL AND state<>'closed') unassigned FROM formal GROUP BY requirement_id
     ),pending_groups AS (SELECT requirement_id,count(*) pending FROM pending GROUP BY requirement_id)

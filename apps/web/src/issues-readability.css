@@ -42,3 +42,18 @@
   white-space: normal;
   text-align: left;
 }
+
+.issues-page .issue-requirement-group {
+  padding: 6px 8px;
+  margin: 0 0 8px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
+}
+.issues-page .issue-requirement-group span {
+  margin-inline-start: 8px;
+  font-size: 11px;
+  font-weight: 400;
+}

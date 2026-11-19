@@ -66,6 +66,7 @@ export class IssuesController {
             problemListQuerySchema
               .extend({
                 participationOnly: booleanQueryValue(true),
+                decidedOnly: booleanQueryValue(false),
                 includeArchivedRequirements: booleanQueryValue(true),
               })
               .parse(req.query),

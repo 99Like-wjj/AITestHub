@@ -86,6 +86,9 @@ export const approvalContentSnapshotSchema = z.strictObject({
   case: assetSchema,
   scenario: assetSchema,
   set: assetSchema,
+  meetingDecisions: z.array(z.strictObject({
+    meetingId:idSchema,opinionId:idSchema,round:z.number().int().positive(),revisionId:idSchema,
+  })).optional(),
   opinions: z.array(
     z.strictObject({
       id: idSchema,

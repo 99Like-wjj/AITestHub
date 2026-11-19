@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { reportExecutionScopeSchema } from '../../../contracts/src/ui-archives.js';
 import {
   executionScopeSchema,
   uiProgressInputSchema,
@@ -30,6 +31,7 @@ import {
 
 export interface RunRow {
   id: string;
+  source: string;
   project_id: string;
   kind: 'UI' | 'API';
   created_by: string;
@@ -230,7 +232,7 @@ export class UiExecutionService {
     return this.db.transaction(async (tx) => {
       await requireProject(tx, actor, projectId, 'runs.organize');
       const row = await readRun(tx, projectId, runId);
-      if (row.kind !== 'UI')
+      if (row.kind !== 'UI' || row.source === 'uiArchive')
         throw new DomainError('NOT_FOUND', '没有此本地UI执行。', 404);
       return {
         runId,
@@ -247,7 +249,12 @@ export class UiExecutionService {
     return this.db.transaction(async (tx) => {
       await requireProject(tx, actor, projectId, 'runs.organize');
       const run = await readRun(tx, projectId, input.runId, true);
-      if (run.kind !== 'UI' || run.created_by !== actor.userId) forbidden();
+      if (
+        run.kind !== 'UI' ||
+        run.source === 'uiArchive' ||
+        run.created_by !== actor.userId
+      )
+        forbidden();
       const scope = executionScopeSchema.parse(run.scope_snapshot);
       if (input.completedItems > scope.items.length)
         throw new DomainError(
@@ -366,7 +373,7 @@ export class UiExecutionService {
           [projectId, runId],
         )
       ).rows[0];
-      const scope = executionScopeSchema.parse(run.scope_snapshot);
+      const scope = reportExecutionScopeSchema.parse(run.scope_snapshot);
       const gate =
         run.kind === 'UI' ? await uiDeliveryGate(tx, runId) : undefined;
       const resultCount =

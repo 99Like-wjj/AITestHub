@@ -1,10 +1,11 @@
+import { UiArchiveService } from '../ui-executions/archive.js';
+import { reportExecutionScopeSchema } from '../../../contracts/src/ui-archives.js';
 import { randomUUID, createHash } from 'node:crypto';
 import {
   resultSubmissionResourceSchema as resultSubmissionSchema,
   resultSubmissionReceiptSchema,
   resultItemSchema,
   resultAmendmentSchema,
-  executionScopeSchema,
 } from '../../../contracts/src/domain.js';
 import {
   finalAssessmentInputSchema,
@@ -66,6 +67,9 @@ interface OriginalJson {
 }
 
 export class ResultService {
+  get archives() {
+    return new UiArchiveService(this.db);
+  }
   private readonly operations: OperationService;
   constructor(
     readonly db: Database,
@@ -278,8 +282,27 @@ export class ResultService {
             '结果不是基于此执行的固定范围。',
             409,
           );
-        const scope = executionScopeSchema.parse(run.scope_snapshot);
+        const scope = reportExecutionScopeSchema.parse(run.scope_snapshot);
         const scopeIds = new Set(scope.items.map((item) => item.runItemId));
+        if (scope.sourceType === 'uiArchive') {
+          const declared = new Map(
+            scope.items.map((item) => [item.runItemId, item.declaredOutcome]),
+          );
+          if (
+            Date.parse(input.endedAt) !== Date.parse(scope.endedAt) ||
+            input.items.some(
+              (item) => item.originalOutcome !== declared.get(item.runItemId),
+            ) ||
+            input.notExecutedItemIds.some(
+              (id) => declared.get(id) !== 'notExecuted',
+            )
+          )
+            throw new DomainError(
+              'BUSINESS_CONFLICT',
+              '原始归档结果须符合已确认范围、结束时间与结论。',
+              409,
+            );
+        }
         const allIds = [
           ...input.items.map((item) => item.runItemId),
           ...input.notExecutedItemIds,
@@ -465,14 +488,14 @@ export class ResultService {
           'UPDATE app.runs SET state=$2,ended_at=CASE WHEN $5 THEN $3::timestamptz ELSE ended_at END,delivery_status=$4,row_version=row_version+1 WHERE id=$1',
           [
             run.id,
-            state,
+            scope.sourceType === 'uiArchive' ? run.state : state,
             input.endedAt,
             receivedCount
               ? 'incomplete'
               : input.evidenceManifest.length
                 ? 'receiving'
                 : 'notSubmitted',
-            accepted > 0,
+            accepted > 0 && scope.sourceType !== 'uiArchive',
           ],
         );
         const report = await persistReportRevision(
@@ -519,7 +542,7 @@ export class ResultService {
           );
           originalChecked = true;
         }
-        if (accepted > 0)
+        if (accepted > 0 && scope.sourceType !== 'uiArchive')
           for (const versionId of new Set(
             scope.items.map((item) => item.requirementVersionId),
           ))
@@ -560,7 +583,7 @@ export class ResultService {
           404,
         );
       const run = await readRun(tx, projectId, row.run_id);
-      const scope = executionScopeSchema.parse(run.scope_snapshot);
+      const scope = reportExecutionScopeSchema.parse(run.scope_snapshot);
       const gate = await uiDeliveryGate(tx, run.id);
       const missingFileIds = gate.versioned
         ? await deliveryMissingFiles(tx, run.id)

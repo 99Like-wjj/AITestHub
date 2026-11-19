@@ -15,6 +15,7 @@ import type { ActorContext } from '../../../contracts/src/identity.js';
 import type { Database } from '../../../persistence/src/database.js';
 import { requireProject } from '../access/policy.js';
 import { getAsset, assetDto } from '../assets/repository.js';
+import { latestApiRegressionInTransaction } from '../assets/api-regression.js';
 import { DomainError } from '../errors.js';
 import { audit } from '../events.js';
 import { canonicalJson, OperationService } from '../operations/service.js';
@@ -130,13 +131,11 @@ export class ApiDebugService {
             throw new DomainError('NOT_FOUND', '没有该来源用例修订。', 404);
           sourceChanged = source.current_revision_id !== sourceRevisionId;
           try {
-            const approved =
-              await this.plans.reviews.latestApprovedInTransaction(
-                transaction,
-                projectId,
-                source.id,
-                'API',
-              );
+            const approved = await latestApiRegressionInTransaction(
+              transaction,
+              projectId,
+              source.id,
+            );
             // Cleanup inputs include its data-producing steps/variables, not merely an equal SQL string.
             if (
               canonicalJson(
@@ -342,6 +341,7 @@ export class ApiDebugService {
         draft_hash: string;
       }>(`SELECT d.run_id,d.project_id,d.draft_hash FROM app.api_debug_drafts d JOIN app.runs r ON r.id=d.run_id
         WHERE d.expires_at<=clock_timestamp() AND r.source='debug' AND r.scope_snapshot->>'schemaVersion'='ath.debug-execution-scope.v1'
+        AND NOT EXISTS(SELECT 1 FROM app.api_regression_qualifications q WHERE q.debug_run_id=d.run_id)
         AND NOT EXISTS(SELECT 1 FROM app.api_worker_grants g WHERE g.run_id=r.id AND g.revoked_at IS NULL AND g.expires_at>clock_timestamp())
         ORDER BY d.expires_at LIMIT 100 FOR UPDATE OF d,r SKIP LOCKED`);
       for (const expiredRun of expired.rows) {
@@ -442,13 +442,20 @@ export class ApiDebugService {
           draft_hash: string;
           created_at: Date;
           expires_at: Date;
+          retained: boolean;
+          qualification_environment: boolean;
         }>(
-          `SELECT r.state,r.scope_snapshot,d.draft_hash,d.created_at,d.expires_at FROM app.runs r
+          `SELECT r.state,r.scope_snapshot,d.draft_hash,d.created_at,d.expires_at,
+          EXISTS(SELECT 1 FROM app.api_regression_qualifications q WHERE q.debug_run_id=d.run_id) retained,
+          EXISTS(SELECT 1 FROM app.test_configurations c WHERE c.project_id=r.project_id
+            AND c.id=r.environment_id AND c.current_revision_id=r.environment_revision_id AND c.active
+            AND c.content @> '{"allowApiRegressionQualification":true}') qualification_environment
+          FROM app.runs r
         JOIN app.api_debug_drafts d ON d.run_id=r.id WHERE r.id=$1 AND r.project_id=$2`,
           [runId, projectId],
         )
       ).rows[0];
-      if (!row || row.expires_at.getTime() <= Date.now())
+      if (!row || (!row.retained && row.expires_at.getTime() <= Date.now()))
         throw new DomainError(
           'NOT_FOUND',
           '调试诊断不存在或已过临时保留期。',
@@ -507,6 +514,8 @@ export class ApiDebugService {
         })),
         createdAt: row.created_at.toISOString(),
         expiresAt: row.expires_at.toISOString(),
+        qualificationRetained: row.retained,
+        qualificationEnvironment: row.qualification_environment,
       });
     });
   }

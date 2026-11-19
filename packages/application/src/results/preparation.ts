@@ -1,7 +1,7 @@
+import { reportExecutionScopeSchema } from '../../../contracts/src/ui-archives.js';
 import {
   resultSubmissionResourceSchema as resultSubmissionSchema,
   resultItemSchema,
-  executionScopeSchema,
 } from '../../../contracts/src/domain.js';
 import { resultPreparationSchema } from '../../../contracts/src/preparation.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
@@ -88,7 +88,7 @@ export async function prepareUiResults(
         '结果不是基于此执行的固定范围。',
         409,
       );
-    const scope = executionScopeSchema.parse(run.scope_snapshot),
+    const scope = reportExecutionScopeSchema.parse(run.scope_snapshot),
       scopeIds = new Set(scope.items.map((item) => item.runItemId)),
       ids = [
         ...input.items.map((item) => item.runItemId),
@@ -255,7 +255,7 @@ export async function missingUiFiles(
         projectUiDelivery(
           gate,
           count,
-          executionScopeSchema.parse(run.scope_snapshot).items.length,
+          reportExecutionScopeSchema.parse(run.scope_snapshot).items.length,
           missing.length,
         ) ?? run.delivery_status,
     };

@@ -25,7 +25,6 @@ import { canonicalJson, OperationService } from '../operations/service.js';
 import { recordBusinessActivity } from '../requirements/service.js';
 import {
   assetDto,
-  assetSelect,
   currentOpinions,
   getAsset,
   invalidateDescendants,
@@ -34,6 +33,9 @@ import {
   type AssetRow,
   type OpinionRow,
 } from './repository.js';
+
+import { latestApiRegressionInTransaction } from './api-regression.js';
+import { uiMeetingGate } from './ui-review.js';
 
 interface ApprovalRow extends QueryResultRow {
   id: string;
@@ -406,12 +408,18 @@ export class ReviewService {
         await requireProject(transaction, actor, projectId, 'reviews.approve');
       },
       async (transaction) => {
+        if (input.kind === 'API')
+          throw new DomainError(
+            'PRECONDITIONS_MISSING',
+            '接口用例通过完整调试后保存为可回归。',
+            422,
+          );
         const items = [];
         for (const id of input.objectIds) {
           const asset = await getAsset(transaction, projectId, id);
           if (asset.kind !== input.kind)
             throw new DomainError('NOT_FOUND', '此类型范围内没有该目标。', 404);
-          const context = await reviewContext(transaction, asset);
+          const context = await this.currentReviewContext(transaction, asset);
           items.push({
             id,
             title: assetDto(asset).title,
@@ -491,7 +499,13 @@ export class ReviewService {
         const validated = [];
         for (const item of items) {
           const asset = await getAsset(transaction, projectId, item.id);
-          const context = await reviewContext(transaction, asset);
+          if (asset.kind === 'API')
+            throw new DomainError(
+              'PRECONDITIONS_MISSING',
+              '接口用例通过完整调试后保存为可回归。',
+              422,
+            );
+          const context = await this.currentReviewContext(transaction, asset);
           validated.push({
             item,
             asset,
@@ -557,6 +571,9 @@ export class ReviewService {
                     scenario: assetDto(scenario),
                     set: assetDto(set),
                     opinions: context.context.opinions,
+                    ...('meetingDecisions' in context
+                      ? { meetingDecisions: context.meetingDecisions }
+                      : {}),
                   }),
                   actor.userId,
                 ],
@@ -611,80 +628,73 @@ export class ReviewService {
       projectId,
     );
   }
-  async assertUiSetApprovedInTransaction(
+  private async currentReviewContext(
     transaction: SqlExecutor,
-    projectId: string,
-    setId: string,
-  ): Promise<void> {
-    const set = await getAsset(transaction, projectId, setId);
-    if (set.kind !== 'UI' || set.target_type !== 'set')
-      throw new DomainError('NOT_FOUND', '没有此UI测试集。', 404);
-    const assets = (
-      await transaction.query<AssetRow>(
-        `${assetSelect} WHERE a.project_id=$1 AND a.set_id=$2 AND a.removed_at IS NULL`,
-        [projectId, setId],
-      )
-    ).rows;
-    if (
-      !assets.some((asset) => asset.target_type === 'case') ||
-      assets.some((asset) => asset.review_state !== 'approved')
-    )
-      throw new DomainError(
-        'PRECONDITIONS_MISSING',
-        'UI计划要求独立测试集整体已人工通过，不能以子集绕过未审项或上层意见。',
-        422,
-      );
-    for (const asset of assets.filter((item) => item.target_type === 'case')) {
-      const latest = (
-        await transaction.query<ApprovalRow>(
-          'SELECT * FROM app.approval_snapshots WHERE project_id=$1 AND case_id=$2 ORDER BY approval_sequence DESC LIMIT 1',
-          [projectId, asset.id],
+    asset: AssetRow,
+  ) {
+    const context = await reviewContext(transaction, asset);
+    if (asset.kind !== 'UI' || asset.target_type !== 'case') return context;
+    const gate = await uiMeetingGate(transaction, asset, context.chain);
+    return {
+      ...context,
+      reasons: [...context.reasons, ...gate.reasons],
+      digest: createHash('sha256')
+        .update(
+          canonicalJson({
+            baseline: context.digest,
+            decisions: gate.history,
+            gate: gate.reasons,
+          }),
         )
-      ).rows[0];
-      const scenario = await getAsset(
-        transaction,
-        projectId,
-        asset.parent_id ?? '',
-      );
-      if (
-        !latest ||
-        latest.case_revision_id !== asset.current_revision_id ||
-        latest.scenario_revision_id !== scenario.current_revision_id ||
-        latest.set_revision_id !== set.current_revision_id
-      )
-        throw new DomainError(
-          'PRECONDITIONS_MISSING',
-          'UI测试集包含适用上下文变化后尚未重新批准的用例。',
-          422,
-        );
-    }
+        .digest('hex'),
+      meetingDecisions: gate.history,
+    };
   }
+
   async latestApprovedInTransaction(
     transaction: SqlExecutor,
     projectId: string,
     caseId: string,
     kind: 'UI' | 'API',
   ) {
-    const asset = await getAsset(transaction, projectId, caseId);
-    if (asset.target_type !== 'case' || asset.kind !== kind)
-      throw new DomainError('NOT_FOUND', '没有此类型用例。', 404);
-    await reviewContext(transaction, asset);
-    if (kind === 'UI')
-      await this.assertUiSetApprovedInTransaction(
+    if (kind === 'API') {
+      const { approval, snapshot } = await latestApiRegressionInTransaction(
         transaction,
         projectId,
-        asset.set_id,
+        caseId,
       );
+      return { approval, snapshot };
+    }
+    const asset = await getAsset(transaction, projectId, caseId);
+    if (asset.target_type !== 'case' || asset.kind !== 'UI')
+      throw new DomainError('NOT_FOUND', '没有此类型用例。', 404);
+    const context = await this.currentReviewContext(transaction, asset);
     const row = (
       await transaction.query<ApprovalRow>(
         'SELECT * FROM app.approval_snapshots WHERE project_id=$1 AND kind=$2 AND case_id=$3 ORDER BY approval_sequence DESC LIMIT 1',
         [projectId, kind, caseId],
       )
     ).rows[0];
-    if (!row)
+    if (context.reasons.length)
       throw new DomainError(
         'PRECONDITIONS_MISSING',
-        '此用例没有有效已审快照。',
+        context.reasons.join(' '),
+        422,
+      );
+    if (
+      !row ||
+      asset.review_state !== 'approved' ||
+      row.case_revision_id !== asset.current_revision_id ||
+      row.scenario_revision_id !==
+        context.chain.find((item) => item.target_type === 'scenario')
+          ?.current_revision_id ||
+      row.set_revision_id !==
+        context.chain.find((item) => item.target_type === 'set')
+          ?.current_revision_id
+    )
+      throw new DomainError(
+        'PRECONDITIONS_MISSING',
+        '此 UI 用例当前修订或适用上下文尚未人工批准。',
         422,
       );
     return {

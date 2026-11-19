@@ -243,7 +243,7 @@ export class ProblemService {
       await requireProject(tx, actor, projectId, 'project.read');
       const rows = await tx.query<ProblemRow>(
         `${problemSelect} WHERE p.project_id=$1 AND ($2::text IS NULL OR p.state=$2) AND ($3::uuid IS NULL OR p.requirement_id=$3) AND ($4::uuid IS NULL OR p.run_id=$4)
-      AND (NOT $5 OR EXISTS(SELECT 1 FROM app.requirement_participants rp WHERE rp.requirement_id=p.requirement_id AND rp.user_id=$6 AND rp.active)) AND ($7='' OR position(lower($7) in lower(p.title||' '||p.description))>0) AND ($8 OR NOT EXISTS(SELECT 1 FROM app.requirements ar WHERE ar.id=p.requirement_id AND ar.project_id=p.project_id AND ar.archived_at IS NOT NULL)) ORDER BY p.created_at DESC,p.id LIMIT 200`,
+      AND (NOT $5 OR EXISTS(SELECT 1 FROM app.requirement_participants rp WHERE rp.requirement_id=p.requirement_id AND rp.user_id=$6 AND rp.active)) AND ($7='' OR position(lower($7) in lower(p.title||' '||p.description))>0) AND ($8 OR NOT EXISTS(SELECT 1 FROM app.requirements ar WHERE ar.id=p.requirement_id AND ar.project_id=p.project_id AND ar.archived_at IS NOT NULL)) AND ($9::text IS NULL OR ($9='unspecified' AND p.requirement_version_id IS NULL) OR p.requirement_version_id::text = $9) AND (NOT $10::boolean OR p.state<>'pendingConfirmation') ORDER BY p.created_at DESC,p.id LIMIT 200`,
         [
           projectId,
           input.state ?? null,
@@ -253,6 +253,8 @@ export class ProblemService {
           actor.userId,
           input.search,
           input.includeArchivedRequirements,
+          input.requirementVersion ?? null,
+          input.decidedOnly ?? false,
         ],
       );
       return problemListResponseSchema.parse({ problems: rows.rows.map(dto) });
@@ -343,16 +345,54 @@ export class ProblemService {
         ).rows[0];
         if (
           !run ||
-          run.scope_snapshot.schemaVersion !== 'ath.execution-scope.v1'
+          !['ath.execution-scope.v1', 'ath.ui-archive-scope.v1'].includes(
+            run.scope_snapshot.schemaVersion ?? '',
+          )
         )
           throw new DomainError(
             'NOT_FOUND',
-            '额外发现须关联此项目的正式固定执行；不伪造case或独立调试正式结果。',
+            '额外发现须关联此项目的正式执行或独立 UI 归档。',
             404,
           );
+        const archive =
+          run.scope_snapshot.schemaVersion === 'ath.ui-archive-scope.v1';
+        const archivedResultId = archive ? input.resultIds[0] : undefined;
+        let archivedRevisionId: string | null = null;
+        if (archive) {
+          if (!archivedResultId || input.resultIds.length !== 1)
+            throw new DomainError(
+              'PRECONDITIONS_MISSING',
+              '独立归档登记问题时须选一条真实结果。',
+              422,
+            );
+          const source = (
+            await tx.query<{
+              current_revision_id: string;
+              req: string;
+              ver: string | null;
+            }>(
+              `SELECT r.current_revision_id, i.snapshot->>'requirementId' req, i.snapshot->>'requirementVersionId' ver
+              FROM app.results r JOIN app.run_items i ON i.id=r.run_item_id
+              WHERE r.project_id=$1 AND r.run_id=$2 AND r.id=$3 FOR SHARE OF r`,
+              [projectId, input.runId, archivedResultId],
+            )
+          ).rows[0];
+          if (
+            !source ||
+            source.req !== input.requirementId ||
+            source.ver !== input.requirementVersionId
+          )
+            throw new DomainError(
+              'BUSINESS_CONFLICT',
+              '所选归档条目的需求归属与登记不一致。',
+              409,
+            );
+          archivedRevisionId = source.current_revision_id;
+        }
         const id = randomUUID();
-        await tx.query(
-          `INSERT INTO app.problem_candidates(id,project_id,requirement_id,requirement_version_id,run_id,title,description,suggested_severity,source,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'extraFinding',$9)`,
+        const inserted = await tx.query(
+          `INSERT INTO app.problem_candidates(id,project_id,requirement_id,requirement_version_id,run_id,title,description,suggested_severity,source,created_by,source_result_id,source_result_revision_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'extraFinding',$9,$10,$11)
+          ON CONFLICT(source_result_id) WHERE source_result_id IS NOT NULL DO NOTHING RETURNING id`,
           [
             id,
             projectId,
@@ -363,8 +403,20 @@ export class ProblemService {
             input.description,
             input.suggestedSeverity,
             actor.userId,
+            archivedResultId ?? null,
+            archivedRevisionId,
           ],
         );
+        if (!inserted.rowCount && archivedResultId) {
+          const prior = (
+            await tx.query<{ id: string }>(
+              'SELECT id FROM app.problem_candidates WHERE project_id=$1 AND source_result_id=$2',
+              [projectId, archivedResultId],
+            )
+          ).rows[0];
+          if (prior)
+            return { problem: dto(await problemRow(tx, projectId, prior.id)) };
+        }
         await linkProblemResults(
           tx,
           projectId,

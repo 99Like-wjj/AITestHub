@@ -1,10 +1,19 @@
 import { registerRequirementQueryTools } from './requirement-queries.js';
 import { registerUiDeliveryTools } from './ui-delivery.js';
+import {
+  uiArchivePreviewToolSchema,
+  uiArchiveCommitToolSchema,
+  uiArchiveReceiptToolSchema,
+} from '../../../contracts/src/ui-archives.js';
 import { z } from 'zod';
 import { registerRequirementStateTools } from './requirement-state.js';
 import { idSchema, kindSchema } from '../../../contracts/src/base.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
-import { startDebugInputSchema } from '../../../contracts/src/api-execution.js';
+import {
+  saveApiRegressionInputSchema,
+  startDebugInputSchema,
+  withdrawApiRegressionInputSchema,
+} from '../../../contracts/src/api-execution.js';
 import {
   assetChangeSetSchema,
   resultSubmissionResourceSchema as resultSubmissionSchema,
@@ -42,6 +51,8 @@ import type { Database } from '../../../persistence/src/database.js';
 import { requireProject } from '../access/policy.js';
 import { AssetService } from '../assets/service.js';
 import { ReviewService } from '../assets/reviews.js';
+import { UiReviewService } from '../assets/ui-review.js';
+import { uiReviewReplySchema } from '../../../contracts/src/ui-reviews.js';
 import { PlanService } from '../plans/service.js';
 import { UiExecutionService } from '../ui-executions/service.js';
 import { ResultService } from '../results/service.js';
@@ -76,7 +87,7 @@ export interface BusinessServices {
   plans?: PlanService;
   apiExecution?: Pick<
     ApiExecutionControlService,
-    'events' | 'attemptDetail' | 'stop' | 'status' | 'debug'
+    'events' | 'attemptDetail' | 'stop' | 'status' | 'debug' | 'regression'
   >;
 }
 export function createBusinessRegistry(
@@ -89,6 +100,7 @@ export function createBusinessRegistry(
   registerUiDeliveryTools(registry, db, services.files);
   const assets = new AssetService(db);
   const reviews = new ReviewService(db);
+  const uiReviews = new UiReviewService(db);
   const plans =
     services.plans ??
     (services.testConfiguration
@@ -96,6 +108,31 @@ export function createBusinessRegistry(
       : undefined);
   const results = new ResultService(db);
   const reports = new ReportService(db);
+  const archives = results.archives;
+  registry.add(
+    'ath_ui_archives',
+    '核对并登记已在用户本地执行的独立记录。不会领取正式计划或启动目标。',
+    'preview',
+    uiArchivePreviewToolSchema,
+    'read',
+    (a, i) => archives.preview(a, i.projectId, i.input),
+  );
+  registry.add(
+    'ath_ui_archives',
+    '核对并登记已在用户本地执行的独立记录。不会领取正式计划或启动目标。',
+    'commit',
+    uiArchiveCommitToolSchema,
+    'write',
+    (a, i) => archives.commit(a, i.projectId, i.input),
+  );
+  registry.add(
+    'ath_ui_archives',
+    '核对、登记及查询已在用户本地执行的独立记录。',
+    'receipt',
+    uiArchiveReceiptToolSchema,
+    'read',
+    (actor, input) => archives.receipt(actor, input.projectId, input.commandId),
+  );
   const add = registry.add.bind(registry);
   const removalImpact = async (
     actor: ActorContext,
@@ -303,6 +340,26 @@ export function createBusinessRegistry(
     }),
     'write',
     (a, i) => reviews.optimizationNotes(a, i.projectId, i.id, i.input),
+  );
+  add(
+    'ath_reviews',
+    reviewDescription,
+    'meeting-handoff',
+    z.strictObject({ op: z.literal('meeting-handoff'), ...target }),
+    'read',
+    (a, i) => uiReviews.handoff(a, i.projectId, i.id),
+  );
+  add(
+    'ath_reviews',
+    reviewDescription,
+    'meeting-reply',
+    z.strictObject({
+      op: z.literal('meeting-reply'),
+      ...target,
+      input: uiReviewReplySchema,
+    }),
+    'write',
+    (a, i) => uiReviews.reply(a, i.projectId, i.id, i.input),
   );
   add(
     'ath_reviews',
@@ -596,6 +653,68 @@ export function createBusinessRegistry(
   }
   if (services.apiExecution) {
     const execution = services.apiExecution;
+    const qualificationDescription =
+      '读取接口可回归版本。保存资格必须关联项目认可环境中完整通过的原调试，并按当前编辑基准提交。';
+    add(
+      'ath_api_runs',
+      qualificationDescription,
+      'list-regression-qualifications',
+      z.strictObject({
+        op: z.literal('list-regression-qualifications'),
+        ...project,
+      }),
+      'read',
+      (a, i) => execution.regression.list(a, i.projectId),
+    );
+    add(
+      'ath_api_runs',
+      qualificationDescription,
+      'save-regression-qualification',
+      shape('save-regression-qualification', saveApiRegressionInputSchema),
+      'write',
+      (a, i) => execution.regression.save(a, i.projectId, i.input),
+      (_a, i) =>
+        Promise.resolve({
+          reason: 'precise-scope',
+          summary: '为原调试的确切候选修订保存接口回归资格。',
+          scope: {
+            caseId: i.input.caseId,
+            debugRunId: i.input.debugRunId,
+            draftHash: i.input.draftHash,
+          },
+          links: [link(i.projectId, 'assets', i.input.caseId)],
+        }),
+    );
+    add(
+      'ath_api_runs',
+      qualificationDescription,
+      'get-regression-qualification-receipt',
+      z.strictObject({
+        op: z.literal('get-regression-qualification-receipt'),
+        ...project,
+        commandId: z.string().min(8).max(128),
+      }),
+      'read',
+      (a, i) => execution.regression.saveReceipt(a, i.projectId, i.commandId),
+    );
+    add(
+      'ath_api_runs',
+      qualificationDescription,
+      'withdraw-regression-qualification',
+      shape(
+        'withdraw-regression-qualification',
+        withdrawApiRegressionInputSchema,
+      ),
+      'write',
+      (a, i) => execution.regression.withdraw(a, i.projectId, i.input),
+      (_a, i) =>
+        Promise.resolve({
+          reason: 'precise-scope',
+          summary: '停止使用确切的接口回归快照，保留运行与证据历史。',
+          scope: i.input,
+          links: [],
+        }),
+    );
     add(
       'ath_api_runs',
       '读取安全接口请求/响应和断言细节；不开放worker凭据或任意HTTP/SQL。',
@@ -762,6 +881,7 @@ export function createBusinessRegistry(
         page: 1,
         pageSize: 20,
         kind: 'all',
+        source: 'formal',
         search: '',
       }),
     }),

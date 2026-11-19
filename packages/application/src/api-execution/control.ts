@@ -61,6 +61,7 @@ import {
 } from './expressions.js';
 import { redact, redactResponse, redactWithPaths } from './redaction.js';
 import { ApiDebugService } from './debug.js';
+import { ApiRegressionService } from '../assets/api-regression.js';
 import { assertNewWorkAllowed } from '../recovery/maintenance.js';
 import { hasDispatchFence, recordDispatchFence } from '../recovery/fences.js';
 import {
@@ -183,6 +184,7 @@ export class ApiExecutionControlService {
   readonly gateway: ExecutionGateway;
   readonly operations: OperationService;
   readonly debug: ApiDebugService;
+  readonly regression: ApiRegressionService;
   constructor(
     readonly db: Database,
     readonly plans: PlanService,
@@ -201,6 +203,7 @@ export class ApiExecutionControlService {
       this.gateway,
       debugRetentionDays,
     );
+    this.regression = new ApiRegressionService(db);
   }
   private isDraftDebug(run: ExecutionRunRow) {
     return parseScope(run).schemaVersion === 'ath.debug-execution-scope.v1';
@@ -217,7 +220,9 @@ export class ApiExecutionControlService {
       (schema === 'ath.debug-execution-scope.v1' &&
         !(
           await transaction.query(
-            'SELECT 1 FROM app.api_debug_drafts WHERE run_id=$1 AND expires_at>clock_timestamp()',
+            `SELECT 1 FROM app.api_debug_drafts d WHERE d.run_id=$1 AND
+             (d.expires_at>clock_timestamp() OR EXISTS
+              (SELECT 1 FROM app.api_regression_qualifications q WHERE q.debug_run_id=d.run_id))`,
             [runId],
           )
         ).rowCount)
@@ -313,7 +318,7 @@ export class ApiExecutionControlService {
     environment: NodeJS.ProcessEnv = process.env,
   ): Pick<
     ApiExecutionControlService,
-    'events' | 'attemptDetail' | 'stop' | 'status' | 'debug'
+    'events' | 'attemptDetail' | 'stop' | 'status' | 'debug' | 'regression'
   > {
     const service = new ApiExecutionControlService(
       db,
@@ -335,6 +340,7 @@ export class ApiExecutionControlService {
       stop: service.stop.bind(service),
       status: service.status.bind(service),
       debug: service.debug,
+      regression: service.regression,
     };
   }
   static async fromEnvironment(

@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import type { z } from 'zod';
 import {
   lifecyclePreviewInputSchema,
   lifecycleCommitInputSchema,
   singleIssueLifecycleInputSchema,
+  type issueResolutionSchema,
   mergeIssuesInputSchema,
   unmergeIssueInputSchema,
 } from '../../../contracts/src/issues.js';
@@ -24,6 +26,53 @@ import {
   lockIssueProject,
   type IssueRow,
 } from './common.js';
+
+type Resolution = z.infer<typeof issueResolutionSchema>;
+type LifecycleAction = 'close' | 'reopen';
+
+async function lifecycleBasis(
+  tx: SqlExecutor,
+  row: IssueRow,
+  action: LifecycleAction,
+) {
+  if (action === 'reopen')
+    return {
+      eligible: row.state === 'closed',
+      reason: row.state === 'closed' ? '' : '当前未关闭',
+      verificationId: null,
+    };
+  if (row.state === 'closed')
+    return { eligible: false, reason: '已关闭', verificationId: null };
+  if (row.state !== 'awaitingRetest')
+    return {
+      eligible: false,
+      reason: '修复关闭前须明确提交复测',
+      verificationId: null,
+    };
+
+  // An older automatic retest cannot qualify by delivering its verdict late.
+  const latest = (
+    await tx.query<{ id: string; outcome: string }>(
+      `WITH submitted AS (
+        SELECT created_at FROM app.issue_events
+        WHERE issue_id=$2 AND action='ready-for-retest'
+        ORDER BY created_at DESC,id DESC LIMIT 1
+      )
+      SELECT v.id,v.outcome FROM app.issue_verifications v
+      CROSS JOIN submitted s LEFT JOIN app.runs r ON r.id=v.run_id AND r.project_id=v.project_id
+      WHERE v.project_id=$1 AND v.issue_id=$2
+        AND (CASE WHEN v.run_id IS NULL THEN v.created_at ELSE r.started_at END) >= s.created_at
+      ORDER BY COALESCE(r.ended_at,v.created_at) DESC,v.created_at DESC,v.id DESC LIMIT 1`,
+      [row.project_id, row.id],
+    )
+  ).rows[0];
+  return {
+    eligible: latest?.outcome === 'passed',
+    reason:
+      latest?.outcome === 'passed' ? '' : '本次提修后须有通过的最新复测结论',
+    verificationId: latest?.id ?? null,
+  };
+}
 
 export class IssueLifecycleService {
   private readonly operations: OperationService;
@@ -50,6 +99,12 @@ export class IssueLifecycleService {
       async (tx) => {
         const row = await issueRow(tx, projectId, id, true);
         if (row.row_version !== input.rowVersion) stale();
+        const basis =
+          input.resolution === 'fixed' || input.action === 'reopen'
+            ? await lifecycleBasis(tx, row, input.action)
+            : null;
+        if (basis && !basis.eligible)
+          throw new DomainError('PRECONDITIONS_MISSING', basis.reason, 422);
         return {
           issue: await this.change(
             tx,
@@ -58,6 +113,7 @@ export class IssueLifecycleService {
             input.action,
             input.note,
             input.resolution,
+            basis?.verificationId ?? null,
           ),
         };
       },
@@ -79,24 +135,14 @@ export class IssueLifecycleService {
         for (const id of input.objectIds) {
           try {
             const row = await issueRow(tx, projectId, id);
+            const basis = await lifecycleBasis(tx, row, input.action);
             items.push({
               id,
               title: row.title,
               number: issueDto(row).number,
               rowVersion: row.row_version,
               state: row.state,
-              eligible:
-                input.action === 'close'
-                  ? row.state !== 'closed'
-                  : row.state === 'closed',
-              reason:
-                input.action === 'close'
-                  ? row.state === 'closed'
-                    ? '已关闭'
-                    : ''
-                  : row.state !== 'closed'
-                    ? '当前未关闭'
-                    : '',
+              ...basis,
             });
           } catch (error: unknown) {
             if (!(error instanceof DomainError) || error.code !== 'NOT_FOUND')
@@ -109,6 +155,7 @@ export class IssueLifecycleService {
               state: null,
               eligible: false,
               reason: '此范围内不存在',
+              verificationId: null,
             });
           }
         }
@@ -129,7 +176,14 @@ export class IssueLifecycleService {
             JSON.stringify(items),
           ],
         );
-        return { previewId, action: input.action, scopeDigest, items };
+        return {
+          previewId,
+          action: input.action,
+          scopeDigest,
+          items: items.map(
+            ({ verificationId: _verificationId, ...item }) => item,
+          ),
+        };
       },
       projectId,
     );
@@ -150,7 +204,12 @@ export class IssueLifecycleService {
           await tx.query<{
             action: 'close' | 'reopen';
             scope_digest: string;
-            items: { id: string; rowVersion: number; eligible: boolean }[];
+            items: {
+              id: string;
+              rowVersion: number;
+              eligible: boolean;
+              verificationId?: string | null;
+            }[];
           }>(
             'SELECT action,scope_digest,items FROM app.issue_lifecycle_previews WHERE id=$1 AND project_id=$2 AND actor_id=$3',
             [input.previewId, projectId, actor.userId],
@@ -189,6 +248,19 @@ export class IssueLifecycleService {
             });
             continue;
           }
+          const basis = await lifecycleBasis(tx, row, preview.action);
+          if (
+            !basis.eligible ||
+            (preview.action === 'close' &&
+              expected.verificationId !== basis.verificationId)
+          ) {
+            results.push({
+              objectId: id,
+              status: 'conflict',
+              code: 'PRECONDITIONS_CHANGED',
+            });
+            continue;
+          }
           const issue = await this.change(
             tx,
             actor,
@@ -196,6 +268,7 @@ export class IssueLifecycleService {
             preview.action,
             '',
             'fixed',
+            basis.verificationId,
           );
           results.push({ objectId: id, status: 'accepted', issue });
         }
@@ -214,7 +287,8 @@ export class IssueLifecycleService {
     row: IssueRow,
     action: 'close' | 'reopen',
     note: string,
-    resolution: 'fixed' | 'notDefect',
+    resolution: Resolution,
+    verificationId: string | null,
   ) {
     if (
       (action === 'close' && row.state === 'closed') ||
@@ -242,6 +316,7 @@ export class IssueLifecycleService {
       {
         note,
         resolution: action === 'close' ? resolution : null,
+        verificationId,
         previousState: row.state,
         newState: state,
       },

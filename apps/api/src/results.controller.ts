@@ -130,6 +130,36 @@ export class ResultsController {
       ),
     );
   }
+  @Post('ui-archives/preview')
+  async previewArchive(@Req() req: Request, @Res() res: Response) {
+    return res.json(
+      await this.results.archives.preview(
+        await this.actor(req, res),
+        this.project(req),
+        req.body,
+      ),
+    );
+  }
+  @Get('ui-archives/receipts/:commandId')
+  async archiveReceipt(@Req() req: Request, @Res() res: Response) {
+    return res.json(
+      await this.results.archives.receipt(
+        await this.actor(req, res),
+        this.project(req),
+        commandIdSchema.parse(req.params.commandId),
+      ),
+    );
+  }
+  @Post('ui-archives')
+  async commitArchive(@Req() req: Request, @Res() res: Response) {
+    return res.json(
+      await this.results.archives.commit(
+        await this.actor(req, res),
+        this.project(req),
+        req.body,
+      ),
+    );
+  }
   @Post('result-submissions')
   async submit(@Req() req: Request, @Res() res: Response) {
     return res.json(
@@ -239,6 +269,7 @@ export class ResultsController {
             ? { pageSize: Number(req.query.pageSize) }
             : {}),
           kind: req.query.kind ?? 'all',
+          source: req.query.source ?? 'formal',
           search: req.query.search ?? '',
           ...(req.query.state ? { state: req.query.state } : {}),
         },

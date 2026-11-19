@@ -73,11 +73,11 @@ export async function executionRecords(
         `WITH filtered AS MATERIALIZED(
    SELECT r.id,r.created_at FROM app.runs r LEFT JOIN app.plan_revisions p ON p.id=r.source_revision_id
    LEFT JOIN app.retest_groups g ON g.id=r.source_revision_id LEFT JOIN app.retest_preparations prep ON prep.id=g.preparation_id
-   WHERE r.project_id=$1 AND r.source<>'debug' AND ($2='all' OR r.kind=$2) AND ($3::text IS NULL OR r.state=$3)
-    AND ($4='' OR position(lower($4) in lower(COALESCE(p.name,prep.name,'')||' '||r.id::text))>0)
+   WHERE r.project_id=$1 AND (($7='archive' AND r.source='uiArchive') OR ($7='formal' AND r.source NOT IN('debug','uiArchive'))) AND ($2='all' OR r.kind=$2) AND ($3::text IS NULL OR r.state=$3)
+    AND ($4='' OR position(lower($4) in lower(COALESCE(p.name,prep.name,r.scope_snapshot->>'title','')||' '||r.id::text))>0)
   ),total AS(SELECT count(*)::text total FROM filtered),page AS(SELECT id FROM filtered ORDER BY created_at DESC,id DESC LIMIT $5 OFFSET $6)
   SELECT r.id run_id,total.total,rep.id report_id,rep.current_revision_id report_revision_id,
-   COALESCE(pr.name,prep.name,CASE WHEN r.kind='UI' THEN '本地 UI 执行' ELSE '接口回归' END) name,r.kind,r.source,r.state,r.environment_id,er.content->>'name' environment_name,r.product_build,
+   COALESCE(pr.name,prep.name,r.scope_snapshot->>'title',CASE WHEN r.kind='UI' THEN '本地 UI 执行' ELSE '接口回归' END) name,r.kind,r.source,r.state,r.environment_id,er.content->>'name' environment_name,r.product_build,
    r.created_by,u.display_name creator_name,COALESCE(u.active AND m.active,false) creator_active,r.created_at,r.started_at,r.ended_at,
    jsonb_array_length(r.scope_snapshot->'items') total_items,
    CASE WHEN r.kind='UI' THEN CASE WHEN rep.id IS NULL THEN r.completed_items ELSE facts.reported_items-(facts.reported_stats->>'notExecuted')::integer END ELSE (SELECT count(*)::integer FROM app.run_items WHERE run_id=r.id AND outcome IN ('passed','failed')) END completed_items,
@@ -111,6 +111,7 @@ export async function executionRecords(
           input.search,
           input.pageSize,
           (input.page - 1) * input.pageSize,
+          input.source,
         ],
       )
     ).rows;

@@ -28,7 +28,12 @@ export async function authorizeDelivery(
   await requireProject(tx, actor, projectId, 'results.submit');
   await requireUiDeliveryReady(tx);
   const run = await readRun(tx, projectId, runId, lock);
-  if (run.kind !== 'UI' || run.created_by !== actor.userId) forbidden();
+  if (
+    run.kind !== 'UI' ||
+    run.source === 'uiArchive' ||
+    run.created_by !== actor.userId
+  )
+    forbidden();
   if (snapshotDigest !== undefined && snapshotDigest !== run.scope_digest)
     throw new DomainError(
       'BUSINESS_CONFLICT',

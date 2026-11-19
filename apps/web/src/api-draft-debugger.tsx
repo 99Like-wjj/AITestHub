@@ -21,8 +21,11 @@ import {
   apiAttemptDetailSchema,
   debugTraceSchema,
   startDebugInputSchema,
+  apiRegressionSaveReceiptSchema,
+  apiRegressionSaveStatusSchema,
 } from '../../../packages/contracts/src/api-execution';
 import type { ApiCaseContent } from '../../../packages/contracts/src/domain';
+import type { Asset } from '../../../packages/contracts/src/assets';
 import { testConfigurationListSchema } from '../../../packages/contracts/src/test-configuration';
 import type { TestConfigurationView } from '../../../packages/contracts/src/test-configuration';
 import { api, ApiError, describeError } from './api';
@@ -37,6 +40,7 @@ export interface DiagnosticDraft {
   content: ApiCaseContent;
   sourceCaseId: string | null;
   sourceCaseRevisionId: string | null;
+  sourceCaseRowVersion?: number;
 }
 type Restoration = { kind: 'command' | 'run'; id: string };
 const evaluationLabels = {
@@ -51,11 +55,15 @@ export function ApiDraftDebugger({
   projectId,
   draft,
   restoration,
+  userId,
+  onQualified,
   onClose,
 }: {
   projectId: string;
   draft: DiagnosticDraft | null;
   restoration?: Restoration | null;
+  userId?: string;
+  onQualified?: (asset: Asset) => Promise<void> | void;
   onClose: () => void;
 }) {
   const [environments, setEnvironments] = useState<TestConfigurationView[]>([]);
@@ -69,6 +77,8 @@ export function ApiDraftDebugger({
   const [attempt, setAttempt] = useState<Attempt | null>(null);
   const [attemptLoading, setAttemptLoading] = useState(false);
   const [receiptStatus, setReceiptStatus] = useState<string>();
+  const [qualificationCommand, setQualificationCommand] = useState<string>();
+  const [savingQualification, setSavingQualification] = useState(false);
   const [form] = Form.useForm<{
     environmentId: string;
     productBuild: string;
@@ -76,6 +86,21 @@ export function ApiDraftDebugger({
   const commandId = useRef<string>(crypto.randomUUID());
   const epoch = useRef(0);
   const attemptEpoch = useRef(0);
+  const qualificationRecoveryKey =
+    draft?.sourceCaseId && userId
+      ? `ath:api-qualification:v1:${userId}:${projectId}:${draft.sourceCaseId}`
+      : null;
+  useEffect(() => {
+    try {
+      const saved =
+        qualificationRecoveryKey &&
+        sessionStorage.getItem(qualificationRecoveryKey);
+      const command = idSchema.safeParse(saved);
+      setQualificationCommand(command.success ? command.data : undefined);
+    } catch {
+      setQualificationCommand(undefined);
+    }
+  }, [qualificationRecoveryKey]);
   useEffect(() => {
     epoch.current += 1;
     if (!draft && !restoration) return;
@@ -236,19 +261,134 @@ export function ApiDraftDebugger({
       if (epoch.current === generation) setPending(false);
     }
   }
+  const expectedCleanup =
+    draft?.content.cleanup.mode === 'none' ? 'notConfigured' : 'succeeded';
+  const eligible =
+    Boolean(
+      draft?.sourceCaseId &&
+      draft.sourceCaseRevisionId &&
+      draft.sourceCaseRowVersion &&
+      receipt &&
+      onQualified,
+    ) &&
+    trace?.state === 'completed' &&
+    trace.qualificationEnvironment === true &&
+    trace.scope.items[0]?.caseId === draft?.sourceCaseId &&
+    trace.facts.length === 1 &&
+    trace.facts[0]?.originalOutcome === 'passed' &&
+    trace.facts[0].cleanupState === expectedCleanup &&
+    trace.facts[0].sideEffectCertainty !== 'unknown';
+  function clearQualificationRecovery() {
+    setQualificationCommand(undefined);
+    if (qualificationRecoveryKey) {
+      try {
+        sessionStorage.removeItem(qualificationRecoveryKey);
+      } catch {
+        /* Only a locator is stored. */
+      }
+    }
+  }
+  async function saveQualification() {
+    if (
+      !eligible ||
+      savingQualification ||
+      qualificationCommand ||
+      !receipt ||
+      !draft?.sourceCaseId ||
+      !draft.sourceCaseRevisionId ||
+      !draft.sourceCaseRowVersion
+    )
+      return;
+    const id = crypto.randomUUID();
+    setSavingQualification(true);
+    setError(undefined);
+    setQualificationCommand(id);
+    try {
+      if (qualificationRecoveryKey)
+        sessionStorage.setItem(qualificationRecoveryKey, id);
+    } catch {
+      /* The in-page locator remains available. */
+    }
+    try {
+      const result = await api(
+        `/projects/${projectId}/api-executions/regression-qualifications`,
+        {
+          method: 'POST',
+          body: {
+            commandId: id,
+            caseId: draft.sourceCaseId,
+            baseRevisionId: draft.sourceCaseRevisionId,
+            rowVersion: draft.sourceCaseRowVersion,
+            debugRunId: receipt.runId,
+            draftHash: receipt.draftHash,
+            content: draft.content,
+          },
+        },
+        apiRegressionSaveReceiptSchema,
+      );
+      if (
+        result.asset.id !== draft.sourceCaseId ||
+        result.qualification.caseId !== draft.sourceCaseId
+      )
+        throw new Error('保存回执不属于当前用例，请查询原操作。');
+      clearQualificationRecovery();
+      await onQualified?.(result.asset);
+    } catch (failure) {
+      if (
+        failure instanceof ApiError &&
+        failure.status >= 400 &&
+        failure.status < 500
+      )
+        clearQualificationRecovery();
+      setError(describeError(failure));
+    } finally {
+      setSavingQualification(false);
+    }
+  }
+  async function readQualificationReceipt() {
+    if (!qualificationCommand || savingQualification || !draft?.sourceCaseId)
+      return;
+    setSavingQualification(true);
+    setError(undefined);
+    try {
+      const result = await api(
+        `/projects/${projectId}/api-executions/regression-qualification-receipts/${qualificationCommand}`,
+        {},
+        apiRegressionSaveStatusSchema,
+      );
+      if (result.commandId !== qualificationCommand)
+        throw new Error('原保存回执标识不一致。');
+      if (
+        result.status === 'completed' &&
+        result.response?.asset.id === draft.sourceCaseId
+      ) {
+        clearQualificationRecovery();
+        await onQualified?.(result.response.asset);
+      } else if (result.status === 'failed') {
+        clearQualificationRecovery();
+        setError('原保存操作已明确失败。请重新检查编辑基准和调试结果。');
+      } else {
+        setError('保存回执尚未确定。可继续只读核对原操作。');
+      }
+    } catch (failure) {
+      setError(describeError(failure));
+    } finally {
+      setSavingQualification(false);
+    }
+  }
   return (
     <Modal
       zIndex={uiLayers.nestedDialog}
-      title={restoration ? '找回原 API 诊断' : '诊断当前 API 草稿'}
+      title={restoration ? '查看原接口调试证据' : '调试与证据'}
       open={draft !== null || Boolean(restoration)}
       onCancel={onClose}
-      closable={!pending}
-      maskClosable={!pending}
-      keyboard={!pending}
+      closable={!pending && !savingQualification}
+      maskClosable={!pending && !savingQualification}
+      keyboard={!pending && !savingQualification}
       width={1000}
       footer={
         <Space>
-          <Button disabled={pending} onClick={onClose}>
+          <Button disabled={pending || savingQualification} onClick={onClose}>
             关闭诊断
           </Button>
           {receipt || restoredRunId ? (
@@ -263,12 +403,33 @@ export function ApiDraftDebugger({
             <Button
               type="primary"
               loading={pending}
-              disabled={loading || uncertain || !environments.length}
+              disabled={
+                loading ||
+                uncertain ||
+                !environments.length ||
+                Boolean(qualificationCommand)
+              }
               onClick={() => form.submit()}
             >
               明确开始一次草稿诊断
             </Button>
           )}
+          {qualificationCommand ? (
+            <Button
+              loading={savingQualification}
+              onClick={() => void readQualificationReceipt()}
+            >
+              查询原资格保存回执
+            </Button>
+          ) : eligible && !trace?.qualificationRetained ? (
+            <Button
+              type="primary"
+              loading={savingQualification}
+              onClick={() => void saveQualification()}
+            >
+              保存为可回归
+            </Button>
+          ) : null}
         </Space>
       }
       destroyOnHidden
@@ -279,7 +440,7 @@ export function ApiDraftDebugger({
             type="warning"
             showIcon
             title="诊断会向所选环境发起真实接口请求"
-            description="当前草稿在此窗口打开时固定。诊断不保存正式用例修订、不批准、不生成正式报告或问题池条目。业务请求和清理不自动重试；未知副作用不能重放。未审清理仍需满足原已审执行闭包规则。"
+            description="当前候选已固定。所选环境认可且完整调试通过后可保存为可回归。业务请求和清理遵循当前执行策略。"
           />
         ) : (
           <Alert
@@ -326,7 +487,12 @@ export function ApiDraftDebugger({
                 disabled={pending || Boolean(receipt) || uncertain}
                 options={environments.map((entry) => ({
                   value: entry.id,
-                  label: entry.content.name,
+                  label:
+                    entry.content.kind === 'environment' &&
+                    'allowApiRegressionQualification' in entry.content &&
+                    entry.content.allowApiRegressionQualification
+                      ? `${entry.content.name} · 可验证回归资格`
+                      : entry.content.name,
                 }))}
                 placeholder="请选择已确认的隔离目标"
               />
@@ -392,8 +558,14 @@ export function ApiDraftDebugger({
               <Tag>{evaluationLabels[trace.evaluationStatus]}</Tag>
             </Space>
             <Typography.Paragraph type="secondary">
-              临时诊断保留起点：{trace.createdAt}；到期时间：{trace.expiresAt}。
-              原始判断、请求事实、清理与副作用确定性分别记录。
+              {trace.qualificationRetained
+                ? '此诊断作为可回归资格证据保留。'
+                : `临时诊断于 ${trace.expiresAt} 到期。`}
+              {trace.state === 'completed' &&
+              draft &&
+              trace.qualificationEnvironment !== true
+                ? ' 当前环境配置未认可用于验证回归资格。'
+                : ''}
             </Typography.Paragraph>
             <Table
               size="small"

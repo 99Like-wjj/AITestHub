@@ -3,18 +3,18 @@
   "sources": [
     {
       "skillId": "ath-case-design",
-      "version": "0.1.1",
-      "ruleVersion": "0.1.1",
+      "version": "0.1.2",
+      "ruleVersion": "0.1.2",
       "name": "用例设计与优化",
       "archives": [
         {
           "kind": "zip",
-          "path": "/absolute/path/ath-case-design-0.1.1.zip",
+          "path": "/absolute/path/ath-case-design-0.1.2.zip",
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
         },
         {
           "kind": "tgz",
-          "path": "/absolute/path/aitesthub-case-design-skill-0.1.1.tgz",
+          "path": "/absolute/path/aitesthub-case-design-skill-0.1.2.tgz",
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
         }
       ],
@@ -48,13 +48,13 @@
     },
     {
       "skillId": "ath-api-regression",
-      "version": "0.1.1",
-      "ruleVersion": "0.1.1",
+      "version": "0.1.2",
+      "ruleVersion": "0.1.2",
       "name": "接口自动化测试",
       "archives": [
         {
           "kind": "zip",
-          "path": "/absolute/path/ath-api-regression-0.1.1.zip",
+          "path": "/absolute/path/ath-api-regression-0.1.2.zip",
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
         }
       ],

@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { idSchema,commandIdSchema,sha256Schema } from './base.js';
+import { idSchema,commandIdSchema,sha256Schema, persistedRowVersionSchema } from './base.js';
+import { assetSchema } from './assets.js';
 import {
 scopeItemSchema,
 apiCaseContentSchema,
@@ -173,6 +174,46 @@ export const debugReceiptLookupSchema = z.strictObject({
   status: z.enum(['accepted', 'pending', 'failed', 'unknown']),
   receipt: debugStartReceiptSchema.nullable(),
 });
+export const apiRegressionQualificationSchema = z.strictObject({
+  snapshotId: idSchema,
+  caseId: idSchema,
+  revisionId: idSchema,
+  revisionNo: z.number().int().positive(),
+  source: z.enum(['debugPassed', 'legacyApproval']),
+  debugRunId: idSchema.nullable(),
+  environmentId: idSchema.nullable(),
+  savedAt: z.iso.datetime(),
+});
+export const apiRegressionQualificationListSchema = z.strictObject({
+  qualifications: z.array(apiRegressionQualificationSchema),
+});
+export const saveApiRegressionInputSchema = z.strictObject({
+  commandId: commandIdSchema,
+  caseId: idSchema,
+  baseRevisionId: idSchema,
+  rowVersion: persistedRowVersionSchema,
+  debugRunId: idSchema,
+  draftHash: sha256Schema,
+  content: apiCaseContentSchema,
+});
+export const withdrawApiRegressionInputSchema = z.strictObject({
+  commandId: commandIdSchema,
+  snapshotId: idSchema,
+  reason: z.string().trim().min(1).max(1000),
+});
+export const apiRegressionSaveReceiptSchema = z.strictObject({
+  asset: assetSchema,
+  qualification: apiRegressionQualificationSchema,
+});
+export const apiRegressionSaveStatusSchema = z.strictObject({
+  commandId: commandIdSchema,
+  status: z.enum(['pending', 'completed', 'failed', 'unknown']),
+  response: apiRegressionSaveReceiptSchema.nullable(),
+});
+export const apiRegressionWithdrawReceiptSchema = z.strictObject({
+  snapshotId: idSchema,
+  withdrawnAt: z.iso.datetime(),
+});
 export const apiAttemptDetailSchema = z.strictObject({
   attempt: z.strictObject({
     id: idSchema,
@@ -229,6 +270,8 @@ export const debugTraceSchema = z.strictObject({
   ),
   createdAt: z.iso.datetime(),
   expiresAt: z.iso.datetime(),
+  qualificationRetained: z.boolean().optional(),
+  qualificationEnvironment: z.boolean().optional(),
 });
 export interface SendPermit {
   send: true;

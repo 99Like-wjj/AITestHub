@@ -71,7 +71,10 @@ import { useIssueCounts, useIssueReadScope } from './issues-counts';
 import './issues-readability.css';
 
 type Scope = 'participated' | 'mine' | 'all';
-type Tab = 'formal' | 'unassigned' | 'problems';
+type Tab = 'formal' | 'unassigned' | 'problems' | 'retest' | 'triage';
+const problemTab = (tab: Tab) => tab === 'problems' || tab === 'triage';
+const issueUrlQuery = () =>
+  new URLSearchParams(window.location.hash.split('?')[1]);
 function selectionFromUrl(): IssueSelection | null {
   const q = new URLSearchParams(window.location.hash.split('?')[1]);
   for (const [field, kind] of [
@@ -242,25 +245,39 @@ export function IssuesPage({
     const value = new URLSearchParams(window.location.hash.split('?')[1]).get(
       'scope',
     );
-    return value === 'mine' || value === 'all' ? value : 'participated';
+    return value === 'mine' || value === 'participated' ? value : 'all';
   });
   const [tab, setTab] = useState<Tab>(() => {
     const value = new URLSearchParams(window.location.hash.split('?')[1]).get(
       'tab',
     );
-    return value === 'problems' || value === 'unassigned' ? value : 'formal';
+    return value === 'problems' ||
+      value === 'unassigned' ||
+      value === 'retest' ||
+      value === 'triage'
+      ? value
+      : 'formal';
   });
   const requirementScope = JSON.stringify([me.user.id, project?.id ?? null]);
   const [requirementSelection, setRequirementSelection] = useState<{
     scope: string;
     id: string | null;
-  }>({ scope: requirementScope, id: null });
+  }>(() => ({
+    scope: requirementScope,
+    id: idSchema.safeParse(issueUrlQuery().get('requirementId')).data ?? null,
+  }));
+  const [requirementVersion, setRequirementVersion] = useState(
+    () => issueUrlQuery().get('requirementVersion') ?? '',
+  );
+  const [requirementSearch, setRequirementSearch] = useState('');
   const requirementId =
     requirementSelection.scope === requirementScope
       ? requirementSelection.id
       : null;
-  const setRequirementId = (id: string | null) =>
+  const setRequirementId = (id: string | null) => {
     setRequirementSelection({ scope: requirementScope, id });
+    setRequirementVersion('');
+  };
   const [search, setSearch] = useState('');
   const [composing, setComposing] = useState(false);
   const [state, setState] = useState<Issue['state'] | null>(null);
@@ -277,6 +294,7 @@ export function IssuesPage({
       scope,
       tab,
       requirementId,
+      requirementVersion,
       search,
       state,
       severity,
@@ -316,7 +334,11 @@ export function IssuesPage({
         scope === 'mine' ? 'mine' : tab === 'unassigned' ? 'unassigned' : 'all',
       participationOnly: scope === 'participated',
       search,
-      ...(state ? { state } : {}),
+      ...(tab === 'retest'
+        ? { state: 'awaitingRetest' }
+        : state
+          ? { state }
+          : {}),
       ...(severity ? { severity } : {}),
       ...(assignee ? { assigneeId: assignee } : {}),
       ...(submitter ? { submittedBy: submitter } : {}),
@@ -382,7 +404,12 @@ export function IssuesPage({
       participationOnly: scope === 'participated',
       search,
       ...(requirementId ? { requirementId } : {}),
-      ...(state ? { state } : {}),
+      ...(requirementId && requirementVersion ? { requirementVersion } : {}),
+      ...(tab === 'retest'
+        ? { state: 'awaitingRetest' }
+        : state
+          ? { state }
+          : {}),
       ...(severity ? { severity } : {}),
       ...(assignee ? { assigneeId: assignee } : {}),
       ...(submitter ? { submittedBy: submitter } : {}),
@@ -394,7 +421,15 @@ export function IssuesPage({
       search,
       includeArchivedRequirements,
       ...(requirementId ? { requirementId } : {}),
-      ...(problemState ? { state: problemState } : {}),
+      ...(requirementId && requirementVersion ? { requirementVersion } : {}),
+      ...(tab === 'triage'
+        ? {
+            decidedOnly: true,
+            ...(problemState && problemState !== 'pendingConfirmation'
+              ? { state: problemState }
+              : {}),
+          }
+        : { state: 'pendingConfirmation' }),
     });
     const results = await Promise.allSettled([
       api(
@@ -402,7 +437,7 @@ export function IssuesPage({
         signal ? { signal } : {},
         issueListResponseSchema,
       ),
-      scope === 'mine'
+      scope === 'mine' && !problemTab(tab)
         ? Promise.resolve({ problems: [] })
         : api(
             `/projects/${project.id}/problems?${new URLSearchParams(Object.entries(problemQuery).map(([key, value]) => [key, String(value)]))}`,
@@ -450,6 +485,7 @@ export function IssuesPage({
     scope,
     tab,
     requirementId,
+    requirementVersion,
     search,
     state,
     severity,
@@ -474,14 +510,26 @@ export function IssuesPage({
     aggregate.refresh();
     await Promise.allSettled([load(), refreshDetail.current()]);
   }
+  function updateUrl(selected: IssueSelection | null) {
+    if (!project) return;
+    const query = new URLSearchParams({ projectId: project.id, scope, tab });
+    if (requirementId) query.set('requirementId', requirementId);
+    if (requirementId && requirementVersion)
+      query.set('requirementVersion', requirementVersion);
+    if (selected)
+      query.set(
+        selected.kind === 'issue' ? 'issueId' : 'problemId',
+        selected.id,
+      );
+    window.location.hash = 'issues?' + query.toString();
+  }
   function openSelection(selected: IssueSelection) {
     setSelection(selected);
-    if (project)
-      window.location.hash = `issues?projectId=${project.id}&${selected.kind === 'issue' ? 'issueId' : 'problemId'}=${selected.id}`;
+    updateUrl(selected);
   }
   function closeSelection() {
     setSelection(null);
-    if (project) window.location.hash = `issues?projectId=${project.id}`;
+    updateUrl(null);
   }
   const chosenIssues = issues.filter((issue) =>
     selectedIssues.includes(issue.id),
@@ -515,6 +563,55 @@ export function IssuesPage({
   const selectedCounts = requirementId
     ? counts.get(requirementId)
     : aggregate.data?.totals;
+  const requirementOf = (id: string) =>
+    context.requirements.find((r) => r.id === id);
+  const versionLabel = (row: {
+    requirementId: string;
+    requirementVersionId: string | null;
+  }) => {
+    if (!row.requirementVersionId) return '未指定版本';
+    const version = requirementOf(row.requirementId)?.versions.find(
+      (v) => v.id === row.requirementVersionId,
+    );
+    return version ? 'v' + version.versionNo : row.requirementVersionId;
+  };
+  const grouped = (rows: { requirementId: string }[]) => {
+    const groups = new Map<string, { first: object; count: number }>();
+    for (const row of rows) {
+      const group = groups.get(row.requirementId);
+      if (group) group.count++;
+      else groups.set(row.requirementId, { first: row, count: 1 });
+    }
+    return groups;
+  };
+  const sortByRequirement = <T extends { requirementId: string }>(rows: T[]) =>
+    !requirementId
+      ? [...rows].sort(
+          (left, right) =>
+            (
+              requirementOf(left.requirementId)?.title ?? left.requirementId
+            ).localeCompare(
+              requirementOf(right.requirementId)?.title ?? right.requirementId,
+              'zh-CN',
+            ) || left.requirementId.localeCompare(right.requirementId),
+        )
+      : rows;
+  const groupedIssues = sortByRequirement(issues);
+  const groupedProblems = sortByRequirement(problems);
+  const issueGroups = grouped(groupedIssues),
+    problemGroups = grouped(groupedProblems);
+  const groupHeading = (
+    groups: ReturnType<typeof grouped>,
+    row: { requirementId: string },
+  ) => {
+    const group = groups.get(row.requirementId);
+    return !requirementId && group?.first === row ? (
+      <div className="issue-requirement-group">
+        {requirementOf(row.requirementId)?.title ?? row.requirementId}{' '}
+        <span>{group.count} 条当前记录</span>
+      </div>
+    ) : null;
+  };
   const displayCount = (value: string | undefined) =>
     aggregate.status === 'loading'
       ? '…'
@@ -535,7 +632,17 @@ export function IssuesPage({
             icon={<AppIcon name="plus" />}
             disabled={!canCreate}
             onClick={() =>
-              setEditor({ session: crypto.randomUUID(), kind: 'new' })
+              setEditor({
+                session: crypto.randomUUID(),
+                kind: 'new',
+                ...(requirementId
+                  ? {
+                      requirementId,
+                      requirementVersionId:
+                        idSchema.safeParse(requirementVersion).data ?? null,
+                    }
+                  : {}),
+              })
             }
           >
             新建缺陷
@@ -613,6 +720,14 @@ export function IssuesPage({
       <div className="issue-layout live-issue-layout">
         <aside className="asset-tree">
           <div className="tree-head">需求范围 · {project.name}</div>
+          <Input
+            allowClear
+            aria-label="查找需求"
+            placeholder="查找需求"
+            value={requirementSearch}
+            onChange={(event) => setRequirementSearch(event.target.value)}
+          />
+
           <button
             type="button"
             className={`tree-node ${!requirementId ? 'active' : ''}`}
@@ -624,27 +739,35 @@ export function IssuesPage({
               {displayCount(aggregate.data?.totals.formal)}
             </span>
           </button>
-          {context.requirements.map((requirement) => (
-            <button
-              type="button"
-              key={requirement.id}
-              className={`tree-node ${requirementId === requirement.id ? 'active' : ''}`}
-              onClick={() => setRequirementId(requirement.id)}
-            >
-              <span className="grow">
-                {requirement.title}
-                {requirement.archived ? '（已归档）' : ''}
-                <br />
-                <span className="caption">{requirement.id}</span>
-              </span>
-              <span className="count">
-                {displayCount(counts.get(requirement.id)?.formal)}
-              </span>
-            </button>
-          ))}
+          {context.requirements
+            .filter((r) =>
+              [r.id, r.title].some((text) =>
+                text
+                  .toLowerCase()
+                  .includes(requirementSearch.trim().toLowerCase()),
+              ),
+            )
+            .map((requirement) => (
+              <button
+                type="button"
+                key={requirement.id}
+                className={`tree-node ${requirementId === requirement.id ? 'active' : ''}`}
+                onClick={() => setRequirementId(requirement.id)}
+              >
+                <span className="grow">
+                  {requirement.title}
+                  {requirement.archived ? '（已归档）' : ''}
+                  <br />
+                  <span className="caption">{requirement.id}</span>
+                </span>
+                <span className="count">
+                  {displayCount(counts.get(requirement.id)?.formal)}
+                </span>
+              </button>
+            ))}
           <div className="divider" />
           <p className="caption" style={{ padding: '0 10px' }}>
-            导航数字为当前职责和筛选的完整正式缺陷条目数，不受当前列表200条限制；待确认问题独立统计。参与需求是关注筛选，不是权限墙。
+            导航数字按当前筛选汇总各需求的全部版本。
           </p>
         </aside>
         <section className="issue-pane">
@@ -663,8 +786,26 @@ export function IssuesPage({
                   : scope === 'mine'
                     ? '当前负责人为本人'
                     : '当前项目全部需求'}{' '}
-                · 当前筛选完整统计；列表最多加载200条
+                · 需求目录汇总各版本，列表按选定版本展示
               </p>
+              {requirementId && (
+                <Select
+                  aria-label="需求版本"
+                  placeholder="全部版本"
+                  allowClear
+                  value={requirementVersion || undefined}
+                  options={[
+                    ...(requirementOf(requirementId)?.versions ?? []).map(
+                      (v) => ({ value: v.id, label: 'v' + v.versionNo }),
+                    ),
+                    { value: 'unspecified', label: '未指定版本' },
+                  ]}
+                  onChange={(value: string | undefined) =>
+                    setRequirementVersion(value ?? '')
+                  }
+                  style={{ minWidth: 160 }}
+                />
+              )}
               <div className="stats three">
                 {[
                   ['正式缺陷', displayCount(selectedCounts?.formal)],
@@ -709,14 +850,24 @@ export function IssuesPage({
                   if (
                     value === 'formal' ||
                     value === 'unassigned' ||
+                    value === 'retest' ||
+                    value === 'triage' ||
                     value === 'problems'
-                  )
+                  ) {
                     setTab(value);
+                    if (problemTab(value) && scope === 'mine') setScope('all');
+                    setState(null);
+                    setProblemState(
+                      value === 'triage' ? null : 'pendingConfirmation',
+                    );
+                  }
                 }}
                 items={[
-                  { key: 'formal', label: '正式缺陷' },
-                  { key: 'unassigned', label: '待认领池' },
-                  { key: 'problems', label: 'AI/接口待确认问题' },
+                  { key: 'problems', label: '待确认问题' },
+                  { key: 'unassigned', label: '待认领' },
+                  { key: 'retest', label: '待复测' },
+                  { key: 'formal', label: '全部缺陷' },
+                  { key: 'triage', label: '分诊记录' },
                 ]}
               />
               <div className="issue-query-row row">
@@ -753,7 +904,7 @@ export function IssuesPage({
                   style={{ minWidth: 140 }}
                   value={state}
                   allowClear
-                  disabled={tab === 'problems'}
+                  disabled={problemTab(tab) || tab === 'retest'}
                   placeholder="全部正式状态"
                   options={issueStateSchema.options.map((value) => ({
                     value,
@@ -768,7 +919,7 @@ export function IssuesPage({
                   style={{ minWidth: 180 }}
                   value={assignee}
                   allowClear
-                  disabled={tab === 'problems'}
+                  disabled={problemTab(tab)}
                   showSearch
                   optionFilterProp="label"
                   placeholder="全部负责人"
@@ -782,7 +933,7 @@ export function IssuesPage({
                   style={{ minWidth: 120 }}
                   value={severity}
                   allowClear
-                  disabled={tab === 'problems'}
+                  disabled={problemTab(tab)}
                   placeholder="全部严重程度"
                   options={issueSeveritySchema.options.map((value) => ({
                     value,
@@ -797,7 +948,7 @@ export function IssuesPage({
                   style={{ minWidth: 180 }}
                   value={submitter}
                   allowClear
-                  disabled={tab === 'problems'}
+                  disabled={problemTab(tab)}
                   showSearch
                   optionFilterProp="label"
                   placeholder="全部提交人"
@@ -807,21 +958,25 @@ export function IssuesPage({
                   }
                 />
               </Space>
-              {tab === 'problems' ? (
+              {problemTab(tab) ? (
                 <>
-                  <Select
-                    aria-label="问题决定筛选"
-                    value={problemState}
-                    allowClear
-                    style={{ width: 260 }}
-                    options={problemStateSchema.options.map((value) => ({
-                      value,
-                      label: problemStateLabels[value],
-                    }))}
-                    onChange={(value: Problem['state'] | undefined) =>
-                      setProblemState(value ?? null)
-                    }
-                  />
+                  {tab === 'triage' && (
+                    <Select
+                      aria-label="问题决定筛选"
+                      value={problemState}
+                      allowClear
+                      style={{ width: 260 }}
+                      options={problemStateSchema.options
+                        .filter((value) => value !== 'pendingConfirmation')
+                        .map((value) => ({
+                          value,
+                          label: problemStateLabels[value],
+                        }))}
+                      onChange={(value: Problem['state'] | undefined) =>
+                        setProblemState(value ?? null)
+                      }
+                    />
+                  )}
                   {scope === 'mine' && (
                     <Alert
                       type="info"
@@ -852,7 +1007,7 @@ export function IssuesPage({
                   <Table
                     rowKey="id"
                     loading={loading}
-                    dataSource={problems}
+                    dataSource={groupedProblems}
                     pagination={{ pageSize: 15 }}
                     scroll={{ x: 740 }}
                     rowSelection={{
@@ -871,14 +1026,18 @@ export function IssuesPage({
                       {
                         title: '问题',
                         render: (_, row) => (
-                          <Button
-                            type="link"
-                            onClick={() =>
-                              openSelection({ kind: 'problem', id: row.id })
-                            }
-                          >
-                            {row.title}
-                          </Button>
+                          <div>
+                            {groupHeading(problemGroups, row)}
+                            <Button
+                              type="link"
+                              onClick={() =>
+                                openSelection({ kind: 'problem', id: row.id })
+                              }
+                            >
+                              {row.title}
+                            </Button>
+                            <div className="caption">{versionLabel(row)}</div>
+                          </div>
                         ),
                       },
                       {
@@ -999,7 +1158,7 @@ export function IssuesPage({
                   <Table
                     rowKey="id"
                     loading={loading}
-                    dataSource={issues}
+                    dataSource={groupedIssues}
                     pagination={{ pageSize: 15 }}
                     scroll={{ x: 760 }}
                     rowSelection={{
@@ -1017,6 +1176,7 @@ export function IssuesPage({
                         width: 230,
                         render: (_, row) => (
                           <div className="table-title">
+                            {groupHeading(issueGroups, row)}
                             <Button
                               type="link"
                               className="text-link-button"
@@ -1032,6 +1192,8 @@ export function IssuesPage({
                                 (requirement) =>
                                   requirement.id === row.requirementId,
                               )?.title ?? row.requirementId}
+                              {' · '}
+                              {versionLabel(row)}
                             </div>
                             <span className="badge">
                               {severityLabels[row.severity]}

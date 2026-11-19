@@ -13,6 +13,7 @@ export function issueListFilter(
     AND ($5::uuid IS NULL OR i.requirement_id=$5) AND ($6::text IS NULL OR i.state=$6) AND ($7::text IS NULL OR i.severity=$7)
     AND ($8::uuid IS NULL OR i.assignee_id=$8) AND ($9::uuid IS NULL OR i.submitted_by=$9)
     AND ($10='' OR position(lower($10) in lower(i.title||' '||i.description||' BUG-'||lpad(i.number::text,5,'0')))>0)
+    AND ($13::text IS NULL OR ($13='unspecified' AND i.requirement_version_id IS NULL) OR i.requirement_version_id::text = $13)
     AND ($11 OR i.merged_into_id IS NULL) AND ($12 OR NOT EXISTS(SELECT 1 FROM app.requirements ar WHERE ar.id=i.requirement_id AND ar.project_id=i.project_id AND ar.archived_at IS NOT NULL))`,
     values: [
       projectId,
@@ -27,6 +28,7 @@ export function issueListFilter(
       input.search,
       input.includeMerged,
       input.includeArchivedRequirements,
+      input.requirementVersion ?? null,
     ],
   };
 }

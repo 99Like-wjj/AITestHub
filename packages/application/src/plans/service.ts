@@ -248,33 +248,41 @@ export class PlanService {
     return this.db.transaction(async (transaction) => {
       await requireProject(transaction, actor, projectId, 'plans.write');
       const cases = (
-        await transaction.query<{ id: string; set_id: string }>(
-          "SELECT id,set_id FROM app.test_assets WHERE project_id=$1 AND kind='UI' AND target_type='case' AND removed_at IS NULL ORDER BY id LIMIT 10000",
+        await transaction.query<{
+          id: string;
+          set_id: string;
+          review_state: string;
+        }>(
+          "SELECT id,set_id,review_state FROM app.test_assets WHERE project_id=$1 AND kind='UI' AND target_type='case' AND removed_at IS NULL ORDER BY id LIMIT 10000",
           [projectId],
         )
       ).rows;
-      const reasons = new Map<string, string[]>();
-      for (const setId of new Set(cases.map((item) => item.set_id))) {
-        try {
-          await this.reviews.assertUiSetApprovedInTransaction(
-            transaction,
-            projectId,
-            setId,
-          );
-          reasons.set(setId, []);
-        } catch (error) {
-          if (!(error instanceof DomainError)) throw error;
-          reasons.set(setId, [error.message]);
+      const items = [];
+      for (const item of cases) {
+        let reasons: string[] = [];
+        if (item.review_state !== 'approved') {
+          reasons = ['当前用例修订待批准。'];
+        } else {
+          try {
+            await this.reviews.latestApprovedInTransaction(
+              transaction,
+              projectId,
+              item.id,
+              'UI',
+            );
+          } catch (error) {
+            if (!(error instanceof DomainError)) throw error;
+            reasons = [error.message];
+          }
         }
-      }
-      return {
-        items: cases.map((item) => ({
+        items.push({
           caseId: item.id,
           setId: item.set_id,
-          eligible: reasons.get(item.set_id)?.length === 0,
-          reasons: reasons.get(item.set_id) ?? ['资格未能核实。'],
-        })),
-      };
+          eligible: reasons.length === 0,
+          reasons,
+        });
+      }
+      return { items };
     });
   }
   async rename(
@@ -337,11 +345,29 @@ export class PlanService {
     actor: ActorContext,
     projectId: string,
     input: CreatePlanInput,
+    previous?: PlanRow,
+    refreshCaseIds: readonly string[] = [],
   ) {
+    const retained = new Map(
+      previous?.kind === 'UI'
+        ? uiPlanTemplateSchema
+            .parse(previous.ui_snapshot)
+            .items.map((item) => [item.caseId, item])
+        : [],
+    );
+    const retainedApi = new Set(
+      previous?.kind === 'API'
+        ? logicalItemsSchema.parse(previous.items).map((item) => item.caseId)
+        : [],
+    );
+    const refresh = new Set(refreshCaseIds);
     if (input.kind === 'UI') {
+      const currentIds = input.caseIds.filter(
+        (id) => !retained.has(id) || refresh.has(id),
+      );
       const sets = await transaction.query<{ set_id: string }>(
         'SELECT DISTINCT set_id FROM app.test_assets WHERE project_id=$1 AND id=ANY($2::uuid[])',
-        [projectId, input.caseIds],
+        [projectId, currentIds],
       );
       if (sets.rows.length)
         await transaction.query(
@@ -361,10 +387,26 @@ export class PlanService {
     const items = [];
     const fixed = [];
     for (const caseId of input.caseIds) {
+      if (input.kind === 'API' && retainedApi.has(caseId)) {
+        items.push({ caseId });
+        continue;
+      }
+      const kept = retained.get(caseId);
+      if (input.kind === 'UI' && kept && !refresh.has(caseId)) {
+        items.push({ caseId, approvalSnapshotId: kept.approvalSnapshotId });
+        fixed.push({ ...kept, ordinal: fixed.length });
+        continue;
+      }
       const current = await getAsset(transaction, projectId, caseId);
       if (current.target_type !== 'case' || current.kind !== input.kind)
         throw new DomainError('NOT_FOUND', '计划范围内没有该类型用例。', 404);
       if (input.kind === 'API') {
+        await this.reviews.latestApprovedInTransaction(
+          transaction,
+          projectId,
+          caseId,
+          'API',
+        );
         items.push({ caseId });
         continue;
       }
@@ -511,7 +553,14 @@ export class PlanService {
             '计划类型或UI需求版本不能原地升级，请新建独立计划。',
             422,
           );
-        const built = await this.build(transaction, actor, projectId, input);
+        const built = await this.build(
+          transaction,
+          actor,
+          projectId,
+          input,
+          current,
+          input.refreshCaseIds,
+        );
         const revisionId = randomUUID();
         await this.insertRevision(
           transaction,

@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
   resultItemSchema,
-  executionScopeSchema,
   evidenceManifestItemSchema,
 } from '../../../contracts/src/domain.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
@@ -14,6 +13,7 @@ import { DomainError } from '../errors.js';
 import { readRun } from '../ui-executions/service.js';
 import { recordRetestVerifications } from '../retests/verifications.js';
 import { reportFactsSchema } from '../../../contracts/src/ui-results.js';
+import { reportExecutionScopeSchema } from '../../../contracts/src/ui-archives.js';
 import { audit } from '../events.js';
 import { executionRecords } from './records.js';
 import { reportHandling } from './handling.js';
@@ -53,7 +53,7 @@ export async function reportFacts(
   runId: string,
 ) {
   const run = await readRun(tx, projectId, runId, 'share');
-  const scope = executionScopeSchema.parse(run.scope_snapshot);
+  const scope = reportExecutionScopeSchema.parse(run.scope_snapshot);
   const rows = await tx.query<ResultFactRow>(
     `SELECT r.id,r.run_item_id,r.current_revision_id,v.content,v.revision_no,i.content initial_content,
      a.id assessment_id,a.result_revision_id assessment_basis_revision_id,a.final_outcome,a.reason assessment_reason,ri.cleanup_state FROM app.results r
@@ -467,9 +467,11 @@ export class ReportService {
       ? `<h2>导出时的人工处理</h2><p>截取时间 ${escape(handling.capturedAt)}；问题 ${handling.statistics.problemCount} 项（待确认 ${handling.statistics.pendingProblemCount}），关联缺陷记录 ${handling.statistics.issueCount} 条（未关闭 ${handling.statistics.openIssueCount}、已合并 ${handling.statistics.mergedIssueCount}）。这些数量不等同失败用例数或根因数。</p><ul>${handling.problems.map((p) => `<li>问题：${escape(p.title)} · ${escape(p.state)}</li>`).join('')}${handling.issues.map((i) => `<li>${escape(i.number)}：${escape(i.title)} · ${escape(i.state)} · ${escape(i.assignee?.displayName ?? '待认领')}${i.mergedIntoId ? ' · 已合并' : ''}${i.latestVerification ? ` · 最近复测 ${escape(i.latestVerification.method)}/${escape(i.latestVerification.outcome)}` : ''}</li>`).join('')}</ul>`
       : '<h2>人工处理</h2><p>此历史修订未记录处理快照，不能用当前状态回填旧存档。登录平台可查看最新处理。</p>';
     const provenance =
-      facts.kind === 'API'
-        ? '平台受控接口执行'
-        : `${facts.executionProvenance}（客户端声明；合成协议验证不等于真实UI执行）`;
+      scope.sourceType === 'uiArchive'
+        ? `独立归档 · ${facts.executionProvenance}`
+        : facts.kind === 'API'
+          ? '平台受控接口执行'
+          : `${facts.executionProvenance}（客户端声明；合成协议验证不等于真实UI执行）`;
     const rows = facts.items
       .map(
         ({ scopeItem, result }) =>

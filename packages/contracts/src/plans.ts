@@ -44,10 +44,24 @@ export const createPlanInputSchema = z
         message: '接口计划按逻辑case引用，需求版本由各case保留',
       });
   });
-export const revisePlanInputSchema = createPlanInputSchema.safeExtend({
-  rowVersion: persistedRowVersionSchema,
-  basePlanRevisionId: idSchema,
-});
+export const revisePlanInputSchema = createPlanInputSchema
+  .safeExtend({
+    rowVersion: persistedRowVersionSchema,
+    basePlanRevisionId: idSchema,
+    refreshCaseIds: uniqueIds.optional(),
+  })
+  .superRefine((input, context) => {
+    const selected = new Set(input.caseIds);
+    if (
+      input.refreshCaseIds?.length &&
+      (input.kind !== 'UI' || input.refreshCaseIds.some((id) => !selected.has(id)))
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['refreshCaseIds'],
+        message: '只能更新本次已选的 UI 用例修订',
+      });
+  });
 export const renamePlanInputSchema = z.strictObject({
   commandId: commandIdSchema,
   rowVersion: persistedRowVersionSchema,

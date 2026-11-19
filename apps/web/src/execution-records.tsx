@@ -38,6 +38,7 @@ const source: Record<ExecutionRecord['source'], string> = {
   scheduled: '定时回归',
   localUi: '本地 UI',
   retest: '直接复测',
+  uiArchive: '独立归档',
 };
 const cleanup: Record<ExecutionRecord['cleanupState'], string> = {
   notConfigured: '未配置',
@@ -79,6 +80,7 @@ export function ExecutionRecords({
       ? 'API'
       : 'UI',
   );
+  const [origin, setOrigin] = useState<'formal' | 'archive'>('formal');
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
@@ -113,7 +115,7 @@ export function ExecutionRecords({
   useEffect(() => {
     setSelected(new Map());
     setCloseProgress(null);
-  }, [project.id, userId, kind]);
+  }, [project.id, userId, kind, origin]);
   useEffect(() => {
     if (composing) return;
     const timer = window.setTimeout(() => {
@@ -125,7 +127,14 @@ export function ExecutionRecords({
   useEffect(() => {
     const controller = new AbortController(),
       generation = ++epoch.current;
-    const scope = JSON.stringify([project.id, kind, page, query, state]);
+    const scope = JSON.stringify([
+      project.id,
+      kind,
+      origin,
+      page,
+      query,
+      state,
+    ]);
     setLoading(true);
     if (queryScope.current !== scope) setData(null);
     queryScope.current = scope;
@@ -133,7 +142,8 @@ export function ExecutionRecords({
     const params = new URLSearchParams({
       page: String(page),
       pageSize: '20',
-      kind,
+      kind: origin === 'archive' ? 'UI' : kind,
+      source: origin,
       search: query,
     });
     if (state) params.set('state', state);
@@ -167,7 +177,7 @@ export function ExecutionRecords({
           setLoading(false);
       });
     return () => controller.abort();
-  }, [project.id, kind, page, query, state, refresh, refreshKey]);
+  }, [project.id, kind, origin, page, query, state, refresh, refreshKey]);
   useEffect(() => {
     if (
       loading ||
@@ -195,10 +205,11 @@ export function ExecutionRecords({
           {(['UI', 'API'] as const).map((value) => (
             <button
               type="button"
-              className={`tab ${kind === value ? 'active' : ''}`}
+              className={`tab ${origin === 'formal' && kind === value ? 'active' : ''}`}
               key={value}
-              aria-pressed={kind === value}
+              aria-pressed={origin === 'formal' && kind === value}
               onClick={() => {
+                setOrigin('formal');
                 setKind(value);
                 setPage(1);
               }}
@@ -206,6 +217,18 @@ export function ExecutionRecords({
               {value === 'UI' ? 'UI 自主测试' : '接口回归'}
             </button>
           ))}
+          <button
+            type="button"
+            className={`tab ${origin === 'archive' ? 'active' : ''}`}
+            aria-pressed={origin === 'archive'}
+            onClick={() => {
+              setOrigin('archive');
+              setState(undefined);
+              setPage(1);
+            }}
+          >
+            独立归档
+          </button>
         </div>
         <Button
           loading={loading}
@@ -259,67 +282,73 @@ export function ExecutionRecords({
       {error && (
         <Alert type="error" title={error} showIcon className="section-alert" />
       )}
-      {kind === 'UI' && project.roles.includes('tester') && (
-        <div className="toolbar mb">
-          <button
-            type="button"
-            className="btn small"
-            disabled={
-              loading ||
-              !data?.records.some(
-                (row) => row.kind === 'UI' && !blockedRuns.has(row.runId),
-              )
-            }
-            onClick={() =>
-              setSelected((previous) => {
-                const next = new Map(previous);
-                for (const row of data?.records ?? [])
-                  if (
+      {origin === 'formal' &&
+        kind === 'UI' &&
+        project.roles.includes('tester') && (
+          <div className="toolbar mb">
+            <button
+              type="button"
+              className="btn small"
+              disabled={
+                loading ||
+                !data?.records.some(
+                  (row) =>
                     row.kind === 'UI' &&
-                    !blockedRuns.has(row.runId) &&
-                    next.size < 200
-                  )
-                    next.set(row.runId, {
-                      runId: row.runId,
-                      rowVersion: row.rowVersion,
-                      name: row.name,
-                    });
-                return next;
-              })
-            }
-          >
-            选择本页 UI 轮次
-          </button>
-          <span className="caption">
-            已选 {selected.size}/200 项；保留选择时的版本
-          </span>
-          <button
-            type="button"
-            className="btn small"
-            disabled={!selected.size}
-            onClick={() => setSelected(new Map())}
-          >
-            清空选择
-          </button>
-          <span className="grow" />
-          <button
-            type="button"
-            className="btn small"
-            disabled={
-              !selected.size ||
-              [...selected.keys()].some((id) => blockedRuns.has(id))
-            }
-            onClick={() =>
-              setCloseProgress({
-                session: crypto.randomUUID(),
-                targets: [...selected.values()],
-              })
-            }
-          >
-            批量关闭平台进度
-          </button>
-        </div>
-      )}
+                    row.source !== 'uiArchive' &&
+                    !blockedRuns.has(row.runId),
+                )
+              }
+              onClick={() =>
+                setSelected((previous) => {
+                  const next = new Map(previous);
+                  for (const row of data?.records ?? [])
+                    if (
+                      row.kind === 'UI' &&
+                      row.source !== 'uiArchive' &&
+                      !blockedRuns.has(row.runId) &&
+                      next.size < 200
+                    )
+                      next.set(row.runId, {
+                        runId: row.runId,
+                        rowVersion: row.rowVersion,
+                        name: row.name,
+                      });
+                  return next;
+                })
+              }
+            >
+              选择本页 UI 轮次
+            </button>
+            <span className="caption">
+              已选 {selected.size}/200 项；保留选择时的版本
+            </span>
+            <button
+              type="button"
+              className="btn small"
+              disabled={!selected.size}
+              onClick={() => setSelected(new Map())}
+            >
+              清空选择
+            </button>
+            <span className="grow" />
+            <button
+              type="button"
+              className="btn small"
+              disabled={
+                !selected.size ||
+                [...selected.keys()].some((id) => blockedRuns.has(id))
+              }
+              onClick={() =>
+                setCloseProgress({
+                  session: crypto.randomUUID(),
+                  targets: [...selected.values()],
+                })
+              }
+            >
+              批量关闭平台进度
+            </button>
+          </div>
+        )}
       {!!pendingCloses.length && (
         <div className="notice amber mb">
           {pendingCloses.map((record) => (
@@ -382,6 +411,7 @@ export function ExecutionRecords({
             <div className="between">
               {kind === 'UI' &&
                 row.kind === 'UI' &&
+                row.source !== 'uiArchive' &&
                 project.roles.includes('tester') && (
                   <input
                     type="checkbox"
@@ -494,7 +524,9 @@ export function ExecutionRecords({
                 {delivery[row.deliveryStatus]}
               </span>
             </div>
-            {row.kind === 'UI' && row.progressClosedAt ? (
+            {row.kind === 'UI' &&
+            row.source !== 'uiArchive' &&
+            row.progressClosedAt ? (
               <p className="caption mt">
                 平台进度展示已关闭 ·{' '}
                 {new Date(row.progressClosedAt).toLocaleString('zh-CN')}。本地

@@ -55,6 +55,8 @@ import { PageHeading } from './page-heading';
 import { AppIcon } from './app-icon';
 import { ArchivedRequirementsToggle } from './archived-requirements-toggle';
 import './assets-layout.css';
+import { UiCaseText, UiReviewWorkspace } from './ui-review-workspace';
+import { AssetCoverage } from './asset-coverage';
 
 type Navigation = z.infer<typeof assetNavigationSchema>;
 type Detail = z.infer<typeof assetDetailSchema>;
@@ -106,7 +108,10 @@ function ContentView({ content }: { content: AssetContent }) {
           ]}
         />
       )}
-      {'testPoint' in content && (
+      {'testPoint' in content && content.kind === 'UI' && (
+        <UiCaseText content={content} />
+      )}
+      {'testPoint' in content && content.kind === 'API' && (
         <Descriptions
           column={1}
           items={[
@@ -146,7 +151,7 @@ function ContentView({ content }: { content: AssetContent }) {
           ? content.basisRefs.map((basis) => basis.description).join('；')
           : '未登记依据引用'}
       </Typography.Paragraph>
-      {'steps' in content && (
+      {'dslVersion' in content && (
         <Collapse
           items={content.steps.map((step, index) => ({
             key: step.stepId,
@@ -370,10 +375,11 @@ export function AssetsPage({
 }) {
   const { modal, message } = App.useApp();
   const [localKind, setLocalKind] = useState<'UI' | 'API'>(kindFromUrl);
-  const [reviewCounts, setReviewCounts] = useState<{
-    UI: number;
-    API: number;
-  } | null>(null);
+  const [coverage, setCoverage] = useState(false);
+  const [reviewWorkspace, setReviewWorkspace] = useState(
+    new URLSearchParams(window.location.hash.split('?')[1]).get('view') ===
+      'meeting',
+  );
   const kind = scope?.kind ?? localKind;
   const [navigation, setNavigation] = useState<Navigation>({
     requirements: [],
@@ -551,59 +557,14 @@ export function AssetsPage({
     const update = () => {
       setReviewFilter(reviewFromUrl());
       setLocalKind(kindFromUrl());
+      setReviewWorkspace(
+        new URLSearchParams(window.location.hash.split('?')[1]).get('view') ===
+          'meeting',
+      );
     };
     window.addEventListener('hashchange', update);
     return () => window.removeEventListener('hashchange', update);
   }, []);
-  useEffect(() => {
-    const controller = new AbortController();
-    setReviewCounts(null);
-    if (!project || reviewFilter === 'all') return;
-    void Promise.all(
-      (['UI', 'API'] as const).map(async (assetKind) => {
-        const query = new URLSearchParams({
-          kind: assetKind,
-          includeRemoved: String(includeRemoved),
-          includeArchivedRequirements: String(includeArchivedRequirements),
-        });
-        if (scope)
-          query.set('requirementVersionId', scope.requirementVersionId);
-        const data = await api(
-          `/projects/${project.id}/assets?${query}`,
-          { signal: controller.signal },
-          assetListSchema,
-        );
-        return [
-          assetKind,
-          data.assets.filter(
-            (asset) =>
-              asset.targetType === 'case' &&
-              (reviewFilter === 'unapproved'
-                ? asset.reviewState !== 'approved'
-                : asset.reviewState === reviewFilter),
-          ).length,
-        ] as const;
-      }),
-    )
-      .then((counts) => {
-        if (!controller.signal.aborted)
-          setReviewCounts({
-            UI: counts.find(([key]) => key === 'UI')?.[1] ?? 0,
-            API: counts.find(([key]) => key === 'API')?.[1] ?? 0,
-          });
-      })
-      .catch(() => {
-        /* The current list retains its own read errors; unavailable cross-type counts remain unknown. */
-      });
-    return () => controller.abort();
-  }, [
-    project?.id,
-    scope?.requirementVersionId,
-    reviewFilter,
-    includeRemoved,
-    includeArchivedRequirements,
-    assets,
-  ]);
   useEffect(() => {
     const parsed = z
       .uuid()
@@ -677,6 +638,7 @@ export function AssetsPage({
       });
   }
   function changeScope(next: CaseScope | null) {
+    setCoverage(false);
     onScopeChange(next);
     const query = new URLSearchParams(window.location.hash.split('?')[1]);
     query.set('kind', next?.kind ?? kind);
@@ -685,6 +647,31 @@ export function AssetsPage({
     query.delete('assetId');
     query.delete('assetRevisionId');
     window.location.hash = `cases?${query}`;
+  }
+  function setMeeting(open: boolean) {
+    if (open && !scope) {
+      void message.info('请先选择明确的需求版本。');
+      return;
+    }
+    const query = new URLSearchParams(window.location.hash.split('?')[1]);
+    if (open) {
+      query.set('view', 'meeting');
+      query.delete('assetId');
+      setSelectedId(null);
+    }
+    if (scope) {
+      query.set('projectId', scope.projectId);
+      query.set('requirementId', scope.requirementId);
+      query.set('versionId', scope.requirementVersionId);
+      query.set('title', scope.title);
+      query.set('versionNo', String(scope.versionNo));
+      query.set('kind', 'UI');
+    } else {
+      query.delete('view');
+      query.delete('meetingId');
+    }
+    window.history.replaceState(null, '', '#cases?' + query.toString());
+    setReviewWorkspace(open);
   }
   function selectAsset(asset: Asset) {
     if (asset.setId !== batchId) setSelectedKeys([]);
@@ -774,13 +761,8 @@ export function AssetsPage({
     const targets = assets.filter(
       (asset) => objectIds.includes(asset.id) && !asset.removedAt,
     );
-    const sets = new Set(targets.map((asset) => asset.setId));
     if (!targets.length || targets.length !== new Set(objectIds).size) {
       setError('没有完整可预览的有效对象，请先刷新范围。');
-      return;
-    }
-    if (sets.size !== 1) {
-      setError('请在同一个批次内预览批准范围。不同批次独立评审。');
       return;
     }
     setPreviewLoading(true);
@@ -907,467 +889,491 @@ export function AssetsPage({
     : [];
   return (
     <>
-      <PageHeading
-        eyebrow="TEST ASSETS"
-        title="用例中心"
-        description="按需求、场景和用例审阅；UI 与接口资产各自维护。"
-        actions={
-          <>
-            <Button
-              icon={<PlusOutlined />}
-              disabled={!tester || !scope || !batch || Boolean(batch.removedAt)}
-              onClick={() => openEditor('scenario')}
-            >
-              新增场景
-            </Button>
-            <Button
-              type="primary"
-              icon={<AppIcon name="spark" />}
-              disabled={!tester}
-              onClick={() => {
-                window.location.hash = 'workspace';
-              }}
-            >
-              生成用例
-            </Button>
-          </>
-        }
-      />
-      <div className="assets-unified-toolbar">
-        <div className="segmented" aria-label="用例类型">
-          {(['UI', 'API'] as const).map((value) => (
-            <button
-              type="button"
-              key={value}
-              className={`tab ${kind === value ? 'active' : ''}`}
-              aria-pressed={kind === value}
-              onClick={() => {
-                setLocalKind(value);
-                if (scope) changeScope({ ...scope, kind: value });
-                else {
-                  const query = new URLSearchParams(
-                    window.location.hash.split('?')[1],
-                  );
-                  query.set('kind', value);
-                  query.delete('assetId');
-                  window.location.hash = `cases?${query}`;
-                }
-              }}
-            >
-              {value === 'UI' ? 'UI 自主测试' : '接口回归'}
-              {reviewFilter !== 'all'
-                ? ` (${reviewCounts?.[value] ?? '…'})`
-                : ''}
-            </button>
-          ))}
-        </div>
-        <div className="row wrap">
-          <ArchivedRequirementsToggle
-            label="已归档需求"
-            checked={includeArchivedRequirements}
-            disabled={editor !== null || preview !== null || committing}
-            onChange={(value) => {
-              loadEpoch.current += 1;
-              setAssets([]);
-              setNavigation({ requirements: [] });
-              setSelectedKeys([]);
-              setLoading(true);
-              setIncludeArchivedRequirements(value);
-            }}
-          />
-        </div>
-      </div>
-      {reviewFilter === 'unapproved' && (
-        <p className="caption" role="status">
-          待评审包含 UI
-          与接口两类独立资产，请按上方类型查看；切换类型会保留评审筛选。
-        </p>
+      {reviewWorkspace && scope && kind === 'UI' && (
+        <UiReviewWorkspace
+          key={project.id + ':' + scope.requirementVersionId}
+          userId={userId}
+          projectId={project.id}
+          requirementVersionId={scope.requirementVersionId}
+          requirementTitle={scope.title}
+          versionNo={scope.versionNo}
+          assets={cases.filter(
+            (asset) =>
+              !asset.removedAt &&
+              asset.requirementVersionId === scope.requirementVersionId,
+          )}
+          scenarioTitles={
+            new Map(scenarios.map((asset) => [asset.id, asset.title]))
+          }
+          initialCases={selectedKeys}
+          tester={tester}
+          onReturn={() => setMeeting(false)}
+          onApprove={startPreview}
+          updated={changed}
+        />
       )}
-      {tester && scope && !batch && (
-        <Alert
-          type="info"
-          showIcon
-          className="mb"
-          title="新增场景前，请先创建或选择生成批次。"
-          action={
-            <Button size="small" onClick={() => openEditor('set')}>
-              新建批次
-            </Button>
+      <div hidden={reviewWorkspace && Boolean(scope) && kind === 'UI'}>
+        <PageHeading
+          eyebrow="TEST ASSETS"
+          title="UI 用例管理"
+          description="按需求、版本与场景维护文字用例，逐条评审和批准。"
+          actions={
+            <>
+              {scope && (
+                <Button onClick={() => setCoverage((value) => !value)}>
+                  {coverage ? '返回用例库' : '覆盖矩阵'}
+                </Button>
+              )}
+              {scope && kind === 'UI' && (
+                <Button onClick={() => setMeeting(true)}>进入用例评审</Button>
+              )}
+              <Button
+                icon={<PlusOutlined />}
+                disabled={
+                  !tester || !scope || !batch || Boolean(batch.removedAt)
+                }
+                onClick={() => openEditor('scenario')}
+              >
+                新增场景
+              </Button>
+              <Button
+                type="primary"
+                icon={<AppIcon name="spark" />}
+                disabled={!tester}
+                onClick={() => {
+                  window.location.hash = 'workspace';
+                }}
+              >
+                生成用例
+              </Button>
+            </>
           }
         />
-      )}
-      {error && (
-        <Alert
-          type="error"
-          showIcon
-          title={error}
-          className="section-alert"
-          action={<Button onClick={() => void load()}>刷新范围</Button>}
-        />
-      )}
-      {!loading && !error && !scopeExists && (
-        <Alert
-          type="info"
-          showIcon
-          title="当前需求版本不在本次浏览范围"
-          description="已归档需求默认隐藏。可开启“已归档需求”，或重新选择浏览范围；此开关不删除版本及历史资料。"
-          className="section-alert"
-        />
-      )}
-      <div className="asset-workspace live-asset-workspace">
-        <aside className="asset-tree">
-          <div className="tree-head">需求 / 场景 / 用例</div>
-          <button
-            type="button"
-            className={`tree-node ${scope ? '' : 'active'}`}
-            onClick={() => selectRequirement('all')}
-          >
-            <AppIcon name="folder-closed" />
-            <span className="grow">全部需求</span>
-            <span className="count">
-              {navigation.requirements.reduce((n, r) => n + r.caseCount, 0)}
-            </span>
-          </button>
-          {loading ? (
-            <Skeleton active />
-          ) : (
-            <Tree
-              key={`${kind}:${scope?.requirementVersionId ?? 'all'}:${batchId}`}
-              treeData={tree}
-              defaultExpandAll
-              blockNode
-              selectedKeys={
-                selectedId
-                  ? [
-                      `${assets.find((asset) => asset.id === selectedId)?.targetType ?? 'case'}:${selectedId}`,
-                    ]
-                  : scope
-                    ? [`requirement:${scope.requirementId}`]
-                    : []
-              }
-              onSelect={([key]) => {
-                if (typeof key !== 'string') return;
-                if (key.startsWith('requirement:'))
-                  selectRequirement(key.slice(12));
-                else {
-                  const asset = assets.find(
-                    (item) => item.id === key.split(':')[1],
-                  );
-                  if (asset) selectAsset(asset);
-                }
+        <div className="assets-unified-toolbar">
+          <div className="row wrap">
+            <ArchivedRequirementsToggle
+              label="已归档需求"
+              checked={includeArchivedRequirements}
+              disabled={editor !== null || preview !== null || committing}
+              onChange={(value) => {
+                loadEpoch.current += 1;
+                setAssets([]);
+                setNavigation({ requirements: [] });
+                setSelectedKeys([]);
+                setLoading(true);
+                setIncludeArchivedRequirements(value);
               }}
             />
-          )}
-        </aside>
-        <section className="asset-pane">
-          <div className="context-head">
-            <div>
-              <h2>{scope?.title ?? '全部需求'}</h2>
-              <p>
-                {scope
-                  ? `v${scope.versionNo} · ${selectedRequirement?.archived ? '已归档需求' : '当前选定版本'}`
-                  : '跨版本只读浏览；新建前请选择明确需求版本。'}
-              </p>
-            </div>
-            <div className="context-controls">
-              <Select
-                aria-label="用例需求范围"
-                value={
-                  scope
-                    ? selectedRequirement
-                      ? scope.requirementId
-                      : null
-                    : 'all'
-                }
-                placeholder="当前历史需求未在浏览目录中"
-                onChange={selectRequirement}
-                options={[
-                  { value: 'all', label: '全部需求' },
-                  ...navigation.requirements.map((r) => ({
-                    value: r.id,
-                    label: r.title + (r.archived ? '（已归档）' : ''),
-                  })),
-                ]}
-                style={{ width: 190 }}
-              />
-              {scope && (
-                <Select
-                  aria-label="用例需求版本"
-                  value={scopeExists ? scope.requirementVersionId : null}
-                  placeholder="版本未在浏览目录中"
-                  disabled={!selectedRequirement}
-                  onChange={selectVersion}
-                  options={(selectedRequirement?.versions ?? []).map((v) => ({
-                    value: v.id,
-                    label: `v${v.versionNo} · ${v.caseCount} 条用例`,
-                  }))}
-                  style={{ width: 130 }}
+          </div>
+        </div>
+        {tester && scope && !batch && (
+          <Alert
+            type="info"
+            showIcon
+            className="mb"
+            title="新增场景前，请先创建或选择生成批次。"
+            action={
+              <Button size="small" onClick={() => openEditor('set')}>
+                新建批次
+              </Button>
+            }
+          />
+        )}
+        {error && (
+          <Alert
+            type="error"
+            showIcon
+            title={error}
+            className="section-alert"
+            action={<Button onClick={() => void load()}>刷新范围</Button>}
+          />
+        )}
+        {!loading && !error && !scopeExists && (
+          <Alert
+            type="info"
+            showIcon
+            title="当前需求版本不在本次浏览范围"
+            description="已归档需求默认隐藏。可开启“已归档需求”，或重新选择浏览范围；此开关不删除版本及历史资料。"
+            className="section-alert"
+          />
+        )}
+        {coverage && scope && (
+          <AssetCoverage
+            projectId={project.id}
+            versionId={scope.requirementVersionId}
+            kind={kind}
+            assets={assets}
+            scenarioTitles={new Map(scenarios.map((s) => [s.id, s.title]))}
+            onCase={selectAsset}
+          />
+        )}
+        <div hidden={coverage && Boolean(scope)}>
+          <div className="asset-workspace live-asset-workspace">
+            <aside className="asset-tree">
+              <div className="tree-head">需求 / 场景 / 用例</div>
+              <button
+                type="button"
+                className={`tree-node ${scope ? '' : 'active'}`}
+                onClick={() => selectRequirement('all')}
+              >
+                <AppIcon name="folder-closed" />
+                <span className="grow">全部需求</span>
+                <span className="count">
+                  {navigation.requirements.reduce((n, r) => n + r.caseCount, 0)}
+                </span>
+              </button>
+              {loading ? (
+                <Skeleton active />
+              ) : (
+                <Tree
+                  key={`${kind}:${scope?.requirementVersionId ?? 'all'}:${batchId}`}
+                  treeData={tree}
+                  defaultExpandAll
+                  blockNode
+                  selectedKeys={
+                    selectedId
+                      ? [
+                          `${assets.find((asset) => asset.id === selectedId)?.targetType ?? 'case'}:${selectedId}`,
+                        ]
+                      : scope
+                        ? [`requirement:${scope.requirementId}`]
+                        : []
+                  }
+                  onSelect={([key]) => {
+                    if (typeof key !== 'string') return;
+                    if (key.startsWith('requirement:'))
+                      selectRequirement(key.slice(12));
+                    else {
+                      const asset = assets.find(
+                        (item) => item.id === key.split(':')[1],
+                      );
+                      if (asset) selectAsset(asset);
+                    }
+                  }}
                 />
               )}
-              <Select
-                aria-label="生成批次"
-                value={batchId}
-                onChange={(id) => {
-                  setBatchId(id);
-                  setSelectedKeys([]);
-                  setSelectedId(null);
-                }}
-                options={[
-                  { value: 'all', label: '全部批次' },
-                  ...batches.map((b) => ({
-                    value: b.id,
-                    label: b.title + (b.removedAt ? '（已移除）' : ''),
-                  })),
-                ]}
-                style={{ width: 170 }}
-              />
-              <Button
-                size="small"
-                icon={<ReloadOutlined />}
-                loading={loading}
-                onClick={() => void load()}
-                aria-label="刷新资产"
-              />
-              {tester && (
-                <Button
-                  size="small"
-                  disabled={!scope || !scopeExists}
-                  onClick={() => openEditor('set')}
-                >
-                  新建批次
-                </Button>
-              )}
-            </div>
-          </div>
-          <div className="toolbar mb asset-toolbar">
-            <Input
-              className="searchbox"
-              aria-label="搜索用例"
-              placeholder="搜索场景或用例"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              allowClear
-            />
-            <Select
-              aria-label="评审状态筛选"
-              value={reviewFilter}
-              onChange={(value) => {
-                setReviewFilter(value);
-                const query = new URLSearchParams(
-                  window.location.hash.split('?')[1],
-                );
-                if (value === 'all') query.delete('review');
-                else query.set('review', value);
-                window.history.replaceState(
-                  null,
-                  '',
-                  `${window.location.pathname}${window.location.search}#cases${query.size ? '?' + query.toString() : ''}`,
-                );
-              }}
-              options={[
-                { value: 'all', label: '全部评审状态' },
-                { value: 'unapproved', label: '全部待评审' },
-                ...Object.entries(reviewLabels).map(([value, label]) => ({
-                  value,
-                  label,
-                })),
-              ]}
-              style={{ minWidth: 128 }}
-            />
-            <span className="grow" />
-            <Button
-              size="small"
-              disabled={!batch}
-              onClick={() => batch && setSelectedId(batch.id)}
-            >
-              测试集意见
-            </Button>
-            <Button
-              size="small"
-              type="primary"
-              disabled={!tester || !selectedKeys.length}
-              loading={previewLoading}
-              onClick={() => void startPreview(selectedKeys)}
-            >
-              预览通过已选 {selectedKeys.length} 项
-            </Button>
-          </div>
-          {batch && (
-            <div className="batch-note mb">
-              <div className="between">
+            </aside>
+            <section className="asset-pane">
+              <div className="context-head">
                 <div>
-                  <b className="small">
-                    {batch.title} · {reviewLabels[batch.reviewState]}
-                  </b>
-                  <p className="caption">
-                    本批有效对象 {batchMembers.length} 项，当前通过{' '}
-                    {
-                      batchMembers.filter((a) => a.reviewState === 'approved')
-                        .length
-                    }{' '}
-                    项；上层意见以批准预览判断，旧批准快照独立保留。
+                  <h2>{scope?.title ?? '全部需求'}</h2>
+                  <p>
+                    {scope
+                      ? `v${scope.versionNo} · ${selectedRequirement?.archived ? '已归档需求' : '当前选定版本'}`
+                      : '跨版本只读浏览；新建前请选择明确需求版本。'}
                   </p>
                 </div>
-                <Button
-                  size="small"
-                  disabled={!tester || Boolean(batch.removedAt)}
-                  loading={previewLoading}
-                  onClick={() =>
-                    void startPreview(batchMembers.map((a) => a.id))
-                  }
-                >
-                  预览整批对象
-                </Button>
-              </div>
-            </div>
-          )}
-          {loading ? (
-            <Skeleton active />
-          ) : !scopeExists || error ? (
-            <div className="card pad">
-              <Empty
-                description={
-                  error
-                    ? '资产尚未读取成功。'
-                    : includeArchivedRequirements
-                      ? '此需求版本不在当前项目目录，请重新选择范围。'
-                      : '此需求版本当前未展示，可开启“已归档需求”或另选范围。'
-                }
-              />
-            </div>
-          ) : (
-            <>
-              {scenarios
-                .filter(
-                  (scene) =>
-                    !keyword ||
-                    cases.some((c) => c.parentId === scene.id) ||
-                    scene.title.toLocaleLowerCase().includes(keyword),
-                )
-                .map((scene) => {
-                  const rows = cases.filter((c) => c.parentId === scene.id);
-                  const requirement = navigation.requirements.find((r) =>
-                    r.versions.some((v) => v.id === scene.requirementVersionId),
-                  );
-                  return (
-                    <section className="card scene-card" key={scene.id}>
-                      <div className="scene-summary">
-                        <AppIcon name="folder-closed" />
-                        <div className="grow">
-                          <h3>{scene.title}</h3>
-                          <p>
-                            {requirement?.title ?? '原需求未取得'} ·{' '}
-                            {batches.find((b) => b.id === scene.setId)?.title ??
-                              '原批次'}{' '}
-                            · {rows.length} 条当前筛选用例
-                          </p>
-                        </div>
-                        <span
-                          className={`badge ${reviewTones[scene.reviewState]}`}
-                        >
-                          {reviewLabels[scene.reviewState]}
-                        </span>
-                        <Button size="small" onClick={() => selectAsset(scene)}>
-                          场景意见
-                        </Button>
-                        {tester && (
-                          <Button
-                            size="small"
-                            disabled={!scope || Boolean(scene.removedAt)}
-                            onClick={() => openEditor('case', scene)}
-                          >
-                            新增用例
-                          </Button>
-                        )}
-                      </div>
-                      {rows.map((asset) => (
-                        <div className="case-row" key={asset.id}>
-                          <Checkbox
-                            aria-label={`选择${asset.title}`}
-                            disabled={!tester || Boolean(asset.removedAt)}
-                            checked={selectedKeys.includes(asset.id)}
-                            onChange={(e) =>
-                              setSelectedKeys((keys) =>
-                                e.target.checked
-                                  ? [...keys, asset.id]
-                                  : keys.filter((id) => id !== asset.id),
-                              )
-                            }
-                          />
-                          <div className="grow">
-                            <h3>{asset.title}</h3>
-                            <p>
-                              {asset.id} · 编辑 r{asset.revisionNo}
-                              {'steps' in asset.content
-                                ? ` · ${asset.content.steps.length} 个请求`
-                                : ''}
-                              {asset.removedAt ? ' · 已移除，历史保留' : ''}
-                            </p>
-                          </div>
-                          <span
-                            className={`badge ${reviewTones[asset.reviewState]}`}
-                          >
-                            {reviewLabels[asset.reviewState]}
-                          </span>
-                          <Button
-                            size="small"
-                            onClick={() => selectAsset(asset)}
-                          >
-                            查看
-                          </Button>
-                          {tester &&
-                            asset.reviewState !== 'approved' &&
-                            !asset.removedAt && (
-                              <Button
-                                size="small"
-                                onClick={() => void startPreview([asset.id])}
-                              >
-                                通过
-                              </Button>
-                            )}
-                        </div>
-                      ))}
-                      {!rows.length && (
-                        <div className="case-row">
-                          <p className="caption">
-                            此场景在当前筛选下暂无具体用例，场景本身仍独立保留。
-                          </p>
-                        </div>
+                <div className="context-controls">
+                  <Select
+                    aria-label="用例需求范围"
+                    value={
+                      scope
+                        ? selectedRequirement
+                          ? scope.requirementId
+                          : null
+                        : 'all'
+                    }
+                    placeholder="当前历史需求未在浏览目录中"
+                    onChange={selectRequirement}
+                    options={[
+                      { value: 'all', label: '全部需求' },
+                      ...navigation.requirements.map((r) => ({
+                        value: r.id,
+                        label: r.title + (r.archived ? '（已归档）' : ''),
+                      })),
+                    ]}
+                    style={{ width: 190 }}
+                  />
+                  {scope && (
+                    <Select
+                      aria-label="用例需求版本"
+                      value={scopeExists ? scope.requirementVersionId : null}
+                      placeholder="版本未在浏览目录中"
+                      disabled={!selectedRequirement}
+                      onChange={selectVersion}
+                      options={(selectedRequirement?.versions ?? []).map(
+                        (v) => ({
+                          value: v.id,
+                          label: `v${v.versionNo} · ${v.caseCount} 条用例`,
+                        }),
                       )}
-                    </section>
-                  );
-                })}
-              {!scenarios.length && (
-                <div className="card pad">
-                  <Empty description="此范围尚无场景或用例。UI 与接口资产各自维护。" />
+                      style={{ width: 130 }}
+                    />
+                  )}
+                  <Select
+                    aria-label="生成批次"
+                    value={batchId}
+                    onChange={(id) => {
+                      setBatchId(id);
+                      setSelectedKeys([]);
+                      setSelectedId(null);
+                    }}
+                    options={[
+                      { value: 'all', label: '全部批次' },
+                      ...batches.map((b) => ({
+                        value: b.id,
+                        label: b.title + (b.removedAt ? '（已移除）' : ''),
+                      })),
+                    ]}
+                    style={{ width: 170 }}
+                  />
+                  <Button
+                    size="small"
+                    icon={<ReloadOutlined />}
+                    loading={loading}
+                    onClick={() => void load()}
+                    aria-label="刷新资产"
+                  />
                   {tester && (
-                    <div className="row mt">
-                      <Button
-                        disabled={!scope || !batch}
-                        type="primary"
-                        onClick={() => openEditor('scenario')}
-                      >
-                        创建场景
-                      </Button>
-                    </div>
+                    <Button
+                      size="small"
+                      disabled={!scope || !scopeExists}
+                      onClick={() => openEditor('set')}
+                    >
+                      新建批次
+                    </Button>
                   )}
                 </div>
+              </div>
+              <div className="toolbar mb asset-toolbar">
+                <Input
+                  className="searchbox"
+                  aria-label="搜索用例"
+                  placeholder="搜索场景或用例"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  allowClear
+                />
+                <Select
+                  aria-label="评审状态筛选"
+                  value={reviewFilter}
+                  onChange={(value) => {
+                    setReviewFilter(value);
+                    const query = new URLSearchParams(
+                      window.location.hash.split('?')[1],
+                    );
+                    if (value === 'all') query.delete('review');
+                    else query.set('review', value);
+                    window.history.replaceState(
+                      null,
+                      '',
+                      `${window.location.pathname}${window.location.search}#cases${query.size ? '?' + query.toString() : ''}`,
+                    );
+                  }}
+                  options={[
+                    { value: 'all', label: '全部评审状态' },
+                    { value: 'unapproved', label: '全部待评审' },
+                    ...Object.entries(reviewLabels).map(([value, label]) => ({
+                      value,
+                      label,
+                    })),
+                  ]}
+                  style={{ minWidth: 128 }}
+                />
+                <span className="grow" />
+                <Button
+                  size="small"
+                  disabled={!batch}
+                  onClick={() => batch && setSelectedId(batch.id)}
+                >
+                  测试集意见
+                </Button>
+                <Button
+                  size="small"
+                  type="primary"
+                  disabled={!tester || !selectedKeys.length}
+                  loading={previewLoading}
+                  onClick={() => void startPreview(selectedKeys)}
+                >
+                  预览通过已选 {selectedKeys.length} 项
+                </Button>
+              </div>
+              {batch && (
+                <div className="batch-note mb">
+                  <div className="between">
+                    <div>
+                      <b className="small">
+                        {batch.title} · {reviewLabels[batch.reviewState]}
+                      </b>
+                      <p className="caption">
+                        本批有效对象 {batchMembers.length} 项，当前通过{' '}
+                        {
+                          batchMembers.filter(
+                            (a) => a.reviewState === 'approved',
+                          ).length
+                        }{' '}
+                        项；上层意见以批准预览判断，旧批准快照独立保留。
+                      </p>
+                    </div>
+                    <Button
+                      size="small"
+                      disabled={!tester || Boolean(batch.removedAt)}
+                      loading={previewLoading}
+                      onClick={() =>
+                        void startPreview(batchMembers.map((a) => a.id))
+                      }
+                    >
+                      预览整批对象
+                    </Button>
+                  </div>
+                </div>
               )}
-            </>
-          )}
-          <div className="between mt">
-            <p className="caption">
-              当前 {cases.length} 条 · 已选择 {selectedKeys.length}{' '}
-              条。不同批次独立评审；生成入口进入真实 AI 工作台后明确范围。
-            </p>
-            <Checkbox
-              checked={includeRemoved}
-              onChange={(e) => setIncludeRemoved(e.target.checked)}
-            >
-              包含已移除历史
-            </Checkbox>
+              {loading ? (
+                <Skeleton active />
+              ) : !scopeExists || error ? (
+                <div className="card pad">
+                  <Empty
+                    description={
+                      error
+                        ? '资产尚未读取成功。'
+                        : includeArchivedRequirements
+                          ? '此需求版本不在当前项目目录，请重新选择范围。'
+                          : '此需求版本当前未展示，可开启“已归档需求”或另选范围。'
+                    }
+                  />
+                </div>
+              ) : (
+                <>
+                  {scenarios
+                    .filter(
+                      (scene) =>
+                        !keyword ||
+                        cases.some((c) => c.parentId === scene.id) ||
+                        scene.title.toLocaleLowerCase().includes(keyword),
+                    )
+                    .map((scene) => {
+                      const rows = cases.filter((c) => c.parentId === scene.id);
+                      const requirement = navigation.requirements.find((r) =>
+                        r.versions.some(
+                          (v) => v.id === scene.requirementVersionId,
+                        ),
+                      );
+                      return (
+                        <section className="card scene-card" key={scene.id}>
+                          <div className="scene-summary">
+                            <AppIcon name="folder-closed" />
+                            <div className="grow">
+                              <h3>{scene.title}</h3>
+                              <p>
+                                {requirement?.title ?? '原需求未取得'} ·{' '}
+                                {batches.find((b) => b.id === scene.setId)
+                                  ?.title ?? '原批次'}{' '}
+                                · {rows.length} 条当前筛选用例
+                              </p>
+                            </div>
+                            <span
+                              className={`badge ${reviewTones[scene.reviewState]}`}
+                            >
+                              {reviewLabels[scene.reviewState]}
+                            </span>
+                            <Button
+                              size="small"
+                              onClick={() => selectAsset(scene)}
+                            >
+                              场景意见
+                            </Button>
+                            {tester && (
+                              <Button
+                                size="small"
+                                disabled={!scope || Boolean(scene.removedAt)}
+                                onClick={() => openEditor('case', scene)}
+                              >
+                                新增用例
+                              </Button>
+                            )}
+                          </div>
+                          {rows.map((asset) => (
+                            <div className="case-row" key={asset.id}>
+                              <Checkbox
+                                aria-label={`选择${asset.title}`}
+                                disabled={!tester || Boolean(asset.removedAt)}
+                                checked={selectedKeys.includes(asset.id)}
+                                onChange={(e) =>
+                                  setSelectedKeys((keys) =>
+                                    e.target.checked
+                                      ? [...keys, asset.id]
+                                      : keys.filter((id) => id !== asset.id),
+                                  )
+                                }
+                              />
+                              <div className="grow">
+                                <h3>{asset.title}</h3>
+                                <p>
+                                  {asset.id} · 编辑 r{asset.revisionNo}
+                                  {'dslVersion' in asset.content
+                                    ? ` · ${asset.content.steps.length} 个请求`
+                                    : ''}
+                                  {asset.removedAt ? ' · 已移除，历史保留' : ''}
+                                </p>
+                              </div>
+                              <span
+                                className={`badge ${reviewTones[asset.reviewState]}`}
+                              >
+                                {reviewLabels[asset.reviewState]}
+                              </span>
+                              <Button
+                                size="small"
+                                onClick={() => selectAsset(asset)}
+                              >
+                                查看
+                              </Button>
+                              {tester &&
+                                asset.reviewState !== 'approved' &&
+                                !asset.removedAt && (
+                                  <Button
+                                    size="small"
+                                    onClick={() =>
+                                      void startPreview([asset.id])
+                                    }
+                                  >
+                                    通过
+                                  </Button>
+                                )}
+                            </div>
+                          ))}
+                          {!rows.length && (
+                            <div className="case-row">
+                              <p className="caption">
+                                此场景在当前筛选下暂无具体用例，场景本身仍独立保留。
+                              </p>
+                            </div>
+                          )}
+                        </section>
+                      );
+                    })}
+                  {!scenarios.length && (
+                    <div className="card pad">
+                      <Empty description="此范围尚无场景或用例。UI 与接口资产各自维护。" />
+                      {tester && (
+                        <div className="row mt">
+                          <Button
+                            disabled={!scope || !batch}
+                            type="primary"
+                            onClick={() => openEditor('scenario')}
+                          >
+                            创建场景
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+              <div className="between mt">
+                <p className="caption">
+                  当前 {cases.length} 条 · 已选择 {selectedKeys.length}{' '}
+                  条。不同批次独立评审；生成入口进入真实 AI 工作台后明确范围。
+                </p>
+                <Checkbox
+                  checked={includeRemoved}
+                  onChange={(e) => setIncludeRemoved(e.target.checked)}
+                >
+                  包含已移除历史
+                </Checkbox>
+              </div>
+            </section>
           </div>
-        </section>
+        </div>
       </div>
       <Drawer
         open={selectedId !== null}

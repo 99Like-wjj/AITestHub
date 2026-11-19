@@ -61,6 +61,7 @@ interface ConfigurationFields {
   active: boolean;
   baseUrls: Pair[];
   variables: Pair[];
+  allowApiRegressionQualification: boolean;
   headers: Pair[];
   authenticationMode: 'token' | 'login';
   destinationLocation: 'header' | 'cookie' | 'query';
@@ -130,6 +131,8 @@ export function configurationFromFields(
       ...base,
       baseUrls: record(fields.baseUrls, '服务地址'),
       variables: record(fields.variables, '公共变量'),
+      allowApiRegressionQualification:
+        fields.allowApiRegressionQualification === true,
     });
   if (kind === 'purpose' || kind === 'account')
     return testConfigurationContentSchema.parse({ kind, ...base });
@@ -199,6 +202,7 @@ function initialFields(
     active: content?.active ?? true,
     baseUrls: [],
     variables: [],
+    allowApiRegressionQualification: false,
     headers: [],
     authenticationMode: 'token' as const,
     destinationLocation: 'header' as const,
@@ -218,6 +222,8 @@ function initialFields(
       ...base,
       baseUrls: pairs(content.baseUrls),
       variables: pairs(content.variables),
+      allowApiRegressionQualification:
+        content.allowApiRegressionQualification === true,
     };
   if (content.kind === 'binding') return { ...base, ...content };
   if (content.kind === 'databaseConnection') return { ...base, ...content };
@@ -562,6 +568,14 @@ function ConfigurationEditor({
           </Form.Item>
           {kind === 'environment' && (
             <>
+              <Form.Item
+                name="allowApiRegressionQualification"
+                valuePropName="checked"
+              >
+                <Checkbox disabled={pending}>
+                  允许在此环境验证接口回归资格
+                </Checkbox>
+              </Form.Item>
               <Typography.Title level={5}>服务地址</Typography.Title>
               <Typography.Paragraph type="secondary">
                 服务别名用于用例引用，例如

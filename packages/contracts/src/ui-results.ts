@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { reportExecutionScopeSchema, reportScopeItemSchema } from './ui-archives.js';
 import { reportHandlingSchema } from './report-handling.js';
 import {
 idSchema,
@@ -11,8 +12,6 @@ import {
 claimUiExecutionInputSchema,
 uiOutcomeSchema,
 evidenceManifestItemSchema,
-executionScopeSchema,
-scopeItemSchema,
 resultItemSchema,
 cleanupStateSchema,
 deliveryStatusSchema,
@@ -137,7 +136,7 @@ export const runStatusSchema = z.strictObject({
   ]),
   rowVersion: persistedRowVersionSchema,
   reportId: idSchema.nullable(),
-  scope: executionScopeSchema,
+  scope: reportExecutionScopeSchema,
 });
 export const resultDetailSchema = z.strictObject({
   result: z.strictObject({
@@ -197,10 +196,10 @@ export const reportFactsSchema = z.strictObject({
     'unknown',
     'platform-api',
   ]),
-  scope: executionScopeSchema,
+  scope: reportExecutionScopeSchema,
   items: z.array(
     z.strictObject({
-      scopeItem: scopeItemSchema,
+      scopeItem: reportScopeItemSchema,
       result: z
         .strictObject({
           id: idSchema,
@@ -313,6 +312,7 @@ export const executionRecordQuerySchema = z.strictObject({
   page: z.number().int().min(1).max(1000000).default(1),
   pageSize: z.number().int().min(1).max(100).default(20),
   kind: z.enum(['all', 'UI', 'API']).default('all'),
+  source: z.enum(['formal', 'archive']).default('formal'),
   state: runStateSchema.optional(),
   search: z.string().trim().max(200).default(''),
 });
@@ -322,7 +322,7 @@ export const executionRecordSchema = z.strictObject({
   reportRevisionId: idSchema.nullable(),
   name: z.string(),
   kind: z.enum(['UI', 'API']),
-  source: z.enum(['manual', 'scheduled', 'localUi', 'retest']),
+  source: z.enum(['manual', 'scheduled', 'localUi', 'retest','uiArchive']),
   state: runStateSchema,
   environment: z.strictObject({ id: idSchema, name: z.string() }),
   productBuild: z.string().nullable(),

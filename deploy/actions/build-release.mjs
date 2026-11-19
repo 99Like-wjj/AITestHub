@@ -210,7 +210,11 @@ export async function checkPrivateDestination(identity, token, allowMissing) {
     repository?.full_name?.toLowerCase(),
     identity.repository.toLowerCase(),
   );
-  assert.equal(repository?.private, true, 'RELEASE_REPOSITORY_MUST_BE_PRIVATE');
+  assert.equal(
+    typeof repository?.private,
+    'boolean',
+    'RELEASE_REPOSITORY_UNVERIFIED',
+  );
   assert.ok(['User', 'Organization'].includes(repository.owner?.type));
   const kind = repository.owner.type === 'Organization' ? 'orgs' : 'users';
   const entry = await githubJson(
@@ -218,6 +222,10 @@ export async function checkPrivateDestination(identity, token, allowMissing) {
     token,
   );
   if (!entry) {
+    assert.ok(
+      repository.private,
+      'EXISTING_PRIVATE_PACKAGE_REQUIRED_FOR_PUBLIC_SOURCE',
+    );
     assert.ok(allowMissing, 'RELEASE_PACKAGE_METADATA_REQUIRED');
   } else {
     assert.equal(
@@ -225,10 +233,11 @@ export async function checkPrivateDestination(identity, token, allowMissing) {
       'private',
       'RELEASE_PACKAGE_MUST_BE_PRIVATE',
     );
-    if (entry.repository) {
+    if (entry.repository || !repository.private) {
       assert.equal(
-        entry.repository.full_name.toLowerCase(),
+        entry.repository?.full_name?.toLowerCase(),
         identity.repository.toLowerCase(),
+        'RELEASE_PACKAGE_REPOSITORY_MISMATCH',
       );
     }
   }
@@ -299,8 +308,15 @@ if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href
 ) {
-  main().catch(() => {
-    process.stderr.write('ACTIONS_RELEASE_BUILD_REJECTED\n');
+  main().catch((error) => {
+    const reason =
+      error?.code === 'ERR_ASSERTION' &&
+      /^(?:RELEASE_[A-Z_]+|EXISTING_PRIVATE_PACKAGE_REQUIRED_FOR_PUBLIC_SOURCE)$/.test(
+        error.message,
+      )
+        ? `: ${error.message}`
+        : '';
+    process.stderr.write(`ACTIONS_RELEASE_BUILD_REJECTED${reason}\n`);
     process.exitCode = 1;
   });
 }

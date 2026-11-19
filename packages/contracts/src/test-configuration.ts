@@ -64,6 +64,7 @@ export const testConfigurationContentSchema = z.discriminatedUnion('kind', [
       .record(label, endpoint)
       .refine((urls) => Object.keys(urls).length > 0, '至少一个服务地址'),
     variables: z.record(label, z.string().max(10_000)),
+    allowApiRegressionQualification: z.boolean().optional(),
   }),
   z.strictObject({ kind: z.literal('purpose'), ...base }),
   z.strictObject({ kind: z.literal('account'), ...base }),

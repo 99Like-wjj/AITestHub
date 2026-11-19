@@ -1059,6 +1059,13 @@ export function RequirementsPage({
                   }))}
                   style={{ minWidth: 280 }}
                 />
+                {selectedVersion && (
+                  <Button
+                    href={`#issues?projectId=${project.id}&requirementId=${detail.requirement.id}&requirementVersion=${selectedVersion.id}`}
+                  >
+                    查看此版缺陷
+                  </Button>
+                )}
               </Space>
               {tester && (
                 <Button

@@ -55,6 +55,7 @@ interface Fields {
   preconditions: string;
   expected: string;
   testPoint: string;
+  steps: { action: string; expected?: string | undefined }[];
 }
 const lines = (value: string | undefined) =>
   (value ?? '')
@@ -160,6 +161,13 @@ export function AssetEditor({
             : '',
       expected: content && 'expected' in content ? content.expected : '',
       testPoint: content && 'testPoint' in content ? content.testPoint : '',
+      steps:
+        content &&
+        'kind' in content &&
+        content.kind === 'UI' &&
+        'steps' in content
+          ? (content.steps ?? [{ action: '' }])
+          : [{ action: '' }],
     });
     setBasis(content?.basisRefs ?? []);
     setApiDraft(
@@ -241,7 +249,15 @@ export function AssetEditor({
             base: { ...apiDraft.base, ...common },
           });
         } else
-          content = { kind: 'UI', scenarioId: target.scenarioId, ...common };
+          content = {
+            kind: 'UI',
+            scenarioId: target.scenarioId,
+            ...common,
+            steps: values.steps.map(({ action, expected }) => ({
+              action,
+              ...(expected?.trim() ? { expected } : {}),
+            })),
+          };
       }
       let body: unknown;
       let path: string;
@@ -517,10 +533,98 @@ export function AssetEditor({
               <Input.TextArea rows={3} disabled={pending || uncertain} />
             </Form.Item>
           )}
+          {target?.targetType === 'case' && target.kind === 'UI' && (
+            <Form.List
+              name="steps"
+              rules={[
+                {
+                  validator: async (_rule, steps: unknown) => {
+                    if (!Array.isArray(steps) || !steps.length)
+                      throw new Error('请至少添加一个业务步骤。');
+                  },
+                },
+              ]}
+            >
+              {(fields, { add, remove, move }, { errors }) => (
+                <section aria-label="业务步骤">
+                  <Typography.Title level={5}>业务步骤</Typography.Title>
+                  {fields.map(({ key, name, ...field }, index) => (
+                    <div key={key} className="panel pad mb">
+                      <Space wrap className="mb">
+                        <strong>步骤 {index + 1}</strong>
+                        <Button
+                          size="small"
+                          disabled={pending || uncertain || index === 0}
+                          onClick={() => move(index, index - 1)}
+                        >
+                          上移
+                        </Button>
+                        <Button
+                          size="small"
+                          disabled={
+                            pending || uncertain || index === fields.length - 1
+                          }
+                          onClick={() => move(index, index + 1)}
+                        >
+                          下移
+                        </Button>
+                        <Button
+                          size="small"
+                          danger
+                          disabled={pending || uncertain || fields.length === 1}
+                          onClick={() => remove(name)}
+                        >
+                          移除
+                        </Button>
+                      </Space>
+                      <Form.Item
+                        {...field}
+                        name={[name, 'action']}
+                        label="业务动作"
+                        rules={[
+                          {
+                            required: true,
+                            whitespace: true,
+                            message: '请输入需要执行的业务动作',
+                          },
+                        ]}
+                      >
+                        <Input.TextArea
+                          rows={2}
+                          disabled={pending || uncertain}
+                          maxLength={10000}
+                        />
+                      </Form.Item>
+                      <Form.Item
+                        {...field}
+                        name={[name, 'expected']}
+                        label="逐步预期（可选）"
+                      >
+                        <Input.TextArea
+                          rows={2}
+                          disabled={pending || uncertain}
+                          maxLength={10000}
+                        />
+                      </Form.Item>
+                    </div>
+                  ))}
+                  <Form.ErrorList errors={errors} />
+                  <Button
+                    className="mb"
+                    icon={<PlusOutlined />}
+                    disabled={pending || uncertain || fields.length >= 100}
+                    onClick={() => add({ action: '' })}
+                  >
+                    添加业务步骤
+                  </Button>
+                </section>
+              )}
+            </Form.List>
+          )}
           {target?.targetType === 'case' && (
             <Form.Item
               name="expected"
-              label="业务预期"
+              label="用例整体预期"
               rules={[
                 {
                   required: true,

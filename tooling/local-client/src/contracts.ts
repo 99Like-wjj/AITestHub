@@ -1,6 +1,7 @@
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/client/validators/cf-worker';
 import catalog from '../contracts/8869d4dc-bb5c-45fe-a8d1-98913be7bb01/catalog.json' with { type: 'json' };
 import components from '../contracts/8869d4dc-bb5c-45fe-a8d1-98913be7bb01/components.json' with { type: 'json' };
+import archives from '../contracts/ui-archive-v1.json' with { type: 'json' };
 import { localFailure } from './errors.js';
 
 export const contractArtifactId = '8869d4dc-bb5c-45fe-a8d1-98913be7bb01';
@@ -8,6 +9,7 @@ const engine = new CfWorkerJsonSchemaValidator();
 const inputSchemas = new Map<string, unknown>(
   catalog.tools.map((tool) => [tool.name, tool.inputSchema]),
 );
+inputSchemas.set('ath_ui_archives', archives.schemas.uiArchiveToolInputSchema);
 const cache = new Map<
   string,
   ReturnType<CfWorkerJsonSchemaValidator['getValidator']>

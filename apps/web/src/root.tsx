@@ -129,10 +129,10 @@ const pages = [
   { key: 'workspace', label: 'AI 工作台', icon: <AppIcon name="spark" /> },
   { key: 'overview', label: '项目概览', icon: <AppIcon name="grid" /> },
   { key: 'requirements', label: '需求管理', icon: <AppIcon name="file" /> },
-  { key: 'cases', label: '用例中心', icon: <AppIcon name="check" /> },
+  { key: 'cases', label: 'UI 用例管理', icon: <AppIcon name="check" /> },
   {
     key: 'api-regression',
-    label: '接口回归工作台',
+    label: '接口用例管理',
     icon: <AppIcon name="api" />,
   },
   { key: 'plans', label: '测试计划', icon: <AppIcon name="calendar" /> },
@@ -191,6 +191,12 @@ function workspaceReturnHash(value: string | null) {
 function readPage() {
   const candidate =
     window.location.hash.replace(/^#\/?/, '').split('?')[0] ?? '';
+  if (
+    candidate === 'cases' &&
+    new URLSearchParams(window.location.hash.split('?')[1]).get('kind') ===
+      'API'
+  )
+    return 'api-regression';
   return pageKeys.has(candidate) ? candidate : 'workspace';
 }
 function readLinkedProjectId() {

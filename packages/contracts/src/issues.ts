@@ -124,12 +124,16 @@ export const lifecycleCommitInputSchema = z.strictObject({
   scopeDigest: z.string().regex(/^[a-f0-9]{64}$/),
   objectIds: uniqueIds.min(1),
 });
+export const issueResolutionSchema = z.enum(['fixed', 'notDefect', 'cannotReproduce']);
 export const singleIssueLifecycleInputSchema = z.strictObject({
   commandId: commandIdSchema,
   rowVersion: persistedRowVersionSchema,
   action: z.enum(['close', 'reopen']),
-  resolution: z.enum(['fixed', 'notDefect']).default('fixed'),
+  resolution: issueResolutionSchema.default('fixed'),
   note: z.string().max(10_000).default(''),
+}).refine((input) => input.action !== 'close' || input.resolution === 'fixed' || Boolean(input.note.trim()), {
+  path: ['note'],
+  message: '按非缺陷或无法复现关闭时，请填写实际依据。',
 });
 export const mergeIssuesInputSchema = z.strictObject({
   commandId: commandIdSchema,
@@ -148,6 +152,7 @@ export const issueListQuerySchema = z.strictObject({
   participationOnly: z.boolean().default(true),
   includeArchivedRequirements: z.boolean().default(true),
   requirementId: idSchema.optional(),
+  requirementVersion: z.union([idSchema,z.literal('unspecified')]).optional(),
   state: issueStateSchema.optional(),
   severity: issueSeveritySchema.optional(),
   assigneeId: idSchema.optional(),
@@ -217,7 +222,9 @@ export type Issue = z.infer<typeof issueSchema>;
 export const problemListQuerySchema = z.strictObject({
   state: problemStateSchema.optional(),
   requirementId: idSchema.optional(),
+  requirementVersion: z.union([idSchema,z.literal('unspecified')]).optional(),
   runId: idSchema.optional(),
+  decidedOnly: z.boolean().optional(),
   participationOnly: z.boolean().default(true),
   includeArchivedRequirements: z.boolean().default(true),
   search: z.string().max(200).default(''),

@@ -1,0 +1,125 @@
+.ui-review-layout {
+  display: grid;
+  grid-template-columns: minmax(165px, 1fr) minmax(270px, 2fr) minmax(
+      235px,
+      1.4fr
+    );
+  align-items: start;
+  gap: 14px;
+}
+.ui-review-layout > * {
+  min-width: 0;
+}
+.ui-review-layout h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+.ui-review-layout h3 {
+  margin: 9px 0;
+  font-size: 13px;
+}
+.ui-review-stages {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.ui-review-stages > div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+.ui-review-stages small,
+.ui-review-entry small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+}
+.ui-review-entry {
+  display: block;
+  width: 100%;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  padding: 8px;
+  cursor: pointer;
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+.ui-review-entry:hover,
+.ui-review-entry.selected,
+.ui-review-stages .selected {
+  background: var(--accent-soft);
+  border-color: var(--line);
+}
+.ui-review-case-text {
+  margin: 12px 0;
+}
+.ui-review-case-text dt {
+  margin-top: 12px;
+  font-weight: 650;
+}
+.ui-review-case-text dd {
+  margin: 3px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ui-review-case-text ol {
+  margin: 7px 0;
+  padding-inline-start: 22px;
+}
+.ui-review-case-text li {
+  margin-bottom: 6px;
+}
+.ui-review-opinion {
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  padding: 10px;
+  border-radius: 8px;
+}
+.ui-review-opinion-form {
+  display: grid;
+  gap: 8px;
+}
+.ui-review-start-list {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 12px;
+}
+.ui-review-diff {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+.ui-review-diff summary {
+  cursor: pointer;
+}
+.ui-review-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.ui-review-compare pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+}
+@media (max-width: 1100px) {
+  .ui-review-layout {
+    grid-template-columns: minmax(150px, 0.75fr) minmax(0, 1.6fr);
+  }
+  .ui-review-layout > :last-child {
+    grid-column: 2;
+  }
+}
+@media (max-width: 730px) {
+  .ui-review-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ui-review-layout > :last-child {
+    grid-column: auto;
+  }
+}
