@@ -15,6 +15,7 @@ import {
   createIssueInputSchema,
   issueEditInputSchema,
   confirmProblemInputSchema,
+  webConfirmProblemInputSchema,
   issueResponseSchema,
   problemConfirmationReceiptSchema,
   issueListResponseSchema,
@@ -27,13 +28,22 @@ import {
   singleIssueLifecycleInputSchema,
   issueDetailSchema,
 } from '../../../packages/contracts/src/issues';
-import type { Issue, Problem } from '../../../packages/contracts/src/issues';
+import type {
+  Issue,
+  Problem,
+  ReportProblemReviewScope,
+} from '../../../packages/contracts/src/issues';
 import type { Project } from './types';
 import type { IssueNavigation, IssueMember } from './issue-context';
 import { issueStateLabels, severityLabels } from './issue-context';
 import { api, describeError } from './api';
 import { CommandDialog, useBusinessCommand } from './business-command';
 import { ProjectAttachments } from './project-attachments';
+import { ReviewImageAttachments } from './review-image-attachments';
+import {
+  ReportReceiptControl,
+  useReportCommandRecovery,
+} from './report-command-recovery';
 
 interface IssueFields {
   title: string;
@@ -45,6 +55,7 @@ interface IssueFields {
   resultIds: string[];
   target: 'new' | 'existing';
   existingIssueId: string;
+  reviewNote: string;
   note: string;
   scopeDescription: string;
   outcome: 'passed' | 'failed';
@@ -164,6 +175,7 @@ export function IssueEditor({
   target,
   requirements,
   members,
+  reportReview,
   onClose,
   onSaved,
 }: {
@@ -171,6 +183,7 @@ export function IssueEditor({
   target: EditorTarget | null;
   requirements: IssueNavigation;
   members: IssueMember[];
+  reportReview?: ReportProblemReviewScope;
   onClose: () => void;
   onSaved: (issue: Issue) => Promise<void>;
 }) {
@@ -180,6 +193,13 @@ export function IssueEditor({
   const [query, setQuery] = useState('');
   const [existing, setExisting] = useState<Issue[]>([]);
   const [chosen, setChosen] = useState<Issue | null>(null);
+  const [reviewImages, setReviewImages] = useState<string[]>([]);
+  const [imagesBusy, setImagesBusy] = useState(false);
+  const recovery = useReportCommandRecovery(
+    project.id,
+    'problems.confirm',
+    reportReview && target?.kind === 'confirm' ? target.problem.id : null,
+  );
   const choice = Form.useWatch('target', form) as
     IssueFields['target'] | undefined;
   useEffect(() => {
@@ -189,6 +209,8 @@ export function IssueEditor({
     setChosen(null);
     setQuery('');
     setExisting([]);
+    setReviewImages([]);
+    setImagesBusy(false);
     const basis =
       target.kind === 'edit'
         ? target.issue
@@ -213,6 +235,7 @@ export function IssueEditor({
       assigneeId: target.kind === 'edit' ? target.issue.assigneeId : null,
       resultIds: [],
       target: 'new',
+      reviewNote: '',
     });
   }, [target, form]);
   useEffect(() => {
@@ -242,22 +265,33 @@ export function IssueEditor({
     };
   }, [target?.session, choice, query, project.id]);
   async function save(values: IssueFields) {
-    if (!target) return;
+    if (!target || imagesBusy || recovery.commandId) return;
     const response = await command.run(async (commandId) => {
       if (target.kind === 'confirm') {
         let body: unknown;
+        const fields = reportReview
+          ? {
+              reportReview,
+              reviewNote: values.reviewNote ?? '',
+              reviewAttachmentFileIds: reviewImages,
+            }
+          : {};
+        const schema = reportReview
+          ? webConfirmProblemInputSchema
+          : confirmProblemInputSchema;
         if (values.target === 'existing') {
           if (!chosen || chosen.id !== values.existingIssueId)
             throw new Error('请搜索并明确选择现有正式缺陷；不会猜测目标版本。');
-          body = confirmProblemInputSchema.parse({
+          body = schema.parse({
             target: 'existing',
             commandId,
             rowVersion: target.problem.rowVersion,
             issueId: chosen.id,
             issueRowVersion: chosen.rowVersion,
+            ...fields,
           });
         } else
-          body = confirmProblemInputSchema.parse({
+          body = schema.parse({
             target: 'new',
             commandId,
             rowVersion: target.problem.rowVersion,
@@ -267,13 +301,16 @@ export function IssueEditor({
             description: values.description,
             severity: values.severity,
             assigneeId: values.assigneeId ?? null,
+            ...fields,
           });
-        return (
-          await api(
+        const request = () =>
+          api(
             `/projects/${project.id}/problems/${target.problem.id}/confirm`,
             { method: 'POST', body },
             problemConfirmationReceiptSchema,
-          )
+          );
+        return (
+          await (reportReview ? recovery.send(commandId, request) : request())
         ).issue;
       }
       if (target.kind === 'edit')
@@ -322,6 +359,22 @@ export function IssueEditor({
       onClose();
     }
   }
+  function recover() {
+    if (target?.kind !== 'confirm' || !recovery.commandId) return;
+    const original = recovery.commandId;
+    void recovery.check(
+      problemConfirmationReceiptSchema,
+      async (response) => {
+        if (response.problem.id !== target.problem.id)
+          throw new Error('原确认回执不属于当前候选。');
+        command.confirmRecoveredReceipt();
+        setDirty(false);
+        await onSaved(response.issue);
+        onClose();
+      },
+      () => command.closeRecoveredReceipt(original),
+    );
+  }
   const existingOptions = existing.map((row) => ({
     value: row.id,
     label: `${row.number} · ${row.title} · v${row.rowVersion}`,
@@ -334,6 +387,7 @@ export function IssueEditor({
   return (
     <CommandDialog
       open={target !== null}
+      inline={!!reportReview}
       title={
         target?.kind === 'confirm'
           ? target.problem.state === 'dismissed'
@@ -344,18 +398,32 @@ export function IssueEditor({
             : '手工创建正式缺陷'
       }
       command={command}
-      dirty={dirty}
+      dirty={dirty || reviewImages.length > 0}
+      busy={imagesBusy}
+      allowSave={!recovery.commandId}
       onClose={onClose}
       onSave={() => form.submit()}
       saveLabel={
-        target?.kind === 'confirm' ? '明确确认此关联/正式缺陷' : '保存正式缺陷'
+        target?.kind === 'confirm'
+          ? reportReview
+            ? '确认缺陷'
+            : '明确确认此关联/正式缺陷'
+          : '保存正式缺陷'
       }
     >
+      {reportReview && (
+        <ReportReceiptControl recovery={recovery} onCheck={recover} />
+      )}
       <Alert
         type="info"
         showIcon
         title="正式缺陷、原始结果与人工最终结论独立"
-        description="手工缺陷必须关联正式需求，可不指定需求版本或用例。创建/确认不重写测试事实，负责人可空；不自动加入需求、执行复测或关闭。"
+        {...(!reportReview
+          ? {
+              description:
+                '手工缺陷必须关联正式需求，可不指定需求版本或用例。创建/确认不重写测试事实，负责人可空；不自动加入需求、执行复测或关闭。',
+            }
+          : {})}
         className="section-alert"
       />
       {target?.kind === 'confirm' && target.problem.state === 'dismissed' && (
@@ -463,6 +531,43 @@ export function IssueEditor({
               </Form.Item>
             )}
           </>
+        )}
+        {reportReview && target?.kind === 'confirm' && (
+          <ReviewImageAttachments
+            projectId={project.id}
+            runId={target.problem.runId}
+            disabled={command.pending || Boolean(recovery.commandId)}
+            value={reviewImages}
+            onChange={setReviewImages}
+            onBusyChange={setImagesBusy}
+          >
+            {target.problem.state === 'dismissed' && (
+              <Typography.Text type="secondary">
+                改判需说明依据，并提交新截图或使用更新后的采集修订。
+              </Typography.Text>
+            )}
+            <Form.Item
+              name="reviewNote"
+              label="复核说明"
+              rules={
+                reviewImages.length > 0 || target.problem.state === 'dismissed'
+                  ? [
+                      {
+                        required: true,
+                        whitespace: true,
+                        message: '请记录现场、复核或改判依据。',
+                      },
+                    ]
+                  : []
+              }
+            >
+              <Input.TextArea
+                rows={3}
+                maxLength={10000}
+                disabled={command.pending || Boolean(recovery.commandId)}
+              />
+            </Form.Item>
+          </ReviewImageAttachments>
         )}
       </Form>
     </CommandDialog>

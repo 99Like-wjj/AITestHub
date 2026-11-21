@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { reportExecutionScopeSchema, reportScopeItemSchema } from './ui-archives.js';
 import { reportHandlingSchema } from './report-handling.js';
+import { reportProblemReviewScopeSchema } from './issues.js';
 import {
 idSchema,
 commandIdSchema,
@@ -104,6 +105,9 @@ export const finalAssessmentInputSchema = z.strictObject({
   baseAssessmentRevisionId: idSchema.nullable(),
   finalOutcome: uiOutcomeSchema,
   reason: z.string().max(10_000),
+});
+export const webFinalAssessmentInputSchema = finalAssessmentInputSchema.extend({
+  reportReview: reportProblemReviewScopeSchema.optional(),
 });
 export const supplementaryEvidenceInputSchema = z.strictObject({
   commandId: commandIdSchema,
@@ -282,6 +286,7 @@ export const reportDetailSchema = z.strictObject({
     revisionId: idSchema,
     facts: reportFactsSchema,
     currentHandling: reportHandlingSchema,
+    canReview: z.boolean().optional(),
     history: z.array(
       z.strictObject({
         id: idSchema,

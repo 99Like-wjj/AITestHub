@@ -55,25 +55,14 @@ export async function assertResultEvidenceScope(
   runId: string,
   item: z.infer<typeof resultItemSchema>,
 ) {
-  const observations = item.stepObservations ?? [];
+  assertResultStepEvidenceReferences(item);
   const ordinals = [
-    ...observations.map((step) => step.ordinal),
+    ...(item.stepObservations ?? []).map((step) => step.ordinal),
     ...(item.evidenceGaps ?? []).flatMap((gap) =>
       gap.ordinal === undefined ? [] : [gap.ordinal],
     ),
   ];
   if (!ordinals.length) return;
-  const declared = new Set(item.evidenceRefs);
-  if (
-    observations.some((step) =>
-      step.evidenceRefs.some((ref) => !declared.has(ref)),
-    )
-  )
-    throw new DomainError(
-      'VALIDATION_ERROR',
-      '步骤证据须引用同一结果已声明的证据。',
-      422,
-    );
   const scope = await readResultScope(tx, projectId, runId, item.runItemId);
   if (
     !scope ||
@@ -83,6 +72,23 @@ export async function assertResultEvidenceScope(
     throw new DomainError(
       'VALIDATION_ERROR',
       '步骤观察须定位到此执行项的冻结 UI 用例步骤。',
+      422,
+    );
+}
+
+/** An independent archive may record observed steps without claiming a frozen testcase. */
+export function assertResultStepEvidenceReferences(
+  item: z.infer<typeof resultItemSchema>,
+) {
+  const declared = new Set(item.evidenceRefs);
+  if (
+    item.stepObservations?.some((step) =>
+      step.evidenceRefs.some((ref) => !declared.has(ref)),
+    )
+  )
+    throw new DomainError(
+      'VALIDATION_ERROR',
+      '步骤证据须引用同一结果已声明的证据。',
       422,
     );
 }

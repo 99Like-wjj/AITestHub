@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
+import { ArrowLeftOutlined } from '@ant-design/icons';
 import {
   Alert,
   Button,
   Card,
   Collapse,
   Descriptions,
-  Modal,
   Empty,
   Form,
   Input,
@@ -13,7 +13,6 @@ import {
   Skeleton,
   Space,
   Table,
-  Tabs,
   Tag,
   Typography,
 } from 'antd';
@@ -26,21 +25,16 @@ import {
   resultReceiptStatusSchema,
 } from '../../../packages/contracts/src/ui-results';
 import { api, ApiError, describeError } from './api';
-import { ResultDetailPanel, outcomeLabels } from './result-detail';
+import { ResultDetailPanel } from './result-detail';
+import { ReportWorkbench } from './report-workbench';
+import './report-workbench.css';
 import { EvidenceViewer } from './evidence-viewer';
-import { EvidenceGallery } from './evidence-gallery';
 import type { EvidenceGalleryItem } from './evidence-gallery';
 import type { Project } from './types';
 import { PageHeading } from './page-heading';
 import { ExecutionRecords } from './execution-records';
 import { UiArchiveDialog } from './ui-archive-dialog';
-import {
-  ArchiveFindingDialog,
-  type ArchiveFinding,
-} from './archive-finding-dialog';
-import { ReportHandlingPanel } from './report-handling-panel';
 import { UiDeliveryPanel } from './ui-delivery-panel';
-import { uiLayers } from './ui-layers';
 import {
   currentIdentityOwner,
   identityContextEpoch,
@@ -54,37 +48,6 @@ import {
 } from './report-recovery-query';
 
 type Report = z.infer<typeof reportDetailSchema>['report'];
-const executionLabels: Record<string, string> = {
-  prepared: '已准备',
-  queued: '排队中',
-  running: '执行中',
-  stopping: '终止中',
-  completed: '已完成',
-  terminated: '已终止',
-  interrupted: '已中断',
-  recoveryRequired: '需核对恢复',
-};
-const deliveryLabels: Record<string, string> = {
-  notSubmitted: '尚未提交',
-  receiving: '接收中',
-  incomplete: '待补传',
-  complete: '完整',
-};
-const cleanupLabels: Record<string, string> = {
-  notConfigured: '未配置',
-  pending: '待清理',
-  running: '清理中',
-  succeeded: '清理成功',
-  failed: '清理失败',
-  skipped: '已跳过',
-  interrupted: '清理中断',
-};
-const originLabels: Record<string, string> = {
-  'protocol-synthetic': '合成协议结果（不是本地UI真实执行）',
-  'local-ai': '用户本地 AI 执行',
-  'platform-api': '平台接口执行',
-  unknown: '来源未核实',
-};
 const reportReasons: Record<string, string> = {
   'result-submission': '结果提交',
   'manual-export': '手动导出',
@@ -109,7 +72,6 @@ function reportRevisionFromUrl() {
   const parsed = idSchema.safeParse(query.get('revisionId'));
   return parsed.success ? parsed.data : 'current';
 }
-
 function issueReturnLink(query: URLSearchParams, projectId: string) {
   const issueId = idSchema.safeParse(query.get('fromIssueId'));
   const path = query.get('returnTo');
@@ -126,8 +88,6 @@ function issueReturnLink(query: URLSearchParams, projectId: string) {
   return undefined;
 }
 
-type ReportFilter = 'all' | 'failed' | 'gaps';
-
 export function ResultsPage({
   project,
   userId,
@@ -137,7 +97,6 @@ export function ResultsPage({
 }) {
   const [recordsVersion, setRecordsVersion] = useState(0);
   const [archiveOpen, setArchiveOpen] = useState(false);
-  const [archiveFinding, setArchiveFinding] = useState<ArchiveFinding>();
   const [lookupOpen, setLookupOpen] = useState(() =>
     Boolean(
       new URLSearchParams(window.location.hash.split('?')[1]).get('runId'),
@@ -166,7 +125,6 @@ export function ResultsPage({
     linked?: boolean;
   } | null>(null);
   const [preview, setPreview] = useState<EvidenceGalleryItem | null>(null);
-  const [reportFilter, setReportFilter] = useState<ReportFilter>('all');
   const [lookupForm] = Form.useForm<{
     kind: ReportRecoveryKind;
     id: string;
@@ -251,7 +209,6 @@ export function ResultsPage({
     clearLookup();
     return () => lookupGuard.current.invalidate();
   }, [project?.id, userId]);
-  useEffect(() => setReportFilter('all'), [reportId, revisionId]);
   useEffect(() => subscribeIdentityChanges(clearLookup), []);
   useEffect(() => {
     function update() {
@@ -408,8 +365,14 @@ export function ResultsPage({
     }
   }
   function openReport(id: string) {
-    if (project)
-      window.location.hash = `reports?projectId=${project.id}&reportId=${id}`;
+    if (project) {
+      const params = new URLSearchParams({
+        projectId: project.id,
+        reportId: id,
+      });
+      if (!initialReportId()) params.set('reportsBack', window.location.hash);
+      window.location.hash = `reports?${params}`;
+    }
   }
   async function exportReport() {
     if (!project || !reportId || exporting) return;
@@ -468,791 +431,381 @@ export function ResultsPage({
     revisionId === 'current'
       ? (report?.facts ?? null)
       : (historical?.facts ?? null);
-  const evidenceByRef = new Map(
-    facts?.evidence.map((row) => [row.localEvidenceId, row]),
-  );
-  const missingFileIds = new Set(facts?.missingFileIds);
-  const visibleItems = (facts?.items ?? []).filter(({ result }) => {
-    if (reportFilter === 'all') return true;
-    if (reportFilter === 'failed') return result?.effectiveOutcome === 'failed';
-    return (
-      !!result &&
-      (result.effectiveOutcome === 'inconclusive' ||
-        !!result.content.evidenceGaps?.length ||
-        result.content.evidenceRefs.some((ref) => {
-          const evidence = evidenceByRef.get(ref);
-          return !evidence || missingFileIds.has(evidence.fileId);
-        }))
-    );
-  });
-  const recordedGaps =
-    facts?.items.reduce(
-      (count, row) => count + (row.result?.content.evidenceGaps?.length ?? 0),
-      0,
-    ) ?? 0;
-  const currentHandling = [report?.currentHandling, historical?.currentHandling]
-    .filter((value): value is NonNullable<typeof value> => Boolean(value))
-    .sort((a, b) => Date.parse(b.capturedAt) - Date.parse(a.capturedAt))[0];
   if (!project)
     return <Empty description="请选择当前有效项目后查看执行与报告。" />;
+  const explicitResult = idSchema.safeParse(
+    new URLSearchParams(window.location.hash.split('?')[1]).get('resultId'),
+  );
+  const standalone = !!reportId || explicitResult.success;
+  const hashParams = new URLSearchParams(window.location.hash.split('?')[1]);
+  const prior = hashParams.get('reportsBack');
+  const priorQuery = new URLSearchParams(prior?.split('?')[1]);
+  const returnHash =
+    prior?.startsWith('#reports?') &&
+    (!priorQuery.has('projectId') ||
+      priorQuery.get('projectId') === project.id) &&
+    !priorQuery.has('reportId') &&
+    !priorQuery.has('resultId')
+      ? `#reports?${priorQuery}`
+      : `#reports?${new URLSearchParams({ projectId: project.id })}`;
+  const detailPanel = () => (
+    <ResultDetailPanel
+      project={project}
+      {...(visibleResult?.kind ? { executionKind: visibleResult.kind } : {})}
+      inline={standalone}
+      readOnly={!!visibleResult?.revisionId}
+      resultId={visibleResult?.id ?? null}
+      {...(visibleResult?.revisionId
+        ? { reportBasisRevisionId: visibleResult.revisionId }
+        : {})}
+      {...(visibleResult?.initialStep
+        ? { initialStep: visibleResult.initialStep }
+        : {})}
+      {...(visibleResult?.returnTo ? { returnTo: visibleResult.returnTo } : {})}
+      onClose={closeResult}
+      onChanged={async () => {
+        await loadReport();
+        load();
+      }}
+    />
+  );
+  function copyReportLink() {
+    if (!navigator.clipboard?.writeText) {
+      setReportNotice('当前浏览器未开放复制，请从地址栏复制当前报告链接。');
+      return;
+    }
+    const url = new URL(window.location.href);
+    const query = new URLSearchParams(url.hash.split('?')[1]);
+    query.delete('fromIssueId');
+    query.delete('returnTo');
+    query.delete('reportsBack');
+    url.hash = `reports?${query}`;
+    void navigator.clipboard
+      .writeText(url.toString())
+      .then(() => setReportNotice('链接已复制，打开时按当前账号权限读取。'))
+      .catch(() => setReportNotice('链接未能复制，请从地址栏复制当前链接。'));
+  }
   return (
-    <div className="results-page">
-      <PageHeading
-        eyebrow="EXECUTION & REPORTS"
-        title="执行与报告"
-        description="保留当轮范围、实际修订、业务结论与独立交付状态。"
-      />
-      {project.roles.includes('tester') && (
-        <div className="toolbar mb">
-          <Button onClick={() => setArchiveOpen(true)}>上传本地独立归档</Button>
-        </div>
-      )}
-      <UiArchiveDialog
-        key={project.id}
-        project={project}
-        open={archiveOpen}
-        onClose={() => setArchiveOpen(false)}
-        onSaved={(id) => {
-          setArchiveOpen(false);
-          setRecordsVersion((x) => x + 1);
-          openReport(id);
-        }}
-      />
-      <ArchiveFindingDialog
-        project={project}
-        finding={archiveFinding}
-        onClose={() => setArchiveFinding(undefined)}
-        onSaved={() => void loadReport()}
-      />
-      <ExecutionRecords
-        userId={userId}
-        project={project}
-        refreshKey={recordsVersion}
-        onReport={openReport}
-        onRun={(id) => {
-          setLookupOpen(true);
-          lookupForm.setFieldsValue({ kind: 'run', id });
-          void lookup({ kind: 'run', id });
-        }}
-      />
-      <Collapse
-        className="mt"
-        activeKey={lookupOpen ? ['original'] : []}
-        onChange={(keys) =>
-          setLookupOpen(Array.isArray(keys) && keys.includes('original'))
-        }
-        items={[
-          {
-            key: 'original',
-            label: '原轮次、结果或提交找回（只读）',
-            children: (
-              <Card title="执行、结果与交付完整性">
-                <Alert
-                  type="info"
-                  showIcon
-                  title="进度不等于结果，测试结论与交付完整性分别记录"
-                  description="平台本地UI执行能力只接收固定范围/进度/结果/证据，不从此页面唤醒本地AI或启动服务器UI执行器。合成协议提交必须保留来源标记。"
-                  className="section-alert"
-                />
-                <Form
-                  form={lookupForm}
-                  layout="inline"
-                  initialValues={{ kind: 'run' }}
-                  onValuesChange={clearLookup}
-                  onFinish={(values) => void lookup(values)}
-                >
-                  <Form.Item name="kind" label="只读查询">
+    <>
+      {standalone && (
+        <section className="report-workbench">
+          <header className="report-workbench-bar">
+            <div className="report-workbench-bar-left">
+              <img src="/brand-f-horizontal.png" alt="AITestHub" />
+              <Button
+                type="primary"
+                icon={<ArrowLeftOutlined />}
+                href={returnHash}
+              >
+                返回执行与报告
+              </Button>
+              <Typography.Text strong>
+                {reportId ? '测试报告' : '结果与证据'}
+              </Typography.Text>
+            </div>
+            <Typography.Text type="secondary">{project.name}</Typography.Text>
+          </header>
+          <main className="report-workbench-body">
+            {!contextMatches ? (
+              <Alert
+                type="warning"
+                showIcon
+                title="报告或结果链接属于当前无权读取的项目。"
+              />
+            ) : reportId ? (
+              <>
+                {report && (
+                  <div className="report-workbench-controls">
                     <Select
-                      style={{ minWidth: 150 }}
+                      aria-label="报告历史快照"
+                      value={revisionId}
+                      onChange={(id: string) => {
+                        const query = new URLSearchParams(
+                          window.location.hash.split('?')[1],
+                        );
+                        if (id !== 'current') query.set('revisionId', id);
+                        else {
+                          query.delete('revisionId');
+                          query.delete('resultRevisionId');
+                        }
+                        window.location.hash = `reports?${query}`;
+                      }}
                       options={[
-                        { value: 'run', label: '原执行轮次ID' },
-                        { value: 'result', label: '原结果ID' },
-                        { value: 'submission', label: '本人结果提交ID' },
+                        { value: 'current', label: '当前汇总' },
+                        ...report.history.map((row) => ({
+                          value: row.id,
+                          label: `历史 r${row.revisionNo} · ${new Date(row.createdAt).toLocaleString('zh-CN')} · ${reportReasons[row.reason] ?? '已保存快照'}`,
+                        })),
                       ]}
                     />
-                  </Form.Item>
-                  <Form.Item
-                    name="id"
-                    label="原UUID"
-                    rules={[{ required: true }]}
-                  >
-                    <Input
-                      placeholder="不创建/重放执行"
-                      style={{ minWidth: 290 }}
-                    />
-                  </Form.Item>
-                  <Form.Item>
                     <Button
-                      type="primary"
-                      htmlType="submit"
-                      loading={feedback?.loading ?? false}
+                      onClick={() => void loadReport()}
+                      loading={detailLoading}
                     >
-                      查询原记录
+                      刷新报告
                     </Button>
-                  </Form.Item>
-                </Form>
-                {feedback?.error && (
+                    <Button onClick={copyReportLink}>复制链接</Button>
+                    <Button
+                      loading={exporting}
+                      disabled={revisionId !== 'current' && !historical}
+                      onClick={() => void exportReport()}
+                    >
+                      {revisionId === 'current'
+                        ? '导出 HTML 快照'
+                        : '下载此历史修订'}
+                    </Button>
+                  </div>
+                )}
+                {reportNotice && (
+                  <p className="caption mb" role="status">
+                    {reportNotice}
+                  </p>
+                )}
+                {(detailLoading && !report) || historyLoading ? (
+                  <Skeleton active />
+                ) : null}
+                {detailError && (
+                  <Alert type="error" showIcon title={detailError} />
+                )}
+                {historyError && (
                   <Alert
                     type="error"
-                    title={feedback.error}
                     showIcon
-                    className="section-alert"
+                    title={`所选报告修订未取得：${historyError}`}
                   />
                 )}
-                {run && (
-                  <Descriptions
-                    className="section-alert"
-                    column={1}
-                    bordered
-                    items={[
-                      { key: 'id', label: '原执行', children: run.runId },
-                      { key: 'state', label: '执行状态', children: run.state },
-                      {
-                        key: 'progress',
-                        label: '进度声明',
-                        children: `${run.completedItems}/${run.totalItems} · sequence ${run.progressSequence} · ${run.progressClosedAt ? '平台进度展示已关闭，仍按协议接收上报' : '平台进度展示未关闭'}`,
-                      },
-                      {
-                        key: 'delivery',
-                        label: '交付状态',
-                        children: run.deliveryStatus,
-                      },
-                      {
-                        key: 'origin',
-                        label: '执行来源',
-                        children:
-                          run.executionProvenance === 'protocol-synthetic'
-                            ? '合成协议结果，不是真实UI执行'
-                            : run.executionProvenance,
-                      },
-                      {
-                        key: 'report',
-                        label: '实际报告',
-                        children: run.reportId ? (
-                          <Button
-                            type="link"
-                            onClick={() => openReport(run.reportId!)}
-                          >
-                            打开已存在报告
-                          </Button>
-                        ) : (
-                          '尚无报告，进度/文件本身不生成报告'
-                        ),
-                      },
-                      {
-                        key: 'scope',
-                        label: '固定范围',
-                        children: `${run.scope.items.length}项 · ${run.scope.snapshotDigest}`,
-                      },
-                    ]}
+                {report && facts && (
+                  <ReportWorkbench
+                    key={`${report.id}:${revisionId}`}
+                    project={project}
+                    userId={userId}
+                    report={report}
+                    facts={facts}
+                    archived={revisionId !== 'current'}
+                    viewedRevisionId={
+                      revisionId === 'current' ? report.revisionId : revisionId
+                    }
+                    handling={
+                      revisionId === 'current'
+                        ? report.currentHandling
+                        : (historical?.handlingAtCapture ?? null)
+                    }
+                    selection={visibleResult?.linked ? visibleResult : null}
+                    onChanged={async () => {
+                      await loadReport();
+                      load();
+                    }}
+                    onPreview={setPreview}
                   />
                 )}
-                {run?.kind === 'UI' && run.scope.sourceType !== 'uiArchive' && (
-                  <UiDeliveryPanel
-                    key={run.runId}
-                    projectId={project.id}
-                    runId={run.runId}
-                    scopeItems={run.scope.items}
-                  />
-                )}
-                {receipt && (
-                  <Card
-                    className="section-alert"
-                    size="small"
-                    title={`本人原提交 ${receipt.receipt.submissionId}`}
-                  >
-                    <Space wrap>
-                      <Tag>当时接收 {receipt.receipt.resultsAccepted} 项</Tag>
-                      <Tag>原回执交付：{receipt.receipt.deliveryStatus}</Tag>
-                      <Tag>当前交付：{receipt.currentDelivery.status}</Tag>
-                    </Space>
-                    <Typography.Paragraph>
-                      当前缺失文件：
-                      {receipt.currentDelivery.missingFileIds.length
-                        ? receipt.currentDelivery.missingFileIds.join('、')
-                        : '无登记缺失文件'}
-                    </Typography.Paragraph>
-                    <Table
-                      rowKey="objectId"
-                      pagination={false}
-                      dataSource={receipt.receipt.perItemResults}
-                      columns={[
-                        { title: '固定对象', dataIndex: 'objectId' },
-                        { title: '原处理状态', dataIndex: 'status' },
-                        { title: '说明', dataIndex: 'message' },
-                      ]}
-                    />
-                  </Card>
-                )}
-              </Card>
-            ),
-          },
-        ]}
-      />
-      {!contextMatches && reportId && (
-        <Alert
-          type="warning"
-          title="报告链接属于其他项目，请明确选择原项目后读取。"
-          showIcon
-        />
+              </>
+            ) : (
+              detailPanel()
+            )}
+          </main>
+        </section>
       )}
-      <Modal
-        open={Boolean(reportId && contextMatches)}
-        title="报告快照、结果与证据"
-        className="report-modal"
-        width={1030}
-        centered
-        zIndex={uiLayers.drawer}
-        onCancel={() => {
-          setReportId(null);
-          window.location.hash = 'reports';
-        }}
-        footer={
-          <Space wrap>
-            <Button
-              loading={exporting}
-              disabled={!report || (revisionId !== 'current' && !historical)}
-              onClick={() => void exportReport()}
-            >
-              {revisionId === 'current'
-                ? '生成当前HTML快照并下载'
-                : '下载此历史修订HTML'}
+      <div className="results-page" hidden={standalone}>
+        <PageHeading
+          eyebrow="EXECUTION & REPORTS"
+          title="执行与报告"
+          description="保留当轮范围、实际修订、业务结论与独立交付状态。"
+        />
+        {project.roles.includes('tester') && (
+          <div className="toolbar mb">
+            <Button onClick={() => setArchiveOpen(true)}>
+              上传本地独立归档
             </Button>
-            <Button
-              disabled={!report}
-              onClick={() => {
-                if (!navigator.clipboard?.writeText) {
-                  setReportNotice(
-                    '当前浏览器未开放复制，请从地址栏复制当前报告链接。',
-                  );
-                  return;
-                }
-                const url = new URL(window.location.href);
-                url.hash = `reports?projectId=${encodeURIComponent(project.id)}&reportId=${encodeURIComponent(reportId!)}${revisionId === 'current' ? '' : `&revisionId=${encodeURIComponent(revisionId)}`}`;
-                void navigator.clipboard
-                  .writeText(url.toString())
-                  .then(() =>
-                    setReportNotice(
-                      '报告链接已复制；打开时仍按当前账号权限读取。',
-                    ),
-                  )
-                  .catch(() =>
-                    setReportNotice(
-                      '链接未能复制，请从地址栏复制当前报告链接。',
-                    ),
-                  );
-              }}
-            >
-              复制报告链接
-            </Button>
-          </Space>
-        }
-        destroyOnHidden
-      >
-        {reportNotice && (
-          <p className="caption mb" role="status">
-            {reportNotice}
-          </p>
+          </div>
         )}
-        {detailLoading && <Skeleton active />}
-        {detailError && (
-          <Alert
-            type="error"
-            title={detailError}
-            showIcon
-            className="section-alert"
-          />
-        )}
-        {historyError && (
-          <Alert
-            type="error"
-            title={`所选报告修订未取得：${historyError}`}
-            showIcon
-            className="section-alert"
-          />
-        )}
-        {report && (
-          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <Select
-              aria-label="报告历史快照"
-              style={{ width: '100%' }}
-              value={revisionId}
-              onChange={(id: string) => {
-                setRevisionId(id);
-                window.location.hash = `reports?projectId=${project.id}&reportId=${report!.id}${id === 'current' ? '' : `&revisionId=${id}`}`;
-              }}
-              options={[
-                { value: 'current', label: '当前汇总（含读取时的文件可用性）' },
-                ...report.history.map((row) => ({
-                  value: row.id,
-                  label: `历史 r${row.revisionNo} · ${new Date(row.createdAt).toLocaleString('zh-CN')} · ${reportReasons[row.reason] ?? '已保存快照'}`,
-                })),
-              ]}
-            />
-            <Space wrap>
-              <Button onClick={() => void loadReport()}>
-                只读刷新当前汇总
-              </Button>
-            </Space>
-            <Typography.Text type="secondary">
-              当前汇总导出会保存新快照；历史导出只读取选定存档。证据原件仍独立鉴权下载，不借当前事实补写旧存档。
-            </Typography.Text>
-            {historyLoading && <Skeleton active />}
-            {facts && (
-              <>
-                <div className="between">
-                  <div>
-                    <h2>
-                      {facts.kind === 'UI'
-                        ? 'UI 自主测试执行报告'
-                        : '接口回归执行报告'}
-                    </h2>
-                    <p className="caption">
-                      事实截取于{' '}
-                      {new Date(facts.capturedAt).toLocaleString('zh-CN')}
-                      {facts.scope.productBuild
-                        ? ` · 被测版本 ${facts.scope.productBuild}`
-                        : ''}
-                    </p>
-                  </div>
-                  <span className="badge">
-                    {executionLabels[facts.executionState] ??
-                      facts.executionState}
-                  </span>
-                </div>
-                <div className="row wrap">
-                  <span
-                    className={`badge ${facts.deliveryStatus === 'complete' ? 'green' : 'amber'}`}
-                  >
-                    文件交付 ·{' '}
-                    {deliveryLabels[facts.deliveryStatus] ??
-                      facts.deliveryStatus}
-                  </span>
-                  <span className="badge">
-                    清理 ·{' '}
-                    {cleanupLabels[facts.cleanupState] ?? facts.cleanupState}
-                  </span>
-                </div>
-                {facts.executionProvenance === 'protocol-synthetic' && (
-                  <div className="notice">
-                    数据来源：合成协议结果，没有执行真实 UI 目标。
-                  </div>
-                )}
-                <div className="report-review-kpis" aria-label="报告指标">
-                  <div>
-                    <small>固定执行范围</small>
-                    <strong>{facts.statistics.denominator}</strong>
-                    <small>已回传 {facts.statistics.reportedItems} 项</small>
-                  </div>
-                  <div>
-                    <small>业务结果</small>
-                    <strong>
-                      {facts.statistics.effective.passed} 通过 ·{' '}
-                      {facts.statistics.effective.failed} 失败
-                    </strong>
-                    <small>
-                      {facts.statistics.effective.inconclusive} 项证据不足
-                    </small>
-                  </div>
-                  <div>
-                    <small>已验证证据文件</small>
-                    <strong>
-                      {
-                        facts.evidence.filter(
-                          (row) =>
-                            row.lastKnownFileStatus === 'verified' &&
-                            !missingFileIds.has(row.fileId),
-                        ).length
-                      }
-                    </strong>
-                    <small>按报告事实读取</small>
-                  </div>
-                  <div>
-                    <small>待处理证据</small>
-                    <strong>{facts.missingFileIds.length} 个文件</strong>
-                    <small>已登记 {recordedGaps} 项采集缺口</small>
-                  </div>
-                </div>
-                <Collapse
-                  items={[
-                    {
-                      key: 'record-identifiers',
-                      label: '查看轮次、快照与范围标识',
-                      children: (
-                        <Descriptions
-                          bordered
-                          size="small"
-                          column={1}
-                          items={[
-                            {
-                              key: 'report',
-                              label: '报告ID',
-                              children: report.id,
-                            },
-                            {
-                              key: 'revision',
-                              label: '当前查看',
-                              children:
-                                revisionId === 'current'
-                                  ? `当前汇总 · 当前保存快照 ${report.revisionId}`
-                                  : `存档 ${historical?.revisionId ?? revisionId}`,
-                            },
-                            {
-                              key: 'captured',
-                              label: '事实截取时间',
-                              children: facts.capturedAt,
-                            },
-                            {
-                              key: 'run',
-                              label: '执行轮次/状态',
-                              children: `${facts.runId} / ${executionLabels[facts.executionState] ?? facts.executionState}`,
-                            },
-                            {
-                              key: 'origin',
-                              label: '执行来源',
-                              children:
-                                originLabels[facts.executionProvenance] ??
-                                facts.executionProvenance,
-                            },
-                            {
-                              key: 'cleanup',
-                              label: '清理状态',
-                              children:
-                                cleanupLabels[facts.cleanupState] ??
-                                facts.cleanupState,
-                            },
-                            {
-                              key: 'delivery',
-                              label: '交付完整性',
-                              children: `${deliveryLabels[facts.deliveryStatus] ?? facts.deliveryStatus} · 缺失文件${facts.missingFileIds.length}个`,
-                            },
-                            {
-                              key: 'denom',
-                              label: '固定统计分母',
-                              children: `${facts.statistics.denominator}项；已回传${facts.statistics.reportedItems}项；范围摘要${facts.scope.snapshotDigest}`,
-                            },
-                          ]}
-                        />
-                      ),
-                    },
-                  ]}
-                />
-                <Table
-                  size="small"
-                  rowKey="policy"
-                  pagination={false}
-                  dataSource={[
-                    {
-                      policy: '首次采集原始判断',
-                      ...facts.statistics.original,
-                    },
-                    {
-                      policy: '当前采集修订判断',
-                      ...facts.statistics.reported,
-                    },
-                    { policy: '独立人工最终结论', ...facts.statistics.final },
-                    {
-                      policy: '有效结论（人工优先，否则当前采集）',
-                      ...facts.statistics.effective,
-                    },
-                  ]}
-                  scroll={{ x: 850 }}
-                  columns={[
-                    { title: '口径', dataIndex: 'policy' },
-                    ...[
-                      'passed',
-                      'failed',
-                      'blocked',
-                      'inconclusive',
-                      'notExecuted',
-                      'notReported',
-                      'notAssessed',
-                    ].map((key) => ({
-                      title: outcomeLabels[key],
-                      dataIndex: key,
-                      render: (value: number | undefined) =>
-                        value === undefined ? '不适用' : value,
-                    })),
-                  ]}
-                />
-                {facts.scope.sourceType === 'uiArchive' && (
+        <UiArchiveDialog
+          key={project.id}
+          project={project}
+          open={archiveOpen}
+          onClose={() => setArchiveOpen(false)}
+          onSaved={(id) => {
+            setArchiveOpen(false);
+            setRecordsVersion((x) => x + 1);
+            openReport(id);
+          }}
+        />
+        <ExecutionRecords
+          userId={userId}
+          project={project}
+          refreshKey={recordsVersion}
+          onReport={openReport}
+          onRun={(id) => {
+            setLookupOpen(true);
+            lookupForm.setFieldsValue({ kind: 'run', id });
+            void lookup({ kind: 'run', id });
+          }}
+        />
+        <Collapse
+          className="mt"
+          activeKey={lookupOpen ? ['original'] : []}
+          onChange={(keys) =>
+            setLookupOpen(Array.isArray(keys) && keys.includes('original'))
+          }
+          items={[
+            {
+              key: 'original',
+              label: '原轮次、结果或提交找回（只读）',
+              children: (
+                <Card title="执行、结果与交付完整性">
                   <Alert
                     type="info"
                     showIcon
-                    title="独立执行归档"
-                    description="此报告记录本地已发生的事实。可登记问题，统计独立于正式计划与复测。"
+                    title="进度不等于结果，测试结论与交付完整性分别记录"
+                    description="平台本地UI执行能力只接收固定范围/进度/结果/证据，不从此页面唤醒本地AI或启动服务器UI执行器。合成协议提交必须保留来源标记。"
+                    className="section-alert"
                   />
-                )}
-                <Tabs
-                  aria-label="用例结果筛选"
-                  activeKey={reportFilter}
-                  onChange={(key) => {
-                    if (key === 'all' || key === 'failed' || key === 'gaps')
-                      setReportFilter(key);
-                  }}
-                  items={[
-                    { key: 'all', label: '全部结果' },
-                    { key: 'failed', label: '失败' },
-                    { key: 'gaps', label: '证据待补' },
-                  ]}
-                />
-                <Table
-                  rowKey={(row) => row.scopeItem.runItemId}
-                  pagination={{ pageSize: 10 }}
-                  dataSource={visibleItems}
-                  scroll={{ x: 1150 }}
-                  columns={[
-                    {
-                      title: '场景/用例',
-                      render: (_, row) => (
-                        <>
-                          <Typography.Text>
-                            {row.scopeItem.scenario.title}
-                          </Typography.Text>
-                          <br />
-                          <Typography.Text strong>
-                            {row.scopeItem.content.title}
-                            {'dataRow' in row.scopeItem &&
-                              row.scopeItem.dataRow && (
-                                <Tag color="cyan">
-                                  {row.scopeItem.dataRow.name}
-                                </Tag>
-                              )}
-                          </Typography.Text>
-                          {'localItemId' in row.scopeItem && (
-                            <div className="caption">
-                              {row.scopeItem.localItemId} ·{' '}
-                              {row.scopeItem.caseId
-                                ? '关联平台用例修订'
-                                : '本地条目'}
-                            </div>
-                          )}
-                        </>
-                      ),
-                    },
-                    {
-                      title: '首次采集',
-                      render: (_, row) =>
-                        outcomeLabels[
-                          row.result?.initialOutcome ?? 'notReported'
-                        ],
-                    },
-                    {
-                      title: '当前采集',
-                      render: (_, row) =>
-                        outcomeLabels[
-                          row.result?.reportedOutcome ?? 'notReported'
-                        ],
-                    },
-                    {
-                      title: '人工最终',
-                      render: (_, row) =>
-                        outcomeLabels[
-                          row.result?.finalOutcome ??
-                            (row.result ? 'notAssessed' : 'notReported')
-                        ],
-                    },
-                    {
-                      title: '清理',
-                      render: (_, row) =>
-                        row.result
-                          ? (cleanupLabels[row.result.cleanupState] ??
-                            row.result.cleanupState)
-                          : '无回传事实',
-                    },
-                    {
-                      title: '证据',
-                      render: (_, { result }) =>
-                        result ? (
-                          <div>
-                            已关联 {result.content.evidenceRefs.length} 项
-                            {!!result.content.evidenceGaps?.length && (
-                              <div className="caption">
-                                采集缺口 {result.content.evidenceGaps.length} 项
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          '—'
-                        ),
-                    },
-                    {
-                      title: '结果详情',
-                      render: (_, row) =>
-                        row.result ? (
-                          <Space direction="vertical">
-                            <Button
-                              onClick={() =>
-                                setSelectedResult({
-                                  id: row.result!.id,
-                                  revisionId: row.result!.revisionId,
-                                  kind: facts.kind,
-                                })
-                              }
-                            >
-                              事实、人工结论与证据
-                            </Button>
-                            {'localItemId' in row.scopeItem &&
-                              project.roles.includes('tester') &&
-                              revisionId === 'current' && (
-                                <Button
-                                  onClick={() =>
-                                    setArchiveFinding({
-                                      title: row.scopeItem.content.title,
-                                      runId: facts.runId,
-                                      resultId: row.result!.id,
-                                      requirementId:
-                                        'requirementId' in row.scopeItem
-                                          ? row.scopeItem.requirementId
-                                          : '',
-                                      requirementVersionId:
-                                        row.scopeItem.requirementVersionId,
-                                      observations:
-                                        row.result!.content.actualObservations,
-                                      evidenceRefs:
-                                        row.result!.content.evidenceRefs,
-                                    })
-                                  }
-                                >
-                                  登记问题
-                                </Button>
-                              )}
-                            {row.result.assessmentBasisChanged && (
-                              <Typography.Text type="warning">
-                                人工结论基准与当前采集修订不同
-                              </Typography.Text>
-                            )}
-                          </Space>
-                        ) : (
-                          '未回传，不构造通过/失败'
-                        ),
-                    },
-                  ]}
-                />
-                {facts.kind === 'UI' &&
-                  facts.scope.sourceType !== 'uiArchive' && (
-                    <UiDeliveryPanel
-                      key={facts.runId}
-                      projectId={project.id}
-                      runId={facts.runId}
-                      scopeItems={facts.scope.items}
+                  <Form
+                    form={lookupForm}
+                    layout="inline"
+                    initialValues={{ kind: 'run' }}
+                    onValuesChange={clearLookup}
+                    onFinish={(values) => void lookup(values)}
+                  >
+                    <Form.Item name="kind" label="只读查询">
+                      <Select
+                        style={{ minWidth: 150 }}
+                        options={[
+                          { value: 'run', label: '原执行轮次ID' },
+                          { value: 'result', label: '原结果ID' },
+                          { value: 'submission', label: '本人结果提交ID' },
+                        ]}
+                      />
+                    </Form.Item>
+                    <Form.Item
+                      name="id"
+                      label="原UUID"
+                      rules={[{ required: true }]}
+                    >
+                      <Input
+                        placeholder="不创建/重放执行"
+                        style={{ minWidth: 290 }}
+                      />
+                    </Form.Item>
+                    <Form.Item>
+                      <Button
+                        type="primary"
+                        htmlType="submit"
+                        loading={feedback?.loading ?? false}
+                      >
+                        查询原记录
+                      </Button>
+                    </Form.Item>
+                  </Form>
+                  {feedback?.error && (
+                    <Alert
+                      type="error"
+                      title={feedback.error}
+                      showIcon
+                      className="section-alert"
                     />
                   )}
-                {currentHandling && (
-                  <ReportHandlingPanel
-                    projectId={project.id}
-                    handling={currentHandling}
-                    label="读取时的当前问题与缺陷处理"
-                    factsCapturedAt={facts.capturedAt}
-                  />
-                )}
-                {revisionId !== 'current' && historical && (
-                  <Collapse
-                    items={[
-                      {
-                        key: 'handling-at-capture',
-                        label: '查看此历史修订保存时的处理状态',
-                        children: historical.handlingAtCapture ? (
-                          <ReportHandlingPanel
-                            projectId={project.id}
-                            handling={historical.handlingAtCapture}
-                            label={`历史 r${historical.revisionNo} 保存时的处理快照`}
-                            factsCapturedAt={historical.facts.capturedAt}
-                          />
-                        ) : (
-                          <p className="caption">
-                            此旧存档未记录当时处理状态，未以当前数据补填。
-                          </p>
-                        ),
-                      },
-                    ]}
-                  />
-                )}
-                <Card size="small" title="报告证据清单">
-                  <EvidenceGallery
-                    items={facts.evidence.map((row) => ({
-                      fileId: row.fileId,
-                      manifest: row.manifest,
-                      originalName: row.originalName,
-                      fileStatus: row.lastKnownFileStatus,
-                      source: row.manifest.source,
-                    }))}
-                    onOpen={setPreview}
-                  />
-                  <Collapse
-                    style={{ marginTop: 10 }}
-                    items={[
-                      {
-                        key: 'metadata',
-                        label: '报告记录时的文件状态和校验信息',
-                        children: (
-                          <Table
-                            rowKey="id"
-                            dataSource={facts.evidence}
-                            pagination={{ pageSize: 10 }}
-                            scroll={{ x: 900 }}
-                            columns={[
-                              {
-                                title: '原件',
-                                dataIndex: 'originalName',
-                              },
-                              {
-                                title: '来源/采集',
-                                render: (_, row) =>
-                                  `${row.manifest.source} / ${row.manifest.captureCompleteness}`,
-                              },
-                              {
-                                title: '类型',
-                                render: (_, row) => row.manifest.type,
-                              },
-                              {
-                                title: '记录时字节状态',
-                                dataIndex: 'lastKnownFileStatus',
-                              },
-                              {
-                                title: 'SHA-256',
-                                render: (_, row) => (
-                                  <Typography.Text code>
-                                    {row.manifest.sha256}
-                                  </Typography.Text>
-                                ),
-                              },
-                            ]}
-                          />
-                        ),
-                      },
-                    ]}
-                  />
+                  {run && (
+                    <Descriptions
+                      className="section-alert"
+                      column={1}
+                      bordered
+                      items={[
+                        { key: 'id', label: '原执行', children: run.runId },
+                        {
+                          key: 'state',
+                          label: '执行状态',
+                          children: run.state,
+                        },
+                        {
+                          key: 'progress',
+                          label: '进度声明',
+                          children: `${run.completedItems}/${run.totalItems} · sequence ${run.progressSequence} · ${run.progressClosedAt ? '平台进度展示已关闭，仍按协议接收上报' : '平台进度展示未关闭'}`,
+                        },
+                        {
+                          key: 'delivery',
+                          label: '交付状态',
+                          children: run.deliveryStatus,
+                        },
+                        {
+                          key: 'origin',
+                          label: '执行来源',
+                          children:
+                            run.executionProvenance === 'protocol-synthetic'
+                              ? '合成协议结果，不是真实UI执行'
+                              : run.executionProvenance,
+                        },
+                        {
+                          key: 'report',
+                          label: '实际报告',
+                          children: run.reportId ? (
+                            <Button
+                              type="link"
+                              onClick={() => openReport(run.reportId!)}
+                            >
+                              打开已存在报告
+                            </Button>
+                          ) : (
+                            '尚无报告，进度/文件本身不生成报告'
+                          ),
+                        },
+                        {
+                          key: 'scope',
+                          label: '固定范围',
+                          children: `${run.scope.items.length}项 · ${run.scope.snapshotDigest}`,
+                        },
+                      ]}
+                    />
+                  )}
+                  {run?.kind === 'UI' &&
+                    run.scope.sourceType !== 'uiArchive' && (
+                      <UiDeliveryPanel
+                        key={run.runId}
+                        projectId={project.id}
+                        runId={run.runId}
+                        scopeItems={run.scope.items}
+                      />
+                    )}
+                  {receipt && (
+                    <Card
+                      className="section-alert"
+                      size="small"
+                      title={`本人原提交 ${receipt.receipt.submissionId}`}
+                    >
+                      <Space wrap>
+                        <Tag>当时接收 {receipt.receipt.resultsAccepted} 项</Tag>
+                        <Tag>原回执交付：{receipt.receipt.deliveryStatus}</Tag>
+                        <Tag>当前交付：{receipt.currentDelivery.status}</Tag>
+                      </Space>
+                      <Typography.Paragraph>
+                        当前缺失文件：
+                        {receipt.currentDelivery.missingFileIds.length
+                          ? receipt.currentDelivery.missingFileIds.join('、')
+                          : '无登记缺失文件'}
+                      </Typography.Paragraph>
+                      <Table
+                        rowKey="objectId"
+                        pagination={false}
+                        dataSource={receipt.receipt.perItemResults}
+                        columns={[
+                          { title: '固定对象', dataIndex: 'objectId' },
+                          { title: '原处理状态', dataIndex: 'status' },
+                          { title: '说明', dataIndex: 'message' },
+                        ]}
+                      />
+                    </Card>
+                  )}
                 </Card>
-              </>
-            )}
-          </Space>
-        )}
-      </Modal>
-      <ResultDetailPanel
-        project={project}
-        {...(visibleResult?.kind ? { executionKind: visibleResult.kind } : {})}
-        resultId={visibleResult?.id ?? null}
-        {...(visibleResult?.revisionId
-          ? { reportBasisRevisionId: visibleResult.revisionId }
-          : {})}
-        {...(visibleResult?.initialStep
-          ? { initialStep: visibleResult.initialStep }
-          : {})}
-        {...(visibleResult?.returnTo
-          ? { returnTo: visibleResult.returnTo }
-          : {})}
-        onClose={closeResult}
-        onChanged={async () => {
-          await loadReport();
-          await load();
-        }}
-      />
+              ),
+            },
+          ]}
+        />
+      </div>
+      {!standalone && detailPanel()}
       <EvidenceViewer
         fileId={preview?.fileId ?? null}
         evidenceType={preview?.manifest.type}
         onClose={() => setPreview(null)}
       />
-    </div>
+    </>
   );
 }

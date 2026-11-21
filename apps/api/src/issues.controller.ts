@@ -58,6 +58,13 @@ export class IssuesController {
       .replace(/^\//, '')
       .replace(/\/$/, '');
     if (family === 'problems') {
+      if (path === 'operation-status' && req.method === 'GET')
+        return res.json(
+          await this.problems.operationStatus(actor, projectId, {
+            operation: req.query.operation,
+            key: req.query.key,
+          }),
+        );
       if (!path && req.method === 'GET')
         return res.json(
           await this.problems.list(
@@ -93,7 +100,9 @@ export class IssuesController {
             idSchema.parse(preview[1]),
           ),
         );
-      const match = /^([^/]+)(?:\/(confirm|dismiss))?$/.exec(path);
+      const match = /^([^/]+)(?:\/(confirm|dismiss|review-retests))?$/.exec(
+        path,
+      );
       if (match?.[1]) {
         const id = idSchema.parse(match[1]);
         if (!match[2] && req.method === 'GET')
@@ -105,6 +114,15 @@ export class IssuesController {
         if (match[2] === 'dismiss' && req.method === 'POST')
           return res.json(
             await this.problems.dismiss(actor, projectId, id, req.body),
+          );
+        if (match[2] === 'review-retests' && req.method === 'POST')
+          return res.json(
+            await this.problems.recordReviewRetest(
+              actor,
+              projectId,
+              id,
+              req.body,
+            ),
           );
       }
     } else {

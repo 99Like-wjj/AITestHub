@@ -26,6 +26,7 @@ import {
 import {
   resultDetailSchema,
   finalAssessmentInputSchema,
+  webFinalAssessmentInputSchema,
   supplementaryEvidenceInputSchema,
   assessmentReceiptSchema,
   amendmentReceiptSchema,
@@ -33,6 +34,7 @@ import {
   runStatusSchema,
 } from '../../../packages/contracts/src/ui-results';
 import type { FileMetadata } from '../../../packages/contracts/src/files';
+import type { ReportProblemReviewScope } from '../../../packages/contracts/src/issues';
 import { api, ApiError, describeError } from './api';
 import { uploadProjectFile } from './file-channel';
 import { EvidenceViewer } from './evidence-viewer';
@@ -48,6 +50,10 @@ import {
 import { ApiResultTrace } from './api-result-trace';
 import type { Project } from './types';
 import { uiLayers } from './ui-layers';
+import {
+  ReportReceiptControl,
+  useReportCommandRecovery,
+} from './report-command-recovery';
 
 type Result = z.infer<typeof resultDetailSchema>['result'];
 export { outcomeLabels } from './result-steps';
@@ -265,6 +271,12 @@ export function ResultDetailPanel({
   reportBasisRevisionId,
   initialStep,
   returnTo,
+  inline = false,
+  archivedAssessment,
+  reportReview,
+  readOnly = false,
+  onRevisionSelect,
+  onStepSelect,
   onClose,
   onChanged,
 }: {
@@ -274,6 +286,12 @@ export function ResultDetailPanel({
   reportBasisRevisionId?: string;
   initialStep?: number;
   returnTo?: string;
+  inline?: boolean;
+  archivedAssessment?: { outcome: string | null; reason: string | null };
+  reportReview?: ReportProblemReviewScope;
+  readOnly?: boolean;
+  onRevisionSelect?: (id: string) => void;
+  onStepSelect?: (ordinal: number) => void;
   onClose: () => void;
   onChanged: () => Promise<void>;
 }) {
@@ -313,7 +331,13 @@ export function ResultDetailPanel({
     sideEffectCertainty: string;
   }>();
   const generation = useRef(0);
-  const canAssess = project.roles.includes('tester');
+  const canAssess =
+    !readOnly && !archivedAssessment && project.roles.includes('tester');
+  const recovery = useReportCommandRecovery(
+    project.id,
+    'results.assess',
+    reportReview?.resultId ?? null,
+  );
   async function load(
     signal?: AbortSignal,
     selection: 'initial' | 'preserve' | 'latest' = 'preserve',
@@ -404,7 +428,7 @@ export function ResultDetailPanel({
     (row) => row.id === result.assessmentRevisionId,
   );
   function openEditor(mode: 'assess' | 'amend') {
-    if (!result || !viewingCurrent) return;
+    if (!result || !viewingCurrent || !canAssess) return;
     setEditor({ mode, basis: result, commandId: crypto.randomUUID() });
     setEditorDirty(false);
     setDiscardEditor(false);
@@ -434,25 +458,41 @@ export function ResultDetailPanel({
     actions: string;
     sideEffectCertainty: string;
   }) {
-    if (!editor || pending || uncertain) return;
+    if (!editor || pending || uncertain || recovery.commandId || !canAssess)
+      return;
     setPending(true);
     setEditError(undefined);
     try {
       if (editor.mode === 'assess') {
-        const body = finalAssessmentInputSchema.parse({
+        const body = (
+          reportReview
+            ? webFinalAssessmentInputSchema
+            : finalAssessmentInputSchema
+        ).parse({
           commandId: editor.commandId,
           baseResultRevisionId: editor.basis.revisionId,
           baseAssessmentRevisionId: editor.basis.assessmentRevisionId,
           finalOutcome: values.outcome,
           reason: values.reason ?? '',
+          ...(reportReview ? { reportReview } : {}),
         });
-        const response = await api(
-          `/projects/${project.id}/results/${editor.basis.id}/assessment`,
-          { method: 'POST', body },
-          assessmentReceiptSchema,
-        );
-        if (response.resultId !== editor.basis.id)
-          throw new Error('人工结论回执不匹配。');
+        const request = async () => {
+          const response = await api(
+            `/projects/${project.id}/results/${editor.basis.id}/assessment`,
+            { method: 'POST', body },
+            assessmentReceiptSchema,
+          );
+          if (response.resultId !== editor.basis.id)
+            throw new ApiError(
+              '人工结论回执不匹配。',
+              502,
+              'RECEIPT_SCOPE_MISMATCH',
+            );
+          return response;
+        };
+        await (reportReview
+          ? recovery.send(editor.commandId, request)
+          : request());
       } else {
         const body = resultAmendmentSchema.parse({
           schemaVersion: 'ath.result-amendment.v1',
@@ -488,174 +528,201 @@ export function ResultDetailPanel({
       setPending(false);
     }
   }
-  return (
+  function recoverAssessment() {
+    if (!reportReview) return;
+    void recovery.check(
+      assessmentReceiptSchema,
+      async (value) => {
+        if (value.resultId !== reportReview.resultId)
+          throw new Error('原人工判断回执不属于当前结果。');
+        setEditor(null);
+        setEditorDirty(false);
+        setUncertain(false);
+        await load();
+        await onChanged();
+      },
+      () => {
+        setUncertain(false);
+        setEditor((previous) =>
+          previous ? { ...previous, commandId: crypto.randomUUID() } : null,
+        );
+      },
+    );
+  }
+  function selectRevision(id: string) {
+    if (onRevisionSelect) onRevisionSelect(id);
+    else setRevisionId(id);
+  }
+  const detail = (
     <>
-      <Drawer
-        open={resultId !== null}
-        zIndex={uiLayers.detail}
-        title="结果事实、人工结论与证据"
-        width={1100}
-        onClose={onClose}
-        destroyOnHidden
-      >
-        {loading && <Skeleton active />}
-        {error && <Alert type="error" showIcon title={error} />}
-        {result && (
-          <div className="result-review">
-            <div className="result-review-header">
-              <div>
-                <h2>{result.scopeItem?.title ?? '执行结果详情'}</h2>
-                {result.scopeItem?.dataRow && (
-                  <Tag color="cyan">
-                    数据行 {result.scopeItem.dataRow.name} ·{' '}
-                    {result.scopeItem.dataRow.id}
-                  </Tag>
-                )}
-                {result.scopeItem?.preparationSources?.length ? (
-                  <Tag>
-                    固定准备修订 {result.scopeItem.preparationSources.length} 项
-                  </Tag>
-                ) : null}
-                <small className="result-review-muted result-review-id">
-                  原执行 {result.runId}
-                </small>
-              </div>
-              {returnTo && <Button href={returnTo}>返回缺陷</Button>}
-            </div>
-            <div className="result-review-meta">
-              <div>
-                <small>用例快照</small>
-                <strong>
-                  {result.scopeItem?.revisionNo
-                    ? `r${result.scopeItem.revisionNo}`
-                    : (result.scopeItem?.revisionId ?? '未记录修订')}
-                </strong>
-              </div>
-              <div>
-                <small>
-                  采集判断 · {revision ? `r${revision.revisionNo}` : '所选修订'}
-                </small>
-                <div>
-                  {content ? (
-                    <ResultOutcomeTag outcome={content.originalOutcome} />
-                  ) : (
-                    '未取得所选修订'
-                  )}
-                </div>
-              </div>
-              <div>
-                <small>当前人工最终结论</small>
-                <div>
-                  <ResultOutcomeTag
-                    outcome={assessment?.finalOutcome ?? 'notAssessed'}
-                  />
-                </div>
-              </div>
-            </div>
-            <div className="result-review-basis">
-              <div>
-                <strong>
-                  {reportBasisRevisionId && revisionId === reportBasisRevisionId
-                    ? '来源绑定的采集修订'
-                    : viewingCurrent
-                      ? '当前采集修订'
-                      : '历史采集修订'}
-                </strong>
-                <div className="result-review-muted">
-                  {revision && `r${revision.revisionNo}`}
-                  {revision?.createdAt &&
-                    ` · ${new Date(revision.createdAt).toLocaleString('zh-CN')}`}
-                  {revision?.reason && ` · ${revision.reason}`}
-                </div>
-              </div>
-              <Select
-                aria-label="结果采集修订历史"
-                value={revisionId}
-                onChange={(id: string) => setRevisionId(id)}
-                options={result.history.map((row) => ({
-                  value: row.id,
-                  label: `r${row.revisionNo}${row.id === reportBasisRevisionId ? ' · 来源绑定' : ''}${row.id === result.revisionId ? ' · 当前' : ''}`,
-                }))}
-              />
-              {!viewingCurrent && (
-                <Button onClick={() => setRevisionId(result.revisionId)}>
-                  查看当前修订
-                </Button>
+      {loading && <Skeleton active />}
+      {error && <Alert type="error" showIcon title={error} />}
+      {result && (
+        <div className="result-review">
+          <div className="result-review-header">
+            <div>
+              <h2>{result.scopeItem?.title ?? '执行结果详情'}</h2>
+              {result.scopeItem?.dataRow && (
+                <Tag color="cyan">
+                  数据行 {result.scopeItem.dataRow.name} ·{' '}
+                  {result.scopeItem.dataRow.id}
+                </Tag>
               )}
+              {result.scopeItem?.preparationSources?.length ? (
+                <Tag>
+                  固定准备修订 {result.scopeItem.preparationSources.length} 项
+                </Tag>
+              ) : null}
+              <small className="result-review-muted result-review-id">
+                原执行 {result.runId}
+              </small>
             </div>
-            {kindError && (
-              <Alert
-                type="warning"
-                title="未取得执行类型"
-                description={kindError}
-                showIcon
-              />
+            {returnTo && <Button href={returnTo}>返回缺陷</Button>}
+          </div>
+          <div className="result-review-meta">
+            <div>
+              <small>用例快照</small>
+              <strong>
+                {result.scopeItem?.revisionNo
+                  ? `r${result.scopeItem.revisionNo}`
+                  : (result.scopeItem?.revisionId ?? '未记录修订')}
+              </strong>
+            </div>
+            <div>
+              <small>
+                采集判断 · {revision ? `r${revision.revisionNo}` : '所选修订'}
+              </small>
+              <div>
+                {content ? (
+                  <ResultOutcomeTag outcome={content.originalOutcome} />
+                ) : (
+                  '未取得所选修订'
+                )}
+              </div>
+            </div>
+            <div>
+              <small>
+                {archivedAssessment ? '存档时的人工结论' : '当前人工最终结论'}
+              </small>
+              <div>
+                <ResultOutcomeTag
+                  outcome={
+                    (archivedAssessment
+                      ? archivedAssessment.outcome
+                      : assessment?.finalOutcome) ?? 'notAssessed'
+                  }
+                />
+              </div>
+            </div>
+          </div>
+          <div className="result-review-basis">
+            <div>
+              <strong>
+                {reportBasisRevisionId && revisionId === reportBasisRevisionId
+                  ? '来源绑定的采集修订'
+                  : viewingCurrent
+                    ? '当前采集修订'
+                    : '历史采集修订'}
+              </strong>
+              <div className="result-review-muted">
+                {revision && `r${revision.revisionNo}`}
+                {revision?.createdAt &&
+                  ` · ${new Date(revision.createdAt).toLocaleString('zh-CN')}`}
+                {revision?.reason && ` · ${revision.reason}`}
+              </div>
+            </div>
+            <Select
+              aria-label="结果采集修订历史"
+              value={revisionId}
+              disabled={!!archivedAssessment}
+              onChange={selectRevision}
+              options={result.history.map((row) => ({
+                value: row.id,
+                label: `r${row.revisionNo}${row.id === reportBasisRevisionId ? ' · 来源绑定' : ''}${row.id === result.revisionId ? ' · 当前' : ''}`,
+              }))}
+            />
+            {!viewingCurrent && !archivedAssessment && (
+              <Button onClick={() => selectRevision(result.revisionId)}>
+                查看当前修订
+              </Button>
             )}
-            {!content ? (
-              <Alert
-                type="warning"
-                showIcon
-                title="来源引用的采集修订未取得"
-                description="可选择其他有记录的修订。"
-              />
-            ) : (
-              <Tabs
-                key={`${result.id}:${resolvedKind ?? ''}`}
-                items={[
-                  {
-                    key: 'steps',
-                    label: resolvedKind === 'API' ? '请求与断言' : '步骤与证据',
-                    children:
-                      resolvedKind === 'API' ? (
-                        <div className="result-review-content">
-                          <ApiResultTrace
-                            key={`${result.runId}:${result.runItemId}:${initialStep ?? ''}`}
-                            projectId={project.id}
-                            runId={result.runId}
-                            runItemId={result.runItemId}
-                            initialStep={initialStep}
-                          />
-                          <Collapse
-                            items={[
-                              {
-                                key: 'original',
-                                label: '原始诊断记录',
-                                children: (
-                                  <OverallObservation content={content} />
-                                ),
-                              },
-                            ]}
-                          />
-                        </div>
-                      ) : (
-                        <ResultUiSteps
-                          key={`${revisionId}:${initialStep ?? ''}`}
-                          content={content}
-                          scope={result.scopeItem}
-                          evidence={linkedEvidence}
-                          initialStep={initialStep}
-                          onOpen={setEvidence}
-                        />
-                      ),
-                  },
-                  {
-                    key: 'evidence',
-                    label: '证据清单',
-                    children: (
+          </div>
+          {kindError && (
+            <Alert
+              type="warning"
+              title="未取得执行类型"
+              description={kindError}
+              showIcon
+            />
+          )}
+          {!content ? (
+            <Alert
+              type="warning"
+              showIcon
+              title="来源引用的采集修订未取得"
+              description="可选择其他有记录的修订。"
+            />
+          ) : (
+            <Tabs
+              key={`${result.id}:${resolvedKind ?? ''}`}
+              items={[
+                {
+                  key: 'steps',
+                  label: resolvedKind === 'API' ? '请求与断言' : '步骤与证据',
+                  children:
+                    resolvedKind === 'API' ? (
                       <div className="result-review-content">
-                        <h3>所选修订关联的证据</h3>
-                        <EvidenceGallery
-                          key={revisionId}
-                          items={linkedEvidence}
-                          onOpen={setEvidence}
+                        <ApiResultTrace
+                          key={`${result.runId}:${result.runItemId}:${initialStep ?? ''}`}
+                          projectId={project.id}
+                          runId={result.runId}
+                          runItemId={result.runItemId}
+                          initialStep={initialStep}
                         />
-                        {content.evidenceGaps?.length ? (
-                          <>
-                            <h3>待处理的证据</h3>
-                            <EvidenceGapList gaps={content.evidenceGaps} />
-                          </>
-                        ) : null}
-                        {viewingCurrent && manualEvidence.length > 0 && (
+                        <Collapse
+                          items={[
+                            {
+                              key: 'original',
+                              label: '原始诊断记录',
+                              children: (
+                                <OverallObservation content={content} />
+                              ),
+                            },
+                          ]}
+                        />
+                      </div>
+                    ) : (
+                      <ResultUiSteps
+                        key={`${revisionId}:${initialStep ?? ''}`}
+                        content={content}
+                        scope={result.scopeItem}
+                        evidence={linkedEvidence}
+                        initialStep={initialStep}
+                        onStepSelect={onStepSelect}
+                        onOpen={setEvidence}
+                      />
+                    ),
+                },
+                {
+                  key: 'evidence',
+                  label: '证据清单',
+                  children: (
+                    <div className="result-review-content">
+                      <h3>所选修订关联的证据</h3>
+                      <EvidenceGallery
+                        key={revisionId}
+                        items={linkedEvidence}
+                        onOpen={setEvidence}
+                      />
+                      {content.evidenceGaps?.length ? (
+                        <>
+                          <h3>待处理的证据</h3>
+                          <EvidenceGapList gaps={content.evidenceGaps} />
+                        </>
+                      ) : null}
+                      {!archivedAssessment &&
+                        viewingCurrent &&
+                        manualEvidence.length > 0 && (
                           <>
                             <h3>人工补证</h3>
                             <EvidenceGallery
@@ -664,114 +731,147 @@ export function ResultDetailPanel({
                             />
                           </>
                         )}
-                      </div>
-                    ),
-                  },
-                  {
-                    key: 'handling',
-                    label: '判断记录',
-                    children: (
-                      <div className="result-review-content">
-                        <Descriptions
-                          size="small"
-                          bordered
-                          column={2}
-                          items={[
-                            {
-                              key: 'initial',
-                              label: '首次采集原始判断',
-                              children: (
-                                <ResultOutcomeTag
-                                  outcome={
-                                    result.history.find(
-                                      (row) => row.revisionNo === 1,
-                                    )?.content.originalOutcome ?? 'notReported'
-                                  }
-                                />
-                              ),
-                            },
-                            {
-                              key: 'current',
-                              label: '当前采集修订判断',
-                              children: (
-                                <ResultOutcomeTag
-                                  outcome={result.content.originalOutcome}
-                                />
-                              ),
-                            },
-                            {
-                              key: 'certainty',
-                              label: '所选修订副作用确定性',
-                              children: content.sideEffectCertainty,
-                            },
-                            {
-                              key: 'times',
-                              label: '执行时间',
-                              children: `${content.startedAt ?? '未记录'} — ${content.endedAt ?? '未记录'}`,
-                            },
-                          ]}
-                        />
-                        <Space wrap>
-                          <Button onClick={() => void load()}>
-                            刷新结果记录
-                          </Button>
-                          <Button
-                            disabled={!canAssess || !viewingCurrent}
-                            onClick={() => openEditor('assess')}
-                          >
-                            登记人工最终结论
-                          </Button>
-                          <Button
-                            disabled={
-                              !canAssess ||
-                              !viewingCurrent ||
-                              !result.history.length ||
-                              resolvedKind !== 'UI'
-                            }
-                            onClick={() => openEditor('amend')}
-                          >
-                            申请更正 UI 采集事实
-                          </Button>
-                          <Button
-                            disabled={!canAssess || !viewingCurrent}
-                            onClick={() => setEvidenceTarget(result)}
-                          >
-                            人工补充证据
-                          </Button>
-                        </Space>
-                        <Table
-                          rowKey="id"
-                          pagination={false}
-                          dataSource={result.assessments}
-                          scroll={{ x: 700 }}
-                          columns={[
-                            {
-                              title: '人工判断',
-                              render: (_, row) => (
-                                <Space>
-                                  <ResultOutcomeTag
-                                    outcome={row.finalOutcome}
-                                  />
-                                  {row.id === result.assessmentRevisionId &&
-                                    '当前'}
-                                </Space>
-                              ),
-                            },
-                            { title: '原因', dataIndex: 'reason' },
-                            { title: '操作者', dataIndex: 'actorId' },
-                            { title: '时间', dataIndex: 'createdAt' },
-                          ]}
-                          locale={{ emptyText: '尚无人工最终结论' }}
-                        />
-                      </div>
-                    ),
-                  },
-                ]}
-              />
-            )}
-          </div>
-        )}
-      </Drawer>
+                    </div>
+                  ),
+                },
+                {
+                  key: 'handling',
+                  label: '判断记录',
+                  children: (
+                    <div className="result-review-content">
+                      <Descriptions
+                        size="small"
+                        bordered
+                        column={2}
+                        items={[
+                          {
+                            key: 'initial',
+                            label: '首次采集原始判断',
+                            children: (
+                              <ResultOutcomeTag
+                                outcome={
+                                  result.history.find(
+                                    (row) => row.revisionNo === 1,
+                                  )?.content.originalOutcome ?? 'notReported'
+                                }
+                              />
+                            ),
+                          },
+                          {
+                            key: 'current',
+                            label: '当前采集修订判断',
+                            children: (
+                              <ResultOutcomeTag
+                                outcome={result.content.originalOutcome}
+                              />
+                            ),
+                          },
+                          {
+                            key: 'certainty',
+                            label: '所选修订副作用确定性',
+                            children: content.sideEffectCertainty,
+                          },
+                          {
+                            key: 'times',
+                            label: '执行时间',
+                            children: `${content.startedAt ?? '未记录'} — ${content.endedAt ?? '未记录'}`,
+                          },
+                        ]}
+                      />
+                      {archivedAssessment ? (
+                        <Typography.Paragraph>
+                          {archivedAssessment.reason ??
+                            '本报告修订未保存人工结论说明。'}
+                        </Typography.Paragraph>
+                      ) : (
+                        <>
+                          <Space wrap>
+                            <Button onClick={() => void load()}>
+                              刷新结果记录
+                            </Button>
+                            <Button
+                              disabled={
+                                !canAssess ||
+                                !viewingCurrent ||
+                                !!recovery.commandId
+                              }
+                              onClick={() => openEditor('assess')}
+                            >
+                              登记人工最终结论
+                            </Button>
+                            <Button
+                              disabled={
+                                !canAssess ||
+                                !viewingCurrent ||
+                                !result.history.length ||
+                                resolvedKind !== 'UI'
+                              }
+                              onClick={() => openEditor('amend')}
+                            >
+                              申请更正 UI 采集事实
+                            </Button>
+                            <Button
+                              disabled={!canAssess || !viewingCurrent}
+                              onClick={() => setEvidenceTarget(result)}
+                            >
+                              人工补充证据
+                            </Button>
+                          </Space>
+                          <Table
+                            rowKey="id"
+                            pagination={false}
+                            dataSource={result.assessments}
+                            scroll={{ x: 700 }}
+                            columns={[
+                              {
+                                title: '人工判断',
+                                render: (_, row) => (
+                                  <Space>
+                                    <ResultOutcomeTag
+                                      outcome={row.finalOutcome}
+                                    />
+                                    {row.id === result.assessmentRevisionId &&
+                                      '当前'}
+                                  </Space>
+                                ),
+                              },
+                              { title: '原因', dataIndex: 'reason' },
+                              { title: '操作者', dataIndex: 'actorId' },
+                              { title: '时间', dataIndex: 'createdAt' },
+                            ]}
+                            locale={{ emptyText: '尚无人工最终结论' }}
+                          />
+                        </>
+                      )}
+                    </div>
+                  ),
+                },
+              ]}
+            />
+          )}
+        </div>
+      )}
+    </>
+  );
+  return (
+    <>
+      {inline ? (
+        detail
+      ) : (
+        <Drawer
+          open={resultId !== null}
+          zIndex={uiLayers.detail}
+          title="结果事实、人工结论与证据"
+          width={1100}
+          onClose={onClose}
+          destroyOnHidden
+        >
+          {detail}
+        </Drawer>
+      )}
+      {reportReview && !archivedAssessment && (
+        <ReportReceiptControl recovery={recovery} onCheck={recoverAssessment} />
+      )}
       <Modal
         open={editor !== null}
         zIndex={uiLayers.dialog}
@@ -786,12 +886,20 @@ export function ResultDetailPanel({
         keyboard={!pending}
         confirmLoading={pending}
         onOk={() => form.submit()}
-        okButtonProps={{ disabled: uncertain }}
+        okButtonProps={{
+          disabled: uncertain || !!recovery.commandId || !canAssess,
+        }}
         okText="保存新历史记录"
         cancelText="取消"
         width={750}
         destroyOnHidden
       >
+        {reportReview && (
+          <ReportReceiptControl
+            recovery={recovery}
+            onCheck={recoverAssessment}
+          />
+        )}
         <Alert
           type="info"
           showIcon

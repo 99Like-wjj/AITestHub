@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { idSchema,persistedRowVersionSchema,timestampSchema } from './base.js';
 import { issueSeveritySchema,issueStateSchema,problemStateSchema } from './domain.js';
+import { problemReviewRetestOutcomeSchema } from './issues.js';
 
 /** Current business handling is separate from execution facts and statistics. */
 export const reportHandlingSchema = z.strictObject({
@@ -15,6 +16,19 @@ export const reportHandlingSchema = z.strictObject({
     updatedAt: timestampSchema,
     resultIds: z.array(idSchema),
     issueIds: z.array(idSchema),
+    sourceResultId: idSchema.nullable().optional(),
+    sourceResultRevisionId: idSchema.nullable().optional(),
+    resultSources: z.array(z.strictObject({
+      resultId: idSchema,
+      sourceRevisionId: idSchema,
+    })).optional(),
+    latestReviewRetest: z.strictObject({
+      id: idSchema,
+      outcome: problemReviewRetestOutcomeSchema,
+      resultId: idSchema,
+      resultRevisionId: idSchema,
+      createdAt: timestampSchema,
+    }).nullable().optional(),
   })),
   issues: z.array(z.strictObject({
     id: idSchema,

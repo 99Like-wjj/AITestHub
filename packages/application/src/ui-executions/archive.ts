@@ -6,8 +6,14 @@ import {
   uiArchiveCommitSchema,
   uiArchivePreviewSchema,
   uiArchiveReceiptSchema,
+  uiArchiveResultReceiptSchema,
+  uiArchiveResultSubmissionSchema,
   uiArchiveScopeSchema,
 } from '../../../contracts/src/ui-archives.js';
+import {
+  perItemResultSchema,
+  resultSubmissionReceiptSchema,
+} from '../../../contracts/src/domain.js';
 import type {
   Database,
   SqlExecutor,
@@ -16,9 +22,23 @@ import { requireProject } from '../access/policy.js';
 import { OperationService } from '../operations/service.js';
 import { assertSafeResultContent } from '../results/safety.js';
 import { assertLocalUiActor } from '../results/delivery-access.js';
-import { DomainError } from '../errors.js';
+import { assertResultStepEvidenceReferences } from '../results/result-scope.js';
+import { DomainError, forbidden } from '../errors.js';
 import { audit } from '../events.js';
-import { semanticDigest } from './service.js';
+import { readRun, semanticDigest } from './service.js';
+import {
+  linkEvidence,
+  missingFiles,
+  registerEvidence,
+} from '../results/evidence.js';
+import { assertSubmissionFileBudget } from '../files/submission-budget.js';
+import {
+  assertFilePolicyCounts,
+  fileIntentDigest,
+  fileResourcePolicies,
+  type FileResourcePolicies,
+} from '../files/resource-policy.js';
+import { persistReportRevision } from '../reports/service.js';
 
 type ArchiveInput = z.infer<typeof uiArchiveInputSchema>;
 async function inspectArchive(
@@ -91,7 +111,10 @@ async function inspectArchive(
 
 export class UiArchiveService {
   private readonly operations: OperationService;
-  constructor(private readonly db: Database) {
+  constructor(
+    private readonly db: Database,
+    private readonly policies: FileResourcePolicies = fileResourcePolicies,
+  ) {
     this.operations = new OperationService(db);
   }
   async preview(actor: ActorContext, projectId: string, raw: unknown) {
@@ -112,6 +135,313 @@ export class UiArchiveService {
       throw new DomainError('NOT_FOUND', '尚未取得本项目的原归档回执。', 404);
     return uiArchiveReceiptSchema.parse(command.response);
   }
+
+  private async registeredScope(
+    tx: SqlExecutor,
+    actor: ActorContext,
+    projectId: string,
+    runId: string,
+    lock: boolean | 'share',
+  ) {
+    const run = await readRun(tx, projectId, runId, lock);
+    if (
+      run.source !== 'uiArchive' ||
+      run.kind !== 'UI' ||
+      run.created_by !== actor.userId
+    )
+      forbidden();
+    const scope = uiArchiveScopeSchema.parse(run.scope_snapshot);
+    if (
+      scope.runId !== run.id ||
+      scope.projectId !== projectId ||
+      scope.snapshotDigest !== run.scope_digest
+    )
+      throw new DomainError(
+        'BUSINESS_CONFLICT',
+        '归档执行与固定范围不一致。',
+        409,
+      );
+    return scope;
+  }
+
+  /** Publish only actual results of an explicitly registered independent archive. */
+  async submitResults(actor: ActorContext, projectId: string, raw: unknown) {
+    assertLocalUiActor(actor);
+    assertSafeResultContent(raw);
+    const input = uiArchiveResultSubmissionSchema.parse(raw);
+    return this.operations.execute(
+      actor,
+      'results.ui-archive.submit',
+      input.submissionId,
+      { projectId, ...input },
+      async (tx) => {
+        await requireProject(tx, actor, projectId, 'results.submit');
+      },
+      async (tx) => {
+        const scope = await this.registeredScope(
+          tx,
+          actor,
+          projectId,
+          input.runId,
+          true,
+        );
+        const declared = new Map(
+          scope.items.map((item) => [item.runItemId, item.declaredOutcome]),
+        );
+        if (
+          Date.parse(input.endedAt) !== Date.parse(scope.endedAt) ||
+          input.snapshotDigest !== scope.snapshotDigest ||
+          input.items.some(
+            (item) => declared.get(item.runItemId) !== item.originalOutcome,
+          )
+        )
+          throw new DomainError(
+            'BUSINESS_CONFLICT',
+            '归档结果须匹配登记的范围、结束时间及结论。',
+            409,
+          );
+        if (input.items.length !== declared.size)
+          throw new DomainError(
+            'PRECONDITIONS_MISSING',
+            '归档须明确提交全部登记项，包含已登记的未执行项。',
+            422,
+          );
+        for (const item of input.items)
+          assertResultStepEvidenceReferences(item);
+
+        // The prior table also contains historical V1 receipts. Never repurpose an old submission ID.
+        if (
+          (
+            await tx.query(
+              'SELECT 1 FROM app.result_submissions WHERE actor_id=$1 AND submission_id=$2',
+              [actor.userId, input.submissionId],
+            )
+          ).rowCount
+        )
+          throw new DomainError(
+            'IDEMPOTENCY_CONFLICT',
+            '提交标识已有历史回执，请先核对原结果。',
+            409,
+          );
+
+        const originals = new Map(
+          (
+            await tx.query<{
+              run_item_id: string;
+              revision_id: string;
+              semantic_digest: string;
+            }>(
+              `SELECT r.run_item_id,v.id revision_id,v.semantic_digest
+           FROM app.results r JOIN app.result_revisions v ON v.result_id=r.id AND v.revision_no=1
+           WHERE r.project_id=$1 AND r.run_id=$2`,
+              [projectId, input.runId],
+            )
+          ).rows.map((row) => [row.run_item_id, row]),
+        );
+        const ordered = input.items.map((item) => ({
+          item,
+          digest: semanticDigest(item),
+        }));
+        if (
+          ordered.some(({ item, digest }) => {
+            const original = originals.get(item.runItemId);
+            return original && original.semantic_digest !== digest;
+          })
+        )
+          throw new DomainError(
+            'BUSINESS_CONFLICT',
+            '已有不同的原始归档结果；更正须指明原修订和原因。',
+            409,
+          );
+
+        const policy = await this.policies.accept(tx, {
+          ownerId: actor.userId,
+          projectId,
+          namespace: 'results.submit',
+          key: input.submissionId,
+          payloadDigest: fileIntentDigest(input),
+          existing: false,
+        });
+        assertFilePolicyCounts(policy, input.evidenceManifest.length);
+        await assertSubmissionFileBudget(
+          tx,
+          projectId,
+          input.evidenceManifest.map((entry) => entry.fileId),
+          policy,
+          'callerCounted',
+        );
+        const evidence = await registerEvidence(
+          tx,
+          actor,
+          projectId,
+          input.runId,
+          input.evidenceManifest,
+        );
+        const perItemResults: z.infer<typeof perItemResultSchema>[] = [];
+        let accepted = 0;
+        for (const { item, digest } of ordered) {
+          const original = originals.get(item.runItemId);
+          if (original) {
+            perItemResults.push({
+              objectId: item.runItemId,
+              status: 'skipped',
+              revisionId: original.revision_id,
+            });
+            continue;
+          }
+          const resultId = randomUUID(),
+            revisionId = randomUUID();
+          await tx.query(
+            `INSERT INTO app.results(id,project_id,run_id,run_item_id,local_result_id,current_revision_id,created_by)
+             VALUES($1,$2,$3,$4,$5,$6,$7)`,
+            [
+              resultId,
+              projectId,
+              input.runId,
+              item.runItemId,
+              item.localResultId,
+              revisionId,
+              actor.userId,
+            ],
+          );
+          await tx.query(
+            `INSERT INTO app.result_revisions(id,result_id,revision_no,content,semantic_digest,actor_id)
+             VALUES($1,$2,1,$3,$4,$5)`,
+            [revisionId, resultId, JSON.stringify(item), digest, actor.userId],
+          );
+          const fileLinks = item.evidenceRefs.map((id) => {
+            const link = evidence.get(id);
+            if (!link)
+              throw new Error('Validated archive evidence was not registered');
+            return link;
+          });
+          await linkEvidence(tx, actor, resultId, fileLinks, 'original');
+          await tx.query(
+            `UPDATE app.run_items SET state=$4,outcome=$5,side_effect_certainty=$6,started_at=$7,ended_at=$8
+             WHERE id=$1 AND run_id=$2 AND project_id=$3`,
+            [
+              item.runItemId,
+              input.runId,
+              projectId,
+              item.originalOutcome === 'notExecuted'
+                ? 'notExecuted'
+                : 'completed',
+              item.originalOutcome,
+              item.sideEffectCertainty,
+              item.startedAt ?? null,
+              item.endedAt ?? input.endedAt,
+            ],
+          );
+          accepted++;
+          perItemResults.push({
+            objectId: item.runItemId,
+            status: 'accepted',
+            revisionId,
+          });
+        }
+        // Do not advance formal execution, create approval or generate a candidate automatically.
+        if (accepted)
+          await tx.query(
+            'UPDATE app.runs SET row_version=row_version+1 WHERE id=$1',
+            [input.runId],
+          );
+        const report = await persistReportRevision(
+          tx,
+          actor,
+          projectId,
+          input.runId,
+          'independent-ui-archive-results',
+        );
+        const digest = semanticDigest(input);
+        const receipt = resultSubmissionReceiptSchema.parse({
+          submissionId: input.submissionId,
+          semanticDigest: digest,
+          resultsAccepted: accepted,
+          missingFileIds: report.facts.missingFileIds,
+          deliveryStatus: report.facts.deliveryStatus,
+          reportId: report.reportId,
+          reportUrl: report.reportUrl,
+          perItemResults,
+        });
+        await tx.query(
+          'INSERT INTO app.result_submissions(run_id,actor_id,submission_id,semantic_digest,payload,receipt) VALUES($1,$2,$3,$4,$5,$6)',
+          [
+            input.runId,
+            actor.userId,
+            input.submissionId,
+            digest,
+            JSON.stringify(input),
+            JSON.stringify(receipt),
+          ],
+        );
+        await audit(
+          tx,
+          actor,
+          'results.ui-archive.submitted',
+          input.runId,
+          projectId,
+          {
+            submissionId: input.submissionId,
+            reportId: receipt.reportId,
+            accepted,
+            deliveryStatus: receipt.deliveryStatus,
+          },
+        );
+        return receipt;
+      },
+      projectId,
+    );
+  }
+
+  async resultReceipt(
+    actor: ActorContext,
+    projectId: string,
+    runId: string,
+    submissionId: string,
+  ) {
+    assertLocalUiActor(actor);
+    return this.db.transaction(async (tx) => {
+      await requireProject(tx, actor, projectId, 'results.submit');
+      const scope = await this.registeredScope(
+        tx,
+        actor,
+        projectId,
+        runId,
+        'share',
+      );
+      const row = (
+        await tx.query<{ receipt: unknown }>(
+          'SELECT receipt FROM app.result_submissions WHERE run_id=$1 AND actor_id=$2 AND submission_id=$3',
+          [runId, actor.userId, submissionId],
+        )
+      ).rows[0];
+      if (!row)
+        throw new DomainError(
+          'NOT_FOUND',
+          '尚未取得此独立归档结果的原提交回执。',
+          404,
+        );
+      const count =
+        (
+          await tx.query<{ rows: number }>(
+            'SELECT count(*)::integer rows FROM app.results WHERE project_id=$1 AND run_id=$2',
+            [projectId, runId],
+          )
+        ).rows[0]?.rows ?? 0;
+      const missingFileIds = await missingFiles(tx, runId);
+      return uiArchiveResultReceiptSchema.parse({
+        receipt: row.receipt,
+        currentDelivery: {
+          missingFileIds,
+          status:
+            count === scope.items.length && !missingFileIds.length
+              ? 'complete'
+              : 'incomplete',
+        },
+      });
+    });
+  }
+
   async commit(actor: ActorContext, projectId: string, raw: unknown) {
     assertLocalUiActor(actor);
     assertSafeResultContent(raw);

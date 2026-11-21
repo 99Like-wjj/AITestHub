@@ -20,7 +20,10 @@ import {
   issueDetailSchema,
   problemDetailSchema,
 } from '../../../packages/contracts/src/issues';
-import type { Issue } from '../../../packages/contracts/src/issues';
+import type {
+  Issue,
+  ReportProblemReviewScope,
+} from '../../../packages/contracts/src/issues';
 import { api, describeError } from './api';
 import {
   issueStateLabels,
@@ -40,12 +43,16 @@ import type { EvidenceType } from './evidence-gallery';
 export type IssueSelection = { kind: 'issue' | 'problem'; id: string };
 type IssueResultLink = { resultId: string; revisionId?: string };
 type IssueEvidence = z.infer<typeof issueDetailSchema>['evidence'];
+type IssueReviewEvidence = NonNullable<
+  z.infer<typeof issueDetailSchema>['reviewEvidence']
+>;
 type ReviewedResult = z.infer<typeof resultDetailSchema>['result'];
 
 function resultLocation(
   projectId: string,
   link: IssueResultLink,
   ordinal?: number,
+  report?: ReportProblemReviewScope,
 ) {
   const returnTo = window.location.hash;
   const params = new URLSearchParams({
@@ -59,7 +66,92 @@ function resultLocation(
   if (issueId.success) params.set('fromIssueId', issueId.data);
   if (link.revisionId) params.set('resultRevisionId', link.revisionId);
   if (ordinal !== undefined) params.set('step', String(ordinal));
+  if (report) {
+    params.set('reportId', report.reportId);
+    params.set('revisionId', report.reportRevisionId);
+  }
   return `#reports?${params}`;
+}
+
+function HumanReviewEvidence({
+  projectId,
+  entries,
+  describeActor,
+  onOpen,
+}: {
+  projectId: string;
+  entries: IssueReviewEvidence;
+  describeActor: (id: string) => string;
+  onOpen: (id: string, evidenceType?: EvidenceType) => void;
+}) {
+  if (!entries.length) return null;
+  return (
+    <section className="issue-human-review-evidence" aria-label="人工复核证据">
+      <h3>人工复核证据</h3>
+      {entries.map((entry) => (
+        <Card
+          key={entry.eventId}
+          size="small"
+          title={describeActor(entry.actorId)}
+          extra={
+            <Typography.Text type="secondary">
+              {new Date(entry.createdAt).toLocaleString('zh-CN')}
+            </Typography.Text>
+          }
+        >
+          {entry.retestNote && (
+            <div className="issue-review-evidence-text">
+              <label>复测观察</label>
+              <p className="preserve-lines">{entry.retestNote}</p>
+            </div>
+          )}
+          {entry.note && (
+            <div className="issue-review-evidence-text">
+              <label>复核说明</label>
+              <p className="preserve-lines">{entry.note}</p>
+            </div>
+          )}
+          {entry.resultId && (
+            <a
+              href={resultLocation(
+                projectId,
+                {
+                  resultId: entry.resultId,
+                  ...(entry.resultRevisionId
+                    ? { revisionId: entry.resultRevisionId }
+                    : {}),
+                },
+                entry.reportReview?.stepOrdinal,
+                entry.reportReview,
+              )}
+              className="text-link-button"
+            >
+              {entry.reportReview?.stepOrdinal
+                ? `定位来源第 ${entry.reportReview.stepOrdinal} 步`
+                : '打开复核来源报告'}
+            </a>
+          )}
+          {entry.images.length > 0 && (
+            <EvidenceGallery
+              items={entry.images.map((image) => ({
+                fileId: image.fileId,
+                originalName: image.originalName,
+                fileAvailable: image.fileAvailable,
+                source: 'manualAddition',
+                manifest: {
+                  localEvidenceId: image.fileId,
+                  type: 'screenshot',
+                  captureCompleteness: 'full',
+                  capturedAt: entry.createdAt,
+                },
+              }))}
+              onOpen={(image) => onOpen(image.fileId, 'screenshot')}
+            />
+          )}
+        </Card>
+      ))}
+    </section>
+  );
 }
 
 function IssueDescription({
@@ -486,10 +578,17 @@ export function IssueDetailPanel({
                 <span className="badge red">负责人权限失效，身份保留</span>
               )}
             </div>
+            {issue.resultLinks.length > 0 && <h3>原始执行证据</h3>}
             <LinkedResultEvidence
               projectId={project.id}
               link={issue.resultLinks[0]}
               items={issue.evidence}
+              onOpen={onEvidence}
+            />
+            <HumanReviewEvidence
+              projectId={project.id}
+              entries={issue.reviewEvidence ?? []}
+              describeActor={userName}
               onOpen={onEvidence}
             />
             <div className="divider" />

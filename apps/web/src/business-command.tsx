@@ -132,6 +132,7 @@ export function CommandDialog({
   allowSave = true,
   busy = false,
   zIndex = uiLayers.dialog,
+  inline = false,
 }: {
   open: boolean;
   title: ReactNode;
@@ -145,6 +146,7 @@ export function CommandDialog({
   allowSave?: boolean;
   busy?: boolean;
   zIndex?: number;
+  inline?: boolean;
 }) {
   const [discard, setDiscard] = useState(false);
   useEffect(() => {
@@ -155,53 +157,69 @@ export function CommandDialog({
     if (dirty) setDiscard(true);
     else onClose();
   }
+  const footer = (
+    <Space wrap>
+      <Button disabled={command.pending || busy} onClick={close}>
+        取消
+      </Button>
+      <Button
+        type="primary"
+        loading={command.pending}
+        disabled={command.uncertain || !allowSave || busy}
+        onClick={onSave}
+      >
+        {saveLabel}
+      </Button>
+    </Space>
+  );
+  const content = (
+    <>
+      {command.error && (
+        <Alert
+          className="section-alert"
+          type="error"
+          showIcon
+          title={command.error}
+        />
+      )}
+      {command.uncertain && (
+        <Alert
+          className="section-alert"
+          type="warning"
+          showIcon
+          title={`本次操作回执未知：${command.commandId}`}
+          description="已禁重发，请先只读核对原对象/回执。不要通过更换提交标识推断原操作未发生。"
+        />
+      )}
+      {children}
+    </>
+  );
   return (
     <>
-      <Modal
-        open={open}
-        zIndex={zIndex}
-        title={title}
-        width={width}
-        onCancel={close}
-        closable={!command.pending && !busy}
-        maskClosable={!command.pending && !busy}
-        keyboard={!command.pending && !busy}
-        destroyOnHidden
-        footer={
-          <Space>
-            <Button disabled={command.pending || busy} onClick={close}>
-              取消
-            </Button>
-            <Button
-              type="primary"
-              loading={command.pending}
-              disabled={command.uncertain || !allowSave || busy}
-              onClick={onSave}
-            >
-              {saveLabel}
-            </Button>
-          </Space>
-        }
-      >
-        {command.error && (
-          <Alert
-            className="section-alert"
-            type="error"
-            showIcon
-            title={command.error}
-          />
-        )}
-        {command.uncertain && (
-          <Alert
-            className="section-alert"
-            type="warning"
-            showIcon
-            title={`本次操作回执未知：${command.commandId}`}
-            description="已禁重发，请先只读核对原对象/回执。不要通过更换提交标识推断原操作未发生。"
-          />
-        )}
-        {children}
-      </Modal>
+      {inline ? (
+        open && (
+          <section className="report-inline-command">
+            <h2>{title}</h2>
+            {content}
+            <div className="report-inline-command-actions">{footer}</div>
+          </section>
+        )
+      ) : (
+        <Modal
+          open={open}
+          zIndex={zIndex}
+          title={title}
+          width={width}
+          onCancel={close}
+          closable={!command.pending && !busy}
+          maskClosable={!command.pending && !busy}
+          keyboard={!command.pending && !busy}
+          destroyOnHidden
+          footer={footer}
+        >
+          {content}
+        </Modal>
+      )}
       <Modal
         open={discard}
         zIndex={Math.max(uiLayers.confirmation, zIndex + 100)}

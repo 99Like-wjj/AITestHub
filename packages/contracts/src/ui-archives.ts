@@ -1,6 +1,15 @@
 import { z } from 'zod';
 import { commandIdSchema, idSchema, sha256Schema, timestampSchema, titleSchema } from './base.js';
-import { executionScopeSchema, scopeItemSchema, uiOutcomeSchema, localIdSchema } from './domain.js';
+import {
+  deliveryStatusSchema,
+  evidenceManifestItemSchema,
+  executionScopeSchema,
+  localIdSchema,
+  resultItemSchema,
+  resultSubmissionReceiptSchema,
+  scopeItemSchema,
+  uiOutcomeSchema,
+} from './domain.js';
 
 const archiveEntrySchema = z.strictObject({
   localItemId: localIdSchema,
@@ -73,6 +82,35 @@ export const uiArchivePreviewSchema = z.strictObject({
   })),
 });
 export const uiArchiveReceiptSchema = z.strictObject({runId:idSchema,scope:uiArchiveScopeSchema});
+/** All original facts for one registered, completed independent run. */
+export const uiArchiveResultSubmissionSchema = z
+  .strictObject({
+    schemaVersion: z.literal('ath.ui-archive-results.v1'),
+    runId: idSchema,
+    submissionId: commandIdSchema,
+    snapshotDigest: sha256Schema,
+    endedAt: timestampSchema,
+    items: z.array(resultItemSchema).min(1).max(10_000),
+    evidenceManifest: z.array(evidenceManifestItemSchema).max(200),
+  })
+  .superRefine((input, context) => {
+    for (const field of ['runItemId', 'localResultId'] as const)
+      if (new Set(input.items.map((item) => item[field])).size !== input.items.length)
+        context.addIssue({ code: 'custom', path: ['items'], message: '归档项及本地结果标识须唯一。' });
+    const known = new Set(input.evidenceManifest.map((item) => item.localEvidenceId));
+    if (known.size !== input.evidenceManifest.length)
+      context.addIssue({ code: 'custom', path: ['evidenceManifest'], message: '清单内本地证据标识须唯一。' });
+    for (const [index, item] of input.items.entries())
+      if (item.evidenceRefs.some((id) => !known.has(id)))
+        context.addIssue({ code: 'custom', path: ['items', index, 'evidenceRefs'], message: '结果证据须在本次归档清单登记。' });
+  });
+export const uiArchiveResultReceiptSchema = z.strictObject({
+  receipt: resultSubmissionReceiptSchema,
+  currentDelivery: z.strictObject({
+    status: deliveryStatusSchema,
+    missingFileIds: z.array(idSchema),
+  }),
+});
 export const reportExecutionScopeSchema = z.union([executionScopeSchema,uiArchiveScopeSchema]);
 export const reportScopeItemSchema = z.union([scopeItemSchema,uiArchiveItemSchema]);
 
@@ -85,4 +123,21 @@ export const uiArchiveCommitToolSchema = z.strictObject({
 export const uiArchiveReceiptToolSchema = z.strictObject({
   op:z.literal('receipt'),projectId:idSchema,commandId:commandIdSchema,
 });
-export const uiArchiveToolInputSchema = z.discriminatedUnion('op',[uiArchivePreviewToolSchema,uiArchiveCommitToolSchema,uiArchiveReceiptToolSchema]);
+export const uiArchiveResultSubmitToolSchema = z.strictObject({
+  op: z.literal('submit-results'),
+  projectId: idSchema,
+  input: uiArchiveResultSubmissionSchema,
+});
+export const uiArchiveResultReceiptToolSchema = z.strictObject({
+  op: z.literal('result-receipt'),
+  projectId: idSchema,
+  runId: idSchema,
+  submissionId: commandIdSchema,
+});
+export const uiArchiveToolInputSchema = z.discriminatedUnion('op', [
+  uiArchivePreviewToolSchema,
+  uiArchiveCommitToolSchema,
+  uiArchiveReceiptToolSchema,
+  uiArchiveResultSubmitToolSchema,
+  uiArchiveResultReceiptToolSchema,
+]);

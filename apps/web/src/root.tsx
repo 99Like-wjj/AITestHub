@@ -206,6 +206,14 @@ function readLinkedProjectId() {
   return parsed.success ? parsed.data : null;
 }
 
+function readReportWorkspace() {
+  if (readPage() !== 'reports') return false;
+  const query = new URLSearchParams(window.location.hash.split('?')[1]);
+  return ['reportId', 'resultId'].some(
+    (key) => idSchema.safeParse(query.get(key)).success,
+  );
+}
+
 function readCaseScope(): CaseScope | null {
   if (readPage() !== 'cases') return null;
   const query = new URLSearchParams(window.location.hash.split('?')[1]);
@@ -278,6 +286,7 @@ function SignedIn({
   onPasswordChanged: () => void;
 }) {
   const [page, setPage] = useState(readPage);
+  const [reportWorkspace, setReportWorkspace] = useState(readReportWorkspace);
   const currentHash = useRef(window.location.hash);
   const workspaceMounted = useRef(readPage() === 'workspace');
   const navigationGranted = useRef(false);
@@ -359,6 +368,7 @@ function SignedIn({
       currentHash.current = nextHash;
       const nextPage = readPage();
       setPage(nextPage);
+      setReportWorkspace(readReportWorkspace());
       if (nextPage === 'workspace') workspaceMounted.current = true;
       else if (nextPage !== 'personal-settings')
         workspaceMounted.current = false;
@@ -663,86 +673,88 @@ function SignedIn({
 
   return (
     <Layout className="app-shell">
-      <Layout.Sider
-        width={224}
-        collapsedWidth={56}
-        collapsed={collapsed}
-        theme="light"
-        className={`main-sidebar mainnav ${collapsed ? 'rail' : ''}`}
-      >
-        <div className={`brand-slot brand ${collapsed ? 'collapsed' : ''}`}>
-          <img
-            className="brand-lockup"
-            src="/brand-f-horizontal.png"
-            alt="AITestHub"
-          />
-          <img
-            className="brand-icon"
-            src="/brand-f-color.png"
-            alt="AITestHub"
-          />
-        </div>
-        <div className="nav-label">工作空间</div>
-        <Menu
-          mode="inline"
-          selectedKeys={[page]}
-          items={[
-            ...pages.map((item) => ({ ...item, 'aria-label': item.label })),
-            ...(me.user.isPlatformAdmin
-              ? [
-                  { type: 'divider' as const },
-                  {
-                    key: 'platform-projects',
-                    label: '平台项目管理',
-                    'aria-label': '平台项目管理',
-                    icon: <ProjectOutlined />,
-                  },
-                  {
-                    key: 'platform-users',
-                    label: '平台账号管理',
-                    'aria-label': '平台账号管理',
-                    icon: <TeamOutlined />,
-                  },
-                  {
-                    key: 'usage',
-                    label: 'AI 使用监控',
-                    'aria-label': 'AI 使用监控',
-                    icon: <AppIcon name="settings" />,
-                  },
-                  {
-                    key: 'platform-models',
-                    label: '平台模型设置',
-                    'aria-label': '平台模型设置',
-                    icon: <AppIcon name="chart" />,
-                  },
-                ]
-              : []),
-          ]}
-          onClick={({ key }) => navigate(key)}
-        />
-        <div className="sidebar-bottom navbottom">
-          <Tooltip title={collapsed ? '展开导航' : '收起导航'}>
-            <Button
-              type="text"
-              aria-label={collapsed ? '展开导航' : '收起导航'}
-              className="iconbtn"
-              icon={<AppIcon name="panel" />}
-              onClick={() =>
-                isWorkspace || isPersonalSettings
-                  ? setWorkspaceExpanded((value) => !value)
-                  : setBusinessCollapsed((value) => !value)
-              }
+      {!reportWorkspace && (
+        <Layout.Sider
+          width={224}
+          collapsedWidth={56}
+          collapsed={collapsed}
+          theme="light"
+          className={`main-sidebar mainnav ${collapsed ? 'rail' : ''}`}
+        >
+          <div className={`brand-slot brand ${collapsed ? 'collapsed' : ''}`}>
+            <img
+              className="brand-lockup"
+              src="/brand-f-horizontal.png"
+              alt="AITestHub"
             />
-          </Tooltip>
-          <p>
-            AI 探索 · 人工判断
-            <br />
-            可追溯的测试协作
-          </p>
-        </div>
-      </Layout.Sider>
+            <img
+              className="brand-icon"
+              src="/brand-f-color.png"
+              alt="AITestHub"
+            />
+          </div>
+          <div className="nav-label">工作空间</div>
+          <Menu
+            mode="inline"
+            selectedKeys={[page]}
+            items={[
+              ...pages.map((item) => ({ ...item, 'aria-label': item.label })),
+              ...(me.user.isPlatformAdmin
+                ? [
+                    { type: 'divider' as const },
+                    {
+                      key: 'platform-projects',
+                      label: '平台项目管理',
+                      'aria-label': '平台项目管理',
+                      icon: <ProjectOutlined />,
+                    },
+                    {
+                      key: 'platform-users',
+                      label: '平台账号管理',
+                      'aria-label': '平台账号管理',
+                      icon: <TeamOutlined />,
+                    },
+                    {
+                      key: 'usage',
+                      label: 'AI 使用监控',
+                      'aria-label': 'AI 使用监控',
+                      icon: <AppIcon name="settings" />,
+                    },
+                    {
+                      key: 'platform-models',
+                      label: '平台模型设置',
+                      'aria-label': '平台模型设置',
+                      icon: <AppIcon name="chart" />,
+                    },
+                  ]
+                : []),
+            ]}
+            onClick={({ key }) => navigate(key)}
+          />
+          <div className="sidebar-bottom navbottom">
+            <Tooltip title={collapsed ? '展开导航' : '收起导航'}>
+              <Button
+                type="text"
+                aria-label={collapsed ? '展开导航' : '收起导航'}
+                className="iconbtn"
+                icon={<AppIcon name="panel" />}
+                onClick={() =>
+                  isWorkspace || isPersonalSettings
+                    ? setWorkspaceExpanded((value) => !value)
+                    : setBusinessCollapsed((value) => !value)
+                }
+              />
+            </Tooltip>
+            <p>
+              AI 探索 · 人工判断
+              <br />
+              可追溯的测试协作
+            </p>
+          </div>
+        </Layout.Sider>
+      )}
       <Layout>
-        {!isWorkspace && !isPersonalSettings && (
+        {!isWorkspace && !isPersonalSettings && !reportWorkspace && (
           <Layout.Header className="topbar globalbar" aria-label={currentLabel}>
             <div className="global-project-context">
               {!isPlatformPage && !isPersonalToolPage && (
@@ -812,7 +824,9 @@ function SignedIn({
               ? 'workspace-container'
               : isPersonalSettings
                 ? 'personal-settings-container'
-                : 'page-content'
+                : reportWorkspace
+                  ? 'report-workspace-container'
+                  : 'page-content'
           }
         >
           {(isWorkspace ||

@@ -94,6 +94,25 @@
   margin: 0;
   color: var(--muted);
 }
+.issue-human-review-evidence {
+  display: grid;
+  gap: 9px;
+  margin-block: 14px;
+}
+.issue-review-evidence-text + .issue-review-evidence-text {
+  margin-top: 9px;
+}
+.issue-review-evidence-text label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+.issue-review-evidence-text p {
+  margin: 3px 0 7px;
+}
+.issue-human-review-evidence .result-evidence-gallery-section {
+  margin-top: 9px;
+}
 @media (max-width: 760px) {
   .issue-repro-evidence-grid {
     grid-template-columns: minmax(0, 1fr);

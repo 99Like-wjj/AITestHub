@@ -22,6 +22,7 @@ import { OperationService } from '../operations/service.js';
 import { forbidden, DomainError, stale } from '../errors.js';
 import { assertSafeResultContent } from '../results/safety.js';
 import { recordRequirementActivity } from '../requirements/service.js';
+import { issueConfirmationEvidence } from './review-evidence.js';
 import {
   issueDto,
   issueRow,
@@ -264,6 +265,15 @@ export class IssueService {
           projectId,
           evidence.rows.map((item) => item.evidence_id),
         ),
+        ...(actor.entrypoint === 'web'
+          ? {
+              reviewEvidence: await issueConfirmationEvidence(
+                tx,
+                projectId,
+                events.rows,
+              ),
+            }
+          : {}),
         mergedChildren: children.rows.map(issueDto),
         merges: merges.rows.map((merge) => ({
           id: merge.id,

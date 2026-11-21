@@ -292,18 +292,25 @@ export class ReportService {
   }
   async detail(actor: ActorContext, projectId: string, id: string) {
     return this.db.transaction(async (tx) => {
-      await requireProject(tx, actor, projectId, 'project.read');
+      const member = await requireProject(tx, actor, projectId, 'project.read');
       const report = (
         await tx.query<{
-          id: string;
           run_id: string;
-          current_revision_id: string;
-        }>(
-          'SELECT id,run_id,current_revision_id FROM app.reports WHERE project_id=$1 AND id=$2',
+        }>('SELECT run_id FROM app.reports WHERE project_id=$1 AND id=$2', [
+          projectId,
+          id,
+        ])
+      ).rows[0];
+      if (!report)
+        throw new DomainError('NOT_FOUND', '此项目内没有该报告。', 404);
+      await readRun(tx, projectId, report.run_id, 'share');
+      const current = (
+        await tx.query<{ current_revision_id: string }>(
+          'SELECT current_revision_id FROM app.reports WHERE project_id=$1 AND id=$2',
           [projectId, id],
         )
       ).rows[0];
-      if (!report)
+      if (!current)
         throw new DomainError('NOT_FOUND', '此项目内没有该报告。', 404);
       const history = await tx.query<{
         id: string;
@@ -319,9 +326,12 @@ export class ReportService {
       return {
         report: {
           id,
-          revisionId: report.current_revision_id,
+          revisionId: current.current_revision_id,
           facts: await reportFacts(tx, projectId, report.run_id),
           currentHandling: await reportHandling(tx, projectId, report.run_id),
+          ...(actor.entrypoint === 'web'
+            ? { canReview: member.roles.includes('tester') }
+            : {}),
           history: history.rows.map((row) => ({
             id: row.id,
             revisionNo: row.revision_no,

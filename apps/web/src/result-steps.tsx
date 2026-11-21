@@ -78,23 +78,41 @@ export function ResultUiSteps({
   scope,
   evidence,
   initialStep,
+  onStepSelect,
   onOpen,
 }: {
   content: Content;
   scope?: Scope | undefined;
   evidence: readonly EvidenceGalleryItem[];
   initialStep?: number | undefined;
+  onStepSelect?: ((ordinal: number) => void) | undefined;
   onOpen: (item: EvidenceGalleryItem) => void;
 }) {
   const steps = scope?.steps ?? [];
   const observations = content.stepObservations ?? [];
+  const observedOnly = steps.length === 0 && observations.length > 0;
+  const entries = steps.length
+    ? steps.map((step, index) => ({ ordinal: index + 1, label: step.action }))
+    : [...observations]
+        .sort((left, right) => left.ordinal - right.ordinal)
+        .map((step) => ({
+          ordinal: step.ordinal,
+          label: `实际步骤 ${step.ordinal}`,
+        }));
   const originalStep =
     initialStep ??
     observations.find((step) => step.outcome === 'failed')?.ordinal ??
+    entries[0]?.ordinal ??
     1;
-  const [ordinal, setOrdinal] = useState(originalStep);
+  const [activeOrdinal, setActiveOrdinal] = useState(originalStep);
+  const ordinal = onStepSelect ? (initialStep ?? activeOrdinal) : activeOrdinal;
+  function setOrdinal(value: number) {
+    setActiveOrdinal(value);
+    onStepSelect?.(value);
+  }
   const step = steps[ordinal - 1];
   const observation = observations.find((record) => record.ordinal === ordinal);
+  const observedStep = observedOnly && observation;
   const refs = new Set(observation?.evidenceRefs ?? []);
   return (
     <div className="result-review-content">
@@ -128,18 +146,18 @@ export function ResultUiSteps({
           ]}
         />
       )}
-      {steps.length > 0 ? (
+      {entries.length > 0 ? (
         <div className="result-review-layout">
           <aside className="result-review-panel" aria-label="执行步骤">
             <div className="result-review-header">
               <h3>执行步骤</h3>
               <small className="result-review-muted">
-                共 {steps.length} 步
+                共 {entries.length} 步
               </small>
             </div>
             <ol className="result-review-ordered">
-              {steps.map((entry, index) => {
-                const number = index + 1;
+              {entries.map((entry) => {
+                const number = entry.ordinal;
                 const outcome = observations.find(
                   (record) => record.ordinal === number,
                 )?.outcome;
@@ -154,7 +172,7 @@ export function ResultUiSteps({
                       <span className="result-review-step-number">
                         {number}
                       </span>
-                      <strong>{entry.action}</strong>
+                      <strong>{entry.label}</strong>
                       {outcome && <ResultOutcomeTag outcome={outcome} />}
                     </button>
                   </li>
@@ -166,26 +184,28 @@ export function ResultUiSteps({
             className="result-review-panel result-review-content"
             aria-label="步骤观察"
           >
-            {step ? (
+            {step || observedStep ? (
               <>
                 <div className="result-review-header">
                   <div>
                     <small className="result-review-muted">
-                      步骤 {ordinal} / {steps.length}
+                      {observedOnly ? '归档观察' : '冻结步骤'} · 步骤 {ordinal}
                     </small>
-                    <h3>{step.action}</h3>
+                    <h3>{step?.action ?? `实际步骤 ${ordinal}`}</h3>
                   </div>
                   {observation?.outcome && (
                     <ResultOutcomeTag outcome={observation.outcome} />
                   )}
                 </div>
                 <div className="result-review-comparison">
-                  <div>
-                    <span className="result-review-muted">预期结果</span>
-                    <p className="result-review-lines">
-                      {step.expected ?? '该步骤没有单独预期'}
-                    </p>
-                  </div>
+                  {step && (
+                    <div>
+                      <span className="result-review-muted">预期结果</span>
+                      <p className="result-review-lines">
+                        {step.expected ?? '该步骤没有单独预期'}
+                      </p>
+                    </div>
+                  )}
                   <div
                     className={
                       observation?.outcome === 'failed'
@@ -218,7 +238,7 @@ export function ResultUiSteps({
                 type="warning"
                 showIcon
                 title={`原链接指向步骤 ${ordinal}，该步骤没有留档。`}
-                description="可从侧栏浏览已经冻结的步骤。"
+                description="可从侧栏浏览此结果留档的步骤。"
               />
             )}
           </section>

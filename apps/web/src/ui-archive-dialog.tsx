@@ -4,18 +4,18 @@ import { z } from 'zod';
 import {
   evidenceManifestItemSchema,
   resultItemSchema,
-  resultSubmissionSchema,
   resultSubmissionReceiptSchema,
 } from '../../../packages/contracts/src/domain';
 import {
   uiArchiveInputSchema,
   uiArchivePreviewSchema,
   uiArchiveReceiptSchema,
+  uiArchiveResultReceiptSchema,
+  uiArchiveResultSubmissionSchema,
 } from '../../../packages/contracts/src/ui-archives';
 import { api, describeError, isUncertainMutationError } from './api';
 import { previewUploadMediaType } from '../../../packages/contracts/src/file-preview';
 import { fileReceiptSchema } from '../../../packages/contracts/src/files';
-import { resultReceiptStatusSchema } from '../../../packages/contracts/src/ui-results';
 import type { Project } from './types';
 import { uploadProjectFile } from './file-channel';
 import { identityContextEpoch, currentIdentityOwner } from './identity-context';
@@ -137,12 +137,20 @@ export function UiArchiveDialog({
     try {
       checkIdentity();
       if (uncertain === 'submission') {
+        const runId = registration.current?.runId;
+        if (!runId) throw new Error('缺少原归档轮次，请核对原登记回执。');
         const { receipt } = await api(
-          `/projects/${project.id}/result-submissions/${p.submissionId}`,
+          `/projects/${project.id}/ui-archives/${runId}/result-receipts/${p.submissionId}`,
           {},
-          resultReceiptStatusSchema,
+          uiArchiveResultReceiptSchema,
         );
-        if (receipt.reportId) {
+        checkIdentity();
+        if (receipt.submissionId !== p.submissionId)
+          throw new Error('提交回执与原归档提交不一致。');
+        if (
+          receipt.reportId &&
+          receipt.perItemResults.every((row) => row.status === 'accepted')
+        ) {
           setUncertain(undefined);
           setPreview(undefined);
           setText('');
@@ -215,32 +223,30 @@ export function UiArchiveDialog({
       const ids = new Map(
         archived.scope.items.map((item) => [item.localItemId, item.runItemId]),
       );
-      const input = resultSubmissionSchema.parse({
-        schemaVersion: 'ath.result-submission.v1',
+      const input = uiArchiveResultSubmissionSchema.parse({
+        schemaVersion: 'ath.ui-archive-results.v1',
         runId: archived.runId,
         submissionId: p.submissionId,
         snapshotDigest: archived.scope.snapshotDigest,
-        completion: 'complete',
         endedAt: p.input.execution.endedAt,
         items: p.input.results.map(({ localItemId, ...item }) => ({
           ...item,
           runItemId: ids.get(localItemId),
         })),
         evidenceManifest,
-        notExecutedItemIds: [],
       });
       checkIdentity();
       dispatched = 'submission';
       const receipt = await api(
-        `/projects/${project.id}/result-submissions`,
+        `/projects/${project.id}/ui-archives/results`,
         { method: 'POST', body: input },
         resultSubmissionReceiptSchema,
       );
+      checkIdentity();
       if (
+        receipt.submissionId !== p.submissionId ||
         !receipt.reportId ||
-        receipt.perItemResults.some(
-          (x) => x.status === 'conflict' || x.status === 'rejected',
-        )
+        receipt.perItemResults.some((row) => row.status !== 'accepted')
       )
         throw new Error('归档未全部接收，请查看执行记录和原提交回执。');
       setText('');

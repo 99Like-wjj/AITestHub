@@ -160,6 +160,27 @@ export class ResultsController {
       ),
     );
   }
+  @Post('ui-archives/results')
+  async submitArchiveResults(@Req() req: Request, @Res() res: Response) {
+    return res.json(
+      await this.results.archives.submitResults(
+        await this.actor(req, res),
+        this.project(req),
+        req.body,
+      ),
+    );
+  }
+  @Get('ui-archives/:runId/result-receipts/:submissionId')
+  async archiveResultReceipt(@Req() req: Request, @Res() res: Response) {
+    return res.json(
+      await this.results.archives.resultReceipt(
+        await this.actor(req, res),
+        this.project(req),
+        idSchema.parse(req.params.runId),
+        commandIdSchema.parse(req.params.submissionId),
+      ),
+    );
+  }
   @Post('result-submissions')
   async retiredSubmission(@Req() req: Request, @Res() res: Response) {
     await this.actor(req, res);

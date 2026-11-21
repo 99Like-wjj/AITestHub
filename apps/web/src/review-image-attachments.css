@@ -1,0 +1,97 @@
+.review-image-composer {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.review-image-hint,
+.review-image-state,
+.review-image-composer .review-image-retry {
+  font-size: 11px;
+}
+
+.review-image-file-input {
+  display: none;
+}
+
+.review-image-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.review-image-tile {
+  position: relative;
+  display: grid;
+  gap: 2px;
+  justify-items: center;
+  width: 82px;
+  min-width: 0;
+}
+
+.review-image-thumb {
+  display: grid;
+  place-items: center;
+  width: 82px;
+  height: 58px;
+  overflow: hidden;
+  border: 1px solid var(--ant-color-border-secondary, #dce6df);
+  border-radius: 7px;
+  background: var(--ant-color-fill-quaternary, #f5f8f6);
+}
+
+.review-image-preview,
+.review-image-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.review-image-preview {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.review-image-preview:focus-visible {
+  outline: 2px solid var(--ant-color-primary, #23745f);
+  outline-offset: -2px;
+}
+
+.review-image-preview img,
+.review-image-original {
+  object-fit: contain;
+}
+
+.review-image-original {
+  display: block;
+  width: 100%;
+  max-height: 75vh;
+}
+
+.review-image-composer .review-image-remove {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  z-index: 1;
+  width: 20px;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  background: var(--ant-color-bg-container, #fff);
+}
+
+.review-image-state {
+  color: var(--ant-color-text-secondary, #536a61);
+}
+
+.review-image-composer .review-image-retry {
+  height: auto;
+  padding: 0;
+  white-space: normal;
+}

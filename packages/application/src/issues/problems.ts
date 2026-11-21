@@ -5,15 +5,24 @@ import {
   problemListResponseSchema,
   problemDetailSchema,
   reportProblemInputSchema,
+  webReportProblemInputSchema,
   confirmProblemInputSchema,
+  webConfirmProblemInputSchema,
   dismissProblemInputSchema,
+  webDismissProblemInputSchema,
+  recordProblemReviewRetestInputSchema,
+  problemReviewRetestReceiptSchema,
+  problemOperationLookupSchema,
   problemConfirmationReceiptSchema,
   problemDismissalReceiptSchema,
   previewProblemBatchInputSchema,
   commitProblemBatchInputSchema,
   problemBatchPreviewSchema,
+  webProblemBatchPreviewSchema,
+  webPreviewProblemBatchInputSchema,
   problemBatchReceiptSchema,
   type Problem,
+  type ReportProblemReviewScope,
 } from '../../../contracts/src/issues.js';
 import {
   resultItemSchema,
@@ -41,6 +50,41 @@ import {
   evidenceDtos,
 } from './common.js';
 import { semanticDigest } from '../ui-executions/service.js';
+import {
+  assertReportConfirmation,
+  latestReviewRetest,
+  linkReviewImages,
+  lockCurrentReport,
+  lockReportResult,
+  lockReportReview,
+  projectReviewRetest,
+  savedReviewRetests,
+} from './review-evidence.js';
+
+type ReviewConfirmation = ReturnType<typeof webConfirmProblemInputSchema.parse>;
+
+function batchReportScope(
+  decisions: readonly {
+    decision: { reportReview?: ReportProblemReviewScope | undefined };
+  }[],
+) {
+  const report = decisions.find(({ decision }) => decision.reportReview)
+    ?.decision.reportReview;
+  if (
+    report &&
+    decisions.some(
+      ({ decision }) =>
+        decision.reportReview?.reportId !== report.reportId ||
+        decision.reportReview?.reportRevisionId !== report.reportRevisionId,
+    )
+  )
+    throw new DomainError(
+      'BUSINESS_CONFLICT',
+      '批量预览需要同一份当前报告及报告修订。',
+      409,
+    );
+  return report;
+}
 
 interface ProblemRow {
   id: string;
@@ -237,6 +281,13 @@ export class ProblemService {
   constructor(readonly db: Database) {
     this.operations = new OperationService(db);
   }
+  async operationStatus(actor: ActorContext, projectId: string, raw: unknown) {
+    const lookup = problemOperationLookupSchema.parse(raw);
+    const result = await this.operations.get(actor, lookup);
+    if (result.command.projectId !== projectId)
+      throw new DomainError('NOT_FOUND', '本项目没有该原操作回执。', 404);
+    return result;
+  }
   async list(actor: ActorContext, projectId: string, raw: unknown = {}) {
     const input = problemListQuerySchema.parse(raw);
     return this.db.transaction(async (tx) => {
@@ -288,7 +339,7 @@ export class ProblemService {
         payload: unknown;
         created_at: Date;
       }>(
-        "SELECT id,action,actor_id,payload,created_at FROM app.audit_events WHERE project_id=$1 AND object_id=$2 AND action IN ('problem.pending-from-result','problem.extra-reported','problem.dismissed','problem.decision-history','problem.confirmed') ORDER BY created_at,id",
+        "SELECT id,action,actor_id,payload,created_at FROM app.audit_events WHERE project_id=$1 AND object_id=$2 AND action IN ('problem.pending-from-result','problem.extra-reported','problem.dismissed','problem.decision-history','problem.confirmed','problem.review-retest') ORDER BY seq",
         [projectId, id],
       );
       return problemDetailSchema.parse({
@@ -316,21 +367,54 @@ export class ProblemService {
           payload: event.payload,
           createdAt: event.created_at.toISOString(),
         })),
+        ...(actor.entrypoint === 'web'
+          ? {
+              reviewRetests: await savedReviewRetests(
+                tx,
+                projectId,
+                history.rows,
+              ),
+            }
+          : {}),
       });
     });
   }
   async report(actor: ActorContext, projectId: string, raw: unknown) {
     assertSafeResultContent(raw);
-    const input = reportProblemInputSchema.parse(raw);
+    const input: ReturnType<typeof webReportProblemInputSchema.parse> = (
+      actor.entrypoint === 'web'
+        ? webReportProblemInputSchema
+        : reportProblemInputSchema
+    ).parse(raw);
     return this.operations.execute(
       actor,
       'problems.report-extra',
       input.commandId,
       { projectId, ...input },
       async (tx) => {
-        await requireProject(tx, actor, projectId, 'results.submit');
+        await requireProject(
+          tx,
+          actor,
+          projectId,
+          input.reportReview ? 'reviews.approve' : 'results.submit',
+        );
+        if (input.reportReview) await lockIssueProject(tx, projectId);
       },
       async (tx) => {
+        const reviewSource = input.reportReview
+          ? await lockReportResult(tx, projectId, input.reportReview)
+          : undefined;
+        if (
+          input.reportReview &&
+          (reviewSource?.runId !== input.runId ||
+            input.resultIds.length !== 1 ||
+            input.resultIds[0] !== input.reportReview.resultId)
+        )
+          throw new DomainError(
+            'BUSINESS_CONFLICT',
+            '登记候选必须绑定所选报告的准确结果。',
+            409,
+          );
         await requireRequirement(
           tx,
           projectId,
@@ -356,10 +440,12 @@ export class ProblemService {
           );
         const archive =
           run.scope_snapshot.schemaVersion === 'ath.ui-archive-scope.v1';
-        const archivedResultId = archive ? input.resultIds[0] : undefined;
-        let archivedRevisionId: string | null = null;
+        const anchoredResultId =
+          input.reportReview?.resultId ??
+          (archive ? input.resultIds[0] : undefined);
+        let anchoredRevisionId = input.reportReview?.resultRevisionId ?? null;
         if (archive) {
-          if (!archivedResultId || input.resultIds.length !== 1)
+          if (!anchoredResultId || input.resultIds.length !== 1)
             throw new DomainError(
               'PRECONDITIONS_MISSING',
               '独立归档登记问题时须选一条真实结果。',
@@ -374,7 +460,7 @@ export class ProblemService {
               `SELECT r.current_revision_id, i.snapshot->>'requirementId' req, i.snapshot->>'requirementVersionId' ver
               FROM app.results r JOIN app.run_items i ON i.id=r.run_item_id
               WHERE r.project_id=$1 AND r.run_id=$2 AND r.id=$3 FOR SHARE OF r`,
-              [projectId, input.runId, archivedResultId],
+              [projectId, input.runId, anchoredResultId],
             )
           ).rows[0];
           if (
@@ -387,7 +473,15 @@ export class ProblemService {
               '所选归档条目的需求归属与登记不一致。',
               409,
             );
-          archivedRevisionId = source.current_revision_id;
+          anchoredRevisionId = source.current_revision_id;
+        } else if (reviewSource) {
+          const item = scopeItemSchema.parse(reviewSource.snapshot);
+          if (item.requirementVersionId !== input.requirementVersionId)
+            throw new DomainError(
+              'BUSINESS_CONFLICT',
+              '候选必须保留执行项的冻结需求版本。',
+              409,
+            );
         }
         const id = randomUUID();
         const inserted = await tx.query(
@@ -403,15 +497,15 @@ export class ProblemService {
             input.description,
             input.suggestedSeverity,
             actor.userId,
-            archivedResultId ?? null,
-            archivedRevisionId,
+            anchoredResultId ?? null,
+            anchoredRevisionId,
           ],
         );
-        if (!inserted.rowCount && archivedResultId) {
+        if (!inserted.rowCount && anchoredResultId) {
           const prior = (
             await tx.query<{ id: string }>(
               'SELECT id FROM app.problem_candidates WHERE project_id=$1 AND source_result_id=$2',
-              [projectId, archivedResultId],
+              [projectId, anchoredResultId],
             )
           ).rows[0];
           if (prior)
@@ -457,9 +551,11 @@ export class ProblemService {
     actor: ActorContext,
     projectId: string,
     id: string,
-    input: ReturnType<typeof confirmProblemInputSchema.parse>,
-    deferExistingTouch = false,
+    input: ReviewConfirmation,
+    bulk = false,
   ) {
+    const scope = input.reportReview;
+    const source = scope && (await lockReportReview(tx, projectId, id, scope));
     const row = await problemRow(tx, projectId, id, true);
     if (row.state === 'confirmed') {
       if (!row.issue_id)
@@ -481,13 +577,80 @@ export class ProblemService {
       });
     }
     if (row.row_version !== input.rowVersion) stale();
+    const fileIds = input.reviewAttachmentFileIds ?? [];
+    if (scope && bulk && row.state !== 'pendingConfirmation')
+      throw new DomainError(
+        'PRECONDITIONS_MISSING',
+        '该候选不再符合批量确认条件。',
+        422,
+      );
+    const previous =
+      row.state === 'dismissed'
+        ? (
+            await tx.query<{
+              actor_id: string;
+              created_at: Date;
+              result_revision_id: string | null;
+            }>(
+              "SELECT actor_id,created_at,payload#>>'{reportReview,resultRevisionId}' result_revision_id FROM app.audit_events WHERE project_id=$1 AND object_id=$2 AND action='problem.dismissed' ORDER BY seq DESC LIMIT 1",
+              [projectId, id],
+            )
+          ).rows[0]
+        : undefined;
+    if (scope && source && row.state === 'dismissed') {
+      const excludedRevision =
+        previous?.result_revision_id ?? source.originalRevisionId;
+      if (
+        !input.reviewNote ||
+        (!fileIds.length && excludedRevision === scope.resultRevisionId)
+      )
+        throw new DomainError(
+          'PRECONDITIONS_MISSING',
+          '重新确认已排除的候选须填写改判依据，并附新的复核截图或核对更新的结果。',
+          422,
+        );
+    }
+    const retest =
+      scope && source && row.state !== 'dismissed'
+        ? await assertReportConfirmation(
+            tx,
+            projectId,
+            id,
+            scope,
+            source,
+            bulk,
+            fileIds.length > 0,
+          )
+        : null;
+    if (!scope && (await latestReviewRetest(tx, projectId, id)))
+      throw new DomainError(
+        'PRECONDITIONS_MISSING',
+        '已有人工复测记录，请回到测试报告核对准确结果后确认。',
+        422,
+      );
+    if (
+      scope &&
+      input.target === 'new' &&
+      (input.requirementId !== row.requirement_id ||
+        input.requirementVersionId !== row.requirement_version_id)
+    )
+      throw new DomainError(
+        'BUSINESS_CONFLICT',
+        '新建缺陷必须保留候选的需求与执行版本。',
+        409,
+      );
+    const review = scope
+      ? {
+          id: randomUUID(),
+          reportReview: scope,
+          note: input.reviewNote ?? '',
+          reviewAttachmentFileIds: fileIds,
+          ...(retest ? { retestId: retest.id } : {}),
+        }
+      : undefined;
+    if (review)
+      await linkReviewImages(tx, actor, projectId, review.id, fileIds);
     if (row.state === 'dismissed') {
-      const previous = (
-        await tx.query<{ actor_id: string; created_at: Date }>(
-          "SELECT actor_id,created_at FROM app.audit_events WHERE project_id=$1 AND object_id=$2 AND action='problem.dismissed' ORDER BY created_at DESC,id DESC LIMIT 1",
-          [projectId, id],
-        )
-      ).rows[0];
       await audit(tx, actor, 'problem.decision-history', id, projectId, {
         previousState: 'dismissed',
         previousNote: row.decision_note,
@@ -495,6 +658,7 @@ export class ProblemService {
         previousDecidedAt:
           previous?.created_at.toISOString() ?? row.updated_at.toISOString(),
         transition: 'confirmed',
+        ...(scope ? { reportReview: scope, reason: input.reviewNote } : {}),
       });
     }
     let issue;
@@ -522,7 +686,7 @@ export class ProblemService {
       "UPDATE app.problem_candidates SET state='confirmed',decision_note='',row_version=row_version+1,updated_at=clock_timestamp() WHERE id=$1",
       [id],
     );
-    if (input.target === 'existing' && !deferExistingTouch)
+    if (input.target === 'existing' && !bulk)
       await tx.query(
         'UPDATE app.issues SET row_version=row_version+1,updated_at=clock_timestamp() WHERE id=$1',
         [issue.id],
@@ -535,13 +699,19 @@ export class ProblemService {
       'problem-confirmed',
       target.assignee_id,
       target.assignee_id,
-      { problemId: id, sourceResultId: row.source_result_id },
+      {
+        problemId: id,
+        sourceResultId: row.source_result_id,
+        sourceResultRevisionId: row.source_result_revision_id,
+        ...(review ? { review } : {}),
+      },
     );
     await recordRequirementActivity(tx, projectId, row.requirement_id);
     await audit(tx, actor, 'problem.confirmed', id, projectId, {
       issueId: issue.id,
       sourceResultId: row.source_result_id,
       previousState: row.state,
+      ...(scope ? { reportReview: scope } : {}),
     });
     return problemConfirmationReceiptSchema.parse({
       problem: dto(await problemRow(tx, projectId, id)),
@@ -556,7 +726,11 @@ export class ProblemService {
     raw: unknown,
   ) {
     assertSafeResultContent(raw);
-    const input = confirmProblemInputSchema.parse(raw);
+    const input: ReviewConfirmation = (
+      actor.entrypoint === 'web'
+        ? webConfirmProblemInputSchema
+        : confirmProblemInputSchema
+    ).parse(raw);
     return this.operations.execute(
       actor,
       'problems.confirm',
@@ -577,7 +751,11 @@ export class ProblemService {
     raw: unknown,
   ) {
     assertSafeResultContent(raw);
-    const input = dismissProblemInputSchema.parse(raw);
+    const input: ReturnType<typeof webDismissProblemInputSchema.parse> = (
+      actor.entrypoint === 'web'
+        ? webDismissProblemInputSchema
+        : dismissProblemInputSchema
+    ).parse(raw);
     return this.operations.execute(
       actor,
       'problems.dismiss',
@@ -588,6 +766,8 @@ export class ProblemService {
         await lockIssueProject(tx, projectId);
       },
       async (tx) => {
+        if (input.reportReview)
+          await lockReportReview(tx, projectId, id, input.reportReview);
         const row = await problemRow(tx, projectId, id, true);
         if (row.state === 'confirmed')
           throw new DomainError(
@@ -608,6 +788,9 @@ export class ProblemService {
         await audit(tx, actor, 'problem.dismissed', id, projectId, {
           state: 'dismissed',
           note: input.note,
+          ...(input.reportReview
+            ? { reportReview: input.reportReview, category: input.category }
+            : {}),
         });
         await recordRequirementActivity(tx, projectId, row.requirement_id);
         return problemDismissalReceiptSchema.parse({
@@ -618,9 +801,85 @@ export class ProblemService {
       projectId,
     );
   }
+  async recordReviewRetest(
+    actor: ActorContext,
+    projectId: string,
+    id: string,
+    raw: unknown,
+  ) {
+    if (actor.entrypoint !== 'web')
+      throw new DomainError(
+        'FORBIDDEN',
+        '报告人工复测必须使用本人网页会话。',
+        403,
+      );
+    assertSafeResultContent(raw);
+    const input = recordProblemReviewRetestInputSchema.parse(raw);
+    return this.operations.execute(
+      actor,
+      'problems.review-retest',
+      input.commandId,
+      { projectId, id, ...input },
+      async (tx) => {
+        await requireProject(tx, actor, projectId, 'reviews.approve');
+        await lockIssueProject(tx, projectId);
+      },
+      async (tx) => {
+        await lockReportReview(tx, projectId, id, input.reportReview);
+        const row = await problemRow(tx, projectId, id, true);
+        if (row.row_version !== input.rowVersion) stale();
+        if (row.state !== 'pendingConfirmation')
+          throw new DomainError(
+            'BUSINESS_CONFLICT',
+            '已确认或排除的候选不能追加当前复测。',
+            409,
+          );
+        const fact = {
+          id: randomUUID(),
+          reportReview: input.reportReview,
+          outcome: input.outcome,
+          note: input.note,
+          reviewAttachmentFileIds: input.reviewAttachmentFileIds ?? [],
+        };
+        await linkReviewImages(
+          tx,
+          actor,
+          projectId,
+          fact.id,
+          fact.reviewAttachmentFileIds,
+        );
+        await tx.query(
+          'UPDATE app.problem_candidates SET row_version=row_version+1,updated_at=clock_timestamp() WHERE id=$1',
+          [id],
+        );
+        await audit(tx, actor, 'problem.review-retest', id, projectId, fact);
+        await recordRequirementActivity(tx, projectId, row.requirement_id);
+        const event = (
+          await tx.query<{
+            actor_id: string;
+            created_at: Date;
+            payload: unknown;
+          }>(
+            "SELECT actor_id,created_at,payload FROM app.audit_events WHERE project_id=$1 AND object_id=$2 AND action='problem.review-retest' AND payload->>'id'=$3",
+            [projectId, id, fact.id],
+          )
+        ).rows[0];
+        if (!event) throw new Error('Review retest event missing after insert');
+        return problemReviewRetestReceiptSchema.parse({
+          problem: dto(await problemRow(tx, projectId, id)),
+          reviewRetest: await projectReviewRetest(tx, projectId, event),
+        });
+      },
+      projectId,
+    );
+  }
   async previewBatch(actor: ActorContext, projectId: string, raw: unknown) {
     assertSafeResultContent(raw);
-    const input = previewProblemBatchInputSchema.parse(raw);
+    const input: ReturnType<typeof webPreviewProblemBatchInputSchema.parse> = (
+      actor.entrypoint === 'web'
+        ? webPreviewProblemBatchInputSchema
+        : previewProblemBatchInputSchema
+    ).parse(raw);
     return this.operations.execute(
       actor,
       'problems.preview-confirm',
@@ -630,6 +889,8 @@ export class ProblemService {
         await requireProject(tx, actor, projectId, 'reviews.approve');
       },
       async (tx) => {
+        const report = batchReportScope(input.decisions);
+        if (report) await lockCurrentReport(tx, projectId, report);
         const items = [];
         for (const requested of input.decisions) {
           const row = await problemRow(tx, projectId, requested.problemId);
@@ -639,27 +900,61 @@ export class ProblemService {
               : row.row_version !== requested.decision.rowVersion
                 ? '问题基准已变化。'
                 : '';
-          if (requested.decision.target === 'existing') {
-            const target = await issueRow(
-              tx,
-              projectId,
-              requested.decision.issueId,
-            );
-            if (target.row_version !== requested.decision.issueRowVersion)
-              reason = '目标正式缺陷基准已变化。';
-          } else {
+          if (!reason) {
             try {
-              await requireRequirement(
-                tx,
-                projectId,
-                requested.decision.requirementId,
-                requested.decision.requirementVersionId,
-              );
-              await requireAssignee(
-                tx,
-                projectId,
-                requested.decision.assigneeId,
-              );
+              const decision = requested.decision;
+              if (decision.reportReview) {
+                if (row.state !== 'pendingConfirmation')
+                  throw new DomainError(
+                    'PRECONDITIONS_MISSING',
+                    '该候选不符合批量确认条件。',
+                    422,
+                  );
+                const source = await lockReportReview(
+                  tx,
+                  projectId,
+                  row.id,
+                  decision.reportReview,
+                );
+                await assertReportConfirmation(
+                  tx,
+                  projectId,
+                  row.id,
+                  decision.reportReview,
+                  source,
+                  true,
+                );
+              } else if (await latestReviewRetest(tx, projectId, row.id)) {
+                throw new DomainError(
+                  'PRECONDITIONS_MISSING',
+                  '已有人工复测记录，请在报告中单条复核。',
+                  422,
+                );
+              }
+              if (decision.target === 'existing') {
+                const target = await issueRow(tx, projectId, decision.issueId);
+                if (target.row_version !== decision.issueRowVersion)
+                  reason = '目标正式缺陷基准已变化。';
+              } else {
+                if (
+                  decision.reportReview &&
+                  (decision.requirementId !== row.requirement_id ||
+                    decision.requirementVersionId !==
+                      row.requirement_version_id)
+                )
+                  throw new DomainError(
+                    'BUSINESS_CONFLICT',
+                    '缺陷须保留候选的需求及版本。',
+                    409,
+                  );
+                await requireRequirement(
+                  tx,
+                  projectId,
+                  decision.requirementId,
+                  decision.requirementVersionId,
+                );
+                await requireAssignee(tx, projectId, decision.assigneeId);
+              }
             } catch (error: unknown) {
               if (!(error instanceof DomainError)) throw error;
               reason = error.message;
@@ -674,7 +969,7 @@ export class ProblemService {
         }
         const createdAt = new Date().toISOString();
         const scopeDigest = semanticDigest({ projectId, items });
-        return problemBatchPreviewSchema.parse({
+        return webProblemBatchPreviewSchema.parse({
           previewId: input.commandId,
           scopeDigest,
           items,
@@ -703,7 +998,11 @@ export class ProblemService {
           '没有本人在此项目的原问题确认预览。',
           404,
         );
-      return problemBatchPreviewSchema.parse(row.response);
+      return (
+        actor.entrypoint === 'web'
+          ? webProblemBatchPreviewSchema
+          : problemBatchPreviewSchema
+      ).parse(row.response);
     });
   }
   async batchSelectionPreview(
@@ -745,7 +1044,11 @@ export class ProblemService {
         ).rows[0];
         if (!stored)
           throw new DomainError('NOT_FOUND', '没有本人原问题确认预览。', 404);
-        const preview = problemBatchPreviewSchema.parse(stored.response);
+        const preview: ReturnType<typeof webProblemBatchPreviewSchema.parse> = (
+          actor.entrypoint === 'web'
+            ? webProblemBatchPreviewSchema
+            : problemBatchPreviewSchema
+        ).parse(stored.response);
         if (
           preview.scopeDigest !== input.scopeDigest ||
           canonicalJson([...input.problemIds].sort()) !==
@@ -756,6 +1059,8 @@ export class ProblemService {
             '提交不是原预览的精确问题集合；未扩大筛选。',
             409,
           );
+        const report = batchReportScope(preview.items);
+        if (report) await lockCurrentReport(tx, projectId, report);
         const results = [];
         const touchedIssues = new Set<string>();
         for (const [index, item] of preview.items.entries()) {
@@ -794,6 +1099,7 @@ export class ProblemService {
             await tx.query(`RELEASE SAVEPOINT problem_item_${index}`);
           } catch (error: unknown) {
             await tx.query(`ROLLBACK TO SAVEPOINT problem_item_${index}`);
+            await tx.query(`RELEASE SAVEPOINT problem_item_${index}`);
             if (!(error instanceof DomainError)) throw error;
             results.push({
               problemId: item.problem.id,

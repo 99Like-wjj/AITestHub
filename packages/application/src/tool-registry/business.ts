@@ -4,6 +4,8 @@ import {
   uiArchivePreviewToolSchema,
   uiArchiveCommitToolSchema,
   uiArchiveReceiptToolSchema,
+  uiArchiveResultReceiptToolSchema,
+  uiArchiveResultSubmitToolSchema,
 } from '../../../contracts/src/ui-archives.js';
 import { z } from 'zod';
 import { registerRequirementStateTools } from './requirement-state.js';
@@ -131,6 +133,22 @@ export function createBusinessRegistry(
     uiArchiveReceiptToolSchema,
     'read',
     (actor, input) => archives.receipt(actor, input.projectId, input.commandId),
+  );
+  registry.add(
+    'ath_ui_archives',
+    '上报明确登记范围内的独立归档事实，保留原结论；不会启动正式执行或自动建缺陷。',
+    'submit-results',
+    uiArchiveResultSubmitToolSchema,
+    'write',
+    (a, i) => archives.submitResults(a, i.projectId, i.input),
+  );
+  registry.add(
+    'ath_ui_archives',
+    '核对本人独立归档的原结果回执和当前交付状态。',
+    'result-receipt',
+    uiArchiveResultReceiptToolSchema,
+    'read',
+    (a, i) => archives.resultReceipt(a, i.projectId, i.runId, i.submissionId),
   );
   const add = registry.add.bind(registry);
   const removalImpact = async (

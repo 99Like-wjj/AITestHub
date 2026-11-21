@@ -22,16 +22,26 @@ import {
   unmergeIssueInputSchema,
   unmergeIssueReceiptSchema,
   previewProblemBatchInputSchema,
+  webPreviewProblemBatchInputSchema,
   commitProblemBatchInputSchema,
   problemBatchPreviewSchema,
+  webProblemBatchPreviewSchema,
   problemBatchReceiptSchema,
   issueListResponseSchema,
 } from '../../../packages/contracts/src/issues';
-import type { Issue, Problem } from '../../../packages/contracts/src/issues';
+import type {
+  Issue,
+  Problem,
+  ReportProblemReviewScope,
+} from '../../../packages/contracts/src/issues';
 import { api, ApiError, describeError } from './api';
 import { CommandDialog, useBusinessCommand } from './business-command';
 import type { IssueNavigation, IssueMember } from './issue-context';
 import { severityLabels, problemStateLabels } from './issue-context';
+import {
+  ReportReceiptControl,
+  useReportCommandRecovery,
+} from './report-command-recovery';
 
 export interface LifecycleTarget {
   session: string;
@@ -358,6 +368,7 @@ export function ProblemConfirmationBatch({
   target,
   requirements,
   members,
+  reportBasis,
   onClose,
   onSaved,
 }: {
@@ -365,12 +376,20 @@ export function ProblemConfirmationBatch({
   target: ProblemBatchTarget | null;
   requirements: IssueNavigation;
   members: IssueMember[];
+  reportBasis?: ReadonlyMap<
+    string,
+    {
+      scope: ReportProblemReviewScope;
+      title: string;
+      evidence: string;
+    }
+  >;
   onClose: () => void;
   onSaved: () => Promise<void>;
 }) {
   const [drafts, setDrafts] = useState<Record<string, DecisionDraft>>({});
   const [preview, setPreview] = useState<z.infer<
-    typeof problemBatchPreviewSchema
+    typeof webProblemBatchPreviewSchema
   > | null>(null);
   const [receipt, setReceipt] = useState<z.infer<
     typeof problemBatchReceiptSchema
@@ -384,6 +403,18 @@ export function ProblemConfirmationBatch({
   );
   const commitCommand = useBusinessCommand(
     target ? `${target.session}:commit:${preview?.previewId ?? 'none'}` : null,
+  );
+  const reviewScope =
+    reportBasis?.values().next().value?.scope.reportId ?? null;
+  const previewRecovery = useReportCommandRecovery(
+    projectId,
+    'problems.preview-confirm',
+    reviewScope,
+  );
+  const commitRecovery = useReportCommandRecovery(
+    projectId,
+    'problems.confirm-batch',
+    reviewScope,
   );
   useEffect(() => {
     if (!target) return;
@@ -448,12 +479,20 @@ export function ProblemConfirmationBatch({
     });
   }
   async function submit() {
-    if (!target || receipt) return;
+    if (
+      !target ||
+      receipt ||
+      (reportBasis && (previewRecovery.commandId || commitRecovery.commandId))
+    )
+      return;
     if (!preview) {
       const response = await previewCommand.run(async (commandId) => {
         const decisions = target.problems.map((problem) => {
           const row = drafts[problem.id];
           if (!row) throw new Error('问题确认草稿尚未就绪。');
+          const reportReview = reportBasis?.get(problem.id)?.scope;
+          if (reportBasis && !reportReview)
+            throw new Error('缺少此候选固定的报告依据。');
           return {
             problemId: problem.id,
             decision:
@@ -463,6 +502,7 @@ export function ProblemConfirmationBatch({
                     rowVersion: problem.rowVersion,
                     issueId: row.issueId,
                     issueRowVersion: row.issueRowVersion,
+                    ...(reportReview ? { reportReview } : {}),
                   }
                 : {
                     target: 'new',
@@ -473,80 +513,172 @@ export function ProblemConfirmationBatch({
                     description: row.description,
                     severity: row.severity,
                     assigneeId: row.assigneeId,
+                    ...(reportReview ? { reportReview } : {}),
                   },
           };
         });
-        const result = await api(
-          `/projects/${projectId}/problems/confirmation-previews`,
-          {
-            method: 'POST',
-            body: previewProblemBatchInputSchema.parse({
-              commandId,
-              decisions,
-            }),
-          },
-          problemBatchPreviewSchema,
-        );
-        if (
-          JSON.stringify(result.items.map((row) => row.problem.id).sort()) !==
-          JSON.stringify(target.problems.map((row) => row.id).sort())
-        )
-          throw new ApiError(
-            '预览问题集合与明确选择不一致。',
-            502,
-            'PREVIEW_SCOPE_MISMATCH',
+        const input = (
+          reportBasis
+            ? webPreviewProblemBatchInputSchema
+            : previewProblemBatchInputSchema
+        ).parse({
+          commandId,
+          decisions,
+        });
+        const request = async () => {
+          const result = await api(
+            `/projects/${projectId}/problems/confirmation-previews`,
+            {
+              method: 'POST',
+              body: input,
+            },
+            reportBasis
+              ? webProblemBatchPreviewSchema
+              : problemBatchPreviewSchema,
           );
-        return result;
+          if (
+            result.previewId !== commandId ||
+            JSON.stringify(result.items.map((row) => row.problem.id).sort()) !==
+              JSON.stringify(target.problems.map((row) => row.id).sort())
+          )
+            throw new ApiError(
+              '预览问题集合与明确选择不一致。',
+              502,
+              'PREVIEW_SCOPE_MISMATCH',
+            );
+          return result;
+        };
+        return reportBasis
+          ? previewRecovery.send(commandId, request)
+          : request();
       });
       if (response) setPreview(response);
       return;
     }
-    const response = await commitCommand.run((commandId) =>
-      api(
-        `/projects/${projectId}/problems/confirm-batch`,
-        {
-          method: 'POST',
-          body: commitProblemBatchInputSchema.parse({
-            commandId,
-            previewId: preview.previewId,
-            scopeDigest: preview.scopeDigest,
-            problemIds: preview.items.map((row) => row.problem.id),
-          }),
-        },
-        problemBatchReceiptSchema,
-      ),
-    );
+    const response = await commitCommand.run((commandId) => {
+      const request = async () => {
+        const receipt = await api(
+          `/projects/${projectId}/problems/confirm-batch`,
+          {
+            method: 'POST',
+            body: commitProblemBatchInputSchema.parse({
+              commandId,
+              previewId: preview.previewId,
+              scopeDigest: preview.scopeDigest,
+              problemIds: preview.items.map((row) => row.problem.id),
+            }),
+          },
+          problemBatchReceiptSchema,
+        );
+        if (
+          receipt.previewId !== preview.previewId ||
+          receipt.scopeDigest !== preview.scopeDigest ||
+          JSON.stringify(receipt.results.map((row) => row.problemId).sort()) !==
+            JSON.stringify(preview.items.map((row) => row.problem.id).sort())
+        )
+          throw new ApiError(
+            '批量回执未绑定本次预览。',
+            502,
+            'RECEIPT_SCOPE_MISMATCH',
+          );
+        return receipt;
+      };
+      return reportBasis ? commitRecovery.send(commandId, request) : request();
+    });
     if (response) {
       setReceipt(response);
       await onSaved();
     }
   }
+  function checkPreview() {
+    const id = previewRecovery.commandId;
+    if (!id || !target) return;
+    void previewRecovery.check(
+      webProblemBatchPreviewSchema,
+      (value) => {
+        if (value.previewId !== id) throw new Error('原预览标识不一致。');
+        if (
+          JSON.stringify(value.items.map((row) => row.problem.id).sort()) !==
+          JSON.stringify(target.problems.map((row) => row.id).sort())
+        )
+          throw new Error('原预览范围与当前选择不同，请按原选择重新打开核对。');
+        previewCommand.confirmRecoveredReceipt();
+        setPreview(value);
+      },
+      () => previewCommand.closeRecoveredReceipt(id),
+    );
+  }
+  function checkCommit() {
+    const id = commitRecovery.commandId;
+    if (!id || !target) return;
+    void commitRecovery.check(
+      problemBatchReceiptSchema,
+      async (value) => {
+        if (
+          preview &&
+          (value.previewId !== preview.previewId ||
+            value.scopeDigest !== preview.scopeDigest)
+        )
+          throw new Error('原提交未绑定当前预览。');
+        setReceipt(value);
+        commitCommand.confirmRecoveredReceipt();
+        await onSaved();
+      },
+      () => commitCommand.closeRecoveredReceipt(id),
+    );
+  }
   const command = preview ? commitCommand : previewCommand;
+  const recovering = Boolean(
+    reportBasis && (commitRecovery.commandId || previewRecovery.commandId),
+  );
   return (
     <CommandDialog
       open={target !== null}
+      inline={!!reportBasis}
       title="问题批量确认 · 精确新建/关联"
       command={command}
       dirty={!preview}
       onClose={onClose}
       onSave={() => void submit()}
       allowSave={
-        !receipt && (!preview || preview.items.some((row) => row.eligible))
+        !receipt &&
+        !recovering &&
+        (!preview || preview.items.some((row) => row.eligible))
       }
       saveLabel={
         receipt
           ? '已取得逐项回执'
           : preview
-            ? '明确确认预览全部问题'
+            ? reportBasis
+              ? '确认转换 ' +
+                preview.items.filter((row) => row.eligible).length +
+                ' 项'
+              : '明确确认预览全部问题'
             : '生成服务端精确预览'
       }
       width={1100}
     >
+      {reportBasis && (
+        <>
+          <ReportReceiptControl
+            recovery={previewRecovery}
+            onCheck={checkPreview}
+          />
+          <ReportReceiptControl
+            recovery={commitRecovery}
+            onCheck={checkCommit}
+          />
+        </>
+      )}
       <Alert
         type="info"
         showIcon
         title="逐项选择新建或关联，预览后才明确提交"
-        description="此前非缺陷的纠正会保留原决定历史。原始/最终结果不被确认覆盖；不自动合并根因，不以人工复现或补证为强制前提。"
+        description={
+          reportBasis
+            ? '本次固定已选候选及其报告依据。逐项核对新建或关联的目标。'
+            : '此前非缺陷的纠正会保留原决定历史。原始/最终结果不被确认覆盖；不自动合并根因，不以人工复现或补证为强制前提。'
+        }
         className="section-alert"
       />
       {candidateError && (
@@ -574,6 +706,11 @@ export function ProblemConfirmationBatch({
                     <Typography.Text>
                       {row.problem.decisionNote}
                     </Typography.Text>
+                    {reportBasis?.get(row.problem.id) && (
+                      <Typography.Text type="secondary">
+                        {reportBasis.get(row.problem.id)?.evidence}
+                      </Typography.Text>
+                    )}
                   </Space>
                 ),
               },
@@ -594,16 +731,36 @@ export function ProblemConfirmationBatch({
                   const result = receipt?.results.find(
                     (item) => item.problemId === row.problem.id,
                   );
-                  return result
-                    ? `${result.status}${result.code ? ` / ${result.code}` : ''}`
-                    : '尚未提交';
+                  if (!result) return '尚未提交';
+                  const label = {
+                    confirmed:
+                      row.decision.target === 'existing' ? '已关联' : '已新建',
+                    alreadyConfirmed: '此前已确认',
+                    conflict: '并发冲突',
+                    skipped: '已跳过',
+                  }[result.status];
+                  return (
+                    <Space wrap>
+                      {label}
+                      {result.code ? ` / ${result.code}` : ''}
+                      {result.issue && (
+                        <a
+                          href={`#issues?${new URLSearchParams({ projectId, issueId: result.issue.id })}`}
+                        >
+                          {result.issue.number}
+                        </a>
+                      )}
+                    </Space>
+                  );
                 },
               },
             ]}
           />
           {!receipt && (
             <Button
-              disabled={commitCommand.pending || commitCommand.uncertain}
+              disabled={
+                commitCommand.pending || commitCommand.uncertain || recovering
+              }
               onClick={() => {
                 setPreview(null);
                 setPreviewVersion((value) => value + 1);
@@ -613,6 +770,28 @@ export function ProblemConfirmationBatch({
             </Button>
           )}
         </>
+      ) : receipt ? (
+        <Table
+          rowKey="problemId"
+          size="small"
+          pagination={false}
+          dataSource={receipt.results}
+          columns={[
+            { title: '原候选', dataIndex: 'problemId' },
+            { title: '回执', dataIndex: 'status' },
+            {
+              title: '正式缺陷',
+              render: (_, result) =>
+                result.issue && (
+                  <a
+                    href={`#issues?${new URLSearchParams({ projectId, issueId: result.issue.id })}`}
+                  >
+                    {result.issue.number}
+                  </a>
+                ),
+            },
+          ]}
+        />
       ) : (
         <Collapse
           items={(target?.problems ?? []).map((problem) => {
@@ -622,6 +801,12 @@ export function ProblemConfirmationBatch({
               label: `${problem.title} · ${problemStateLabels[problem.state]}`,
               children: row ? (
                 <Space direction="vertical" style={{ width: '100%' }}>
+                  {reportBasis?.get(problem.id) && (
+                    <Typography.Text type="secondary">
+                      {reportBasis.get(problem.id)?.title} ·{' '}
+                      {reportBasis.get(problem.id)?.evidence}
+                    </Typography.Text>
+                  )}
                   {problem.state === 'dismissed' && (
                     <Alert
                       type="warning"

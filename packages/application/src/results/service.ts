@@ -8,6 +8,7 @@ import {
 } from '../../../contracts/src/domain.js';
 import {
   finalAssessmentInputSchema,
+  webFinalAssessmentInputSchema,
   supplementaryEvidenceResourceInputSchema as supplementaryEvidenceInputSchema,
 } from '../../../contracts/src/ui-results.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
@@ -29,6 +30,7 @@ import {
 import { persistReportRevision } from '../reports/service.js';
 import { assertSafeResultContent } from './safety.js';
 import { ensureFailedProblemInTransaction } from '../issues/problems.js';
+import { lockReportResult } from '../issues/review-evidence.js';
 import { missingUiFiles } from './preparation.js';
 import { assertSubmissionFileBudget } from '../files/submission-budget.js';
 import { assertReferencedEvidenceFileBudget } from './submission-budget.js';
@@ -39,7 +41,11 @@ import {
   type FileResourcePolicies,
 } from '../files/resource-policy.js';
 import { assertLocalUiActor } from './delivery-access.js';
-import { assertResultEvidenceScope, readResultScope } from './result-scope.js';
+import {
+  assertResultEvidenceScope,
+  assertResultStepEvidenceReferences,
+  readResultScope,
+} from './result-scope.js';
 import {
   uiDeliveryGate,
   deliveryMissingFiles,
@@ -58,7 +64,7 @@ interface ResultRow {
 }
 export class ResultService {
   get archives() {
-    return new UiArchiveService(this.db);
+    return new UiArchiveService(this.db, this.policies);
   }
   private readonly operations: OperationService;
   constructor(
@@ -165,12 +171,15 @@ export class ResultService {
           payloadDigest: fileIntentDigest(input),
           existing: false,
         });
-        await assertResultEvidenceScope(
-          tx,
-          projectId,
-          row.run_id,
-          input.replacement,
-        );
+        if (run.source === 'uiArchive')
+          assertResultStepEvidenceReferences(input.replacement);
+        else
+          await assertResultEvidenceScope(
+            tx,
+            projectId,
+            row.run_id,
+            input.replacement,
+          );
         await assertReferencedEvidenceFileBudget(
           tx,
           projectId,
@@ -250,7 +259,11 @@ export class ResultService {
     raw: unknown,
   ) {
     assertSafeResultContent(raw);
-    const input = finalAssessmentInputSchema.parse(raw);
+    const input: ReturnType<typeof webFinalAssessmentInputSchema.parse> = (
+      actor.entrypoint === 'web'
+        ? webFinalAssessmentInputSchema
+        : finalAssessmentInputSchema
+    ).parse(raw);
     return this.operations.execute(
       actor,
       'results.assess',
@@ -262,6 +275,18 @@ export class ResultService {
       async (tx) => {
         const unlocked = await this.result(tx, projectId, resultId);
         await readRun(tx, projectId, unlocked.run_id, true);
+        if (input.reportReview) {
+          if (
+            input.reportReview.resultId !== resultId ||
+            input.reportReview.resultRevisionId !== input.baseResultRevisionId
+          )
+            throw new DomainError(
+              'BUSINESS_CONFLICT',
+              '人工结论与报告所选结果不匹配。',
+              409,
+            );
+          await lockReportResult(tx, projectId, input.reportReview);
+        }
         const row = await this.result(tx, projectId, resultId, true);
         if (
           row.current_assessment_revision_id !== input.baseAssessmentRevisionId
@@ -296,6 +321,7 @@ export class ResultService {
         await audit(tx, actor, 'results.assessed', row.id, projectId, {
           assessmentRevisionId: revisionId,
           finalOutcome: input.finalOutcome,
+          ...(input.reportReview ? { reportReview: input.reportReview } : {}),
         });
         return {
           resultId,
