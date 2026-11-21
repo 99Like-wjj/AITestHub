@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Descriptions, Modal, Space, Typography } from 'antd';
+import {
+  Alert,
+  Button,
+  Collapse,
+  Descriptions,
+  Modal,
+  Space,
+  Typography,
+} from 'antd';
 import { fileReceiptSchema } from '../../../packages/contracts/src/files';
 import type { FileMetadata } from '../../../packages/contracts/src/files';
 import { api, describeError } from './api';
@@ -9,12 +17,22 @@ import {
   fetchPrivateFile,
   isolatedHtml,
 } from './file-channel';
+import { subscribeIdentityChanges } from './identity-context';
+import { evidencePreviewBytes, isRasterEvidence } from './evidence-gallery';
+import type { EvidenceType } from './evidence-gallery';
+import {
+  EvidenceConversation,
+  EvidenceDelimited,
+  EvidenceJson,
+} from './evidence-text';
 
 export function EvidenceViewer({
   fileId,
+  evidenceType,
   onClose,
 }: {
   fileId: string | null;
+  evidenceType?: EvidenceType | undefined;
   onClose: () => void;
 }) {
   const [metadata, setMetadata] = useState<FileMetadata | null>(null);
@@ -35,10 +53,23 @@ export function EvidenceViewer({
     setImage(undefined);
     setMetadata(null);
     setError(undefined);
+    setLoading(false);
     if (!fileId) return;
+    const unsubscribe = subscribeIdentityChanges(() => {
+      controller.abort();
+      setMetadata(null);
+      setText(undefined);
+      setImage(undefined);
+      setError(undefined);
+      setLoading(false);
+      if (imageUrl.current) {
+        URL.revokeObjectURL(imageUrl.current);
+        imageUrl.current = undefined;
+      }
+    });
     setLoading(true);
     void api(
-      `/files/${fileId}`,
+      `/files/${encodeURIComponent(fileId)}`,
       { signal: controller.signal },
       fileReceiptSchema,
     )
@@ -47,22 +78,25 @@ export function EvidenceViewer({
         setMetadata(result);
         if (
           result.status !== 'verified' ||
-          BigInt(result.bytes) > 5n * 1024n * 1024n
+          BigInt(result.bytes) > evidencePreviewBytes
         )
           return;
         const supported =
-          result.mediaType.startsWith('image/') ||
+          isRasterEvidence(result.mediaType) ||
           [
             'text/html',
             'text/markdown',
             'text/plain',
             'text/csv',
             'application/json',
+            'text/event-stream',
+            'text/tab-separated-values',
+            'application/x-ndjson',
           ].includes(result.mediaType);
         if (!supported) return;
-        const blob = await fetchPrivateFile(fileId);
+        const blob = await fetchPrivateFile(fileId, controller.signal);
         if (controller.signal.aborted || epoch !== generation.current) return;
-        if (result.mediaType.startsWith('image/')) {
+        if (isRasterEvidence(result.mediaType)) {
           imageUrl.current = URL.createObjectURL(blob);
           setImage(imageUrl.current);
         } else {
@@ -79,7 +113,10 @@ export function EvidenceViewer({
         if (!controller.signal.aborted && epoch === generation.current)
           setLoading(false);
       });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      unsubscribe();
+    };
   }, [fileId]);
   useEffect(
     () => () => {
@@ -87,6 +124,7 @@ export function EvidenceViewer({
     },
     [],
   );
+  const type = metadata?.mediaType;
   return (
     <Modal
       zIndex={uiLayers.evidence}
@@ -99,7 +137,7 @@ export function EvidenceViewer({
         <Space>
           <Button onClick={onClose}>关闭</Button>
           <Button
-            disabled={!metadata}
+            disabled={metadata?.status !== 'verified'}
             onClick={() => {
               if (metadata)
                 void downloadPrivateFile(
@@ -114,31 +152,11 @@ export function EvidenceViewer({
       }
     >
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        <Alert
-          type="info"
-          showIcon
-          title="证据原件、采集完整性和业务结论分别核对"
-          description="查看/下载都按当前权限校验。静态HTML预览受限隔离；字节 verified 不表示截图完整、内容可信或测试已通过。"
-        />
         {error && <Alert type="error" showIcon title={error} />}
         {loading && (
           <Typography.Text role="status">读取授权证据…</Typography.Text>
         )}
-        {metadata && (
-          <Descriptions
-            size="small"
-            column={1}
-            bordered
-            items={[
-              { key: 'id', label: '文件ID', children: metadata.id },
-              { key: 'status', label: '字节状态', children: metadata.status },
-              { key: 'bytes', label: '字节数', children: metadata.bytes },
-              { key: 'hash', label: 'SHA-256', children: metadata.sha256 },
-              { key: 'type', label: '类型声明', children: metadata.mediaType },
-            ]}
-          />
-        )}
-        {metadata && BigInt(metadata.bytes) > 5n * 1024n * 1024n && (
+        {metadata && BigInt(metadata.bytes) > evidencePreviewBytes && (
           <Typography.Paragraph type="secondary">
             文件超过当前5 MiB预览上限，请下载原件核对。
           </Typography.Paragraph>
@@ -147,11 +165,11 @@ export function EvidenceViewer({
           <img
             src={image}
             alt={`证据原件：${metadata?.originalName ?? ''}`}
-            style={{ maxWidth: '100%', height: 'auto' }}
+            className="result-evidence-original-image"
           />
         )}
         {text !== undefined &&
-          (metadata?.mediaType === 'text/html' ? (
+          (type === 'text/html' ? (
             <iframe
               title="证据HTML隔离静态预览"
               sandbox=""
@@ -163,13 +181,77 @@ export function EvidenceViewer({
                 border: '1px solid var(--border)',
               }}
             />
+          ) : type === 'text/event-stream' ||
+            (evidenceType === 'conversation' && type === 'application/json') ? (
+            <EvidenceConversation
+              key={fileId}
+              text={text}
+              mediaType={type ?? ''}
+            />
+          ) : type === 'text/csv' || type === 'text/tab-separated-values' ? (
+            <EvidenceDelimited
+              key={fileId}
+              text={text}
+              delimiter={type === 'text/tab-separated-values' ? '\t' : ','}
+            />
+          ) : type === 'application/json' ? (
+            <EvidenceJson
+              text={text}
+              split={evidenceType === 'requestResponse'}
+            />
           ) : (
             <pre className="message-code">{text}</pre>
           ))}
-        {metadata && !loading && !image && text === undefined && (
-          <Typography.Paragraph type="secondary">
-            此文件当前不提供正文预览。可下载可用原件，不将未解析内容标为已读取。
-          </Typography.Paragraph>
+        {metadata &&
+          !loading &&
+          !image &&
+          text === undefined &&
+          BigInt(metadata.bytes) <= evidencePreviewBytes && (
+            <Typography.Paragraph type="secondary">
+              {metadata.status === 'verified'
+                ? '可下载原件查看此文件格式。'
+                : '文件字节尚未验证，等待上传或核对上传状态。'}
+            </Typography.Paragraph>
+          )}
+        {metadata && (
+          <Collapse
+            items={[
+              {
+                key: 'metadata',
+                label: '文件来源与校验信息',
+                children: (
+                  <Descriptions
+                    size="small"
+                    column={1}
+                    bordered
+                    items={[
+                      { key: 'id', label: '文件 ID', children: metadata.id },
+                      {
+                        key: 'status',
+                        label: '字节状态',
+                        children: metadata.status,
+                      },
+                      {
+                        key: 'bytes',
+                        label: '字节数',
+                        children: metadata.bytes,
+                      },
+                      {
+                        key: 'hash',
+                        label: 'SHA-256',
+                        children: metadata.sha256,
+                      },
+                      {
+                        key: 'type',
+                        label: '媒体类型',
+                        children: metadata.mediaType,
+                      },
+                    ]}
+                  />
+                ),
+              },
+            ]}
+          />
         )}
       </Space>
     </Modal>

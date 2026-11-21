@@ -8,7 +8,9 @@ export const localFileBinaryEnvelope = Object.freeze({
   maxFilesPerBatch: 200,
 });
 type FileQuery =
-  { target: 'active'; projectId: string } | { target: 'file'; fileId: string };
+  | { target: 'active'; projectId: string }
+  | { target: 'personal' }
+  | { target: 'file'; fileId: string };
 type SubmissionQuery =
   | { target: 'newSubmission'; projectId: string }
   | { target: 'uiBatch'; projectId: string; runId: string; batchId: string }
@@ -24,12 +26,12 @@ type SubmissionQuery =
       runId: string;
       submissionId: string;
     };
-/** Type projection only; the immutable published/candidate JSON Schema validates the full response without stripping. */
+/** The generated current contract validates the full response without stripping. */
 export interface FileResourceCapabilities {
   schemaVersion: 'ath.file-capabilities.v1';
   subject: FileQuery | SubmissionQuery;
   policy: {
-    source: 'active' | 'accepted' | 'legacyDefault';
+    source: 'active' | 'accepted';
     revisionId: string | null;
     digest: string;
   };
@@ -64,7 +66,10 @@ export async function readResourceCapabilities(
   result: ResultPort,
   query: FileQuery | SubmissionQuery,
 ): Promise<FileResourceCapabilities> {
-  const file = query.target === 'file' || query.target === 'active';
+  const file =
+    query.target === 'file' ||
+    query.target === 'active' ||
+    query.target === 'personal';
   const raw = await tool.callTool('ath_file_transfers', {
     op: file ? 'capabilities' : 'submission-capabilities',
     input: query,

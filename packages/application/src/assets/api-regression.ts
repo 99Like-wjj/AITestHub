@@ -54,6 +54,7 @@ interface DebugCandidateRow extends QueryResultRow {
   scenario_revision_id: string;
   set_revision_id: string | null;
   draft_hash: string;
+  authored_content: unknown;
   expires_at: Date;
   saved_snapshot_id: string | null;
 }
@@ -62,8 +63,8 @@ const regressionSelect = `SELECT s.*,v.revision_no,q.debug_run_id,r.environment_
     FROM app.approval_snapshots s
     JOIN app.test_assets a ON a.id=s.case_id
     JOIN app.asset_revisions v ON v.id=s.case_revision_id
-    LEFT JOIN app.api_regression_qualifications q ON q.snapshot_id=s.id
-    LEFT JOIN app.runs r ON r.id=q.debug_run_id
+    JOIN app.api_regression_qualifications q ON q.snapshot_id=s.id
+    JOIN app.runs r ON r.id=q.debug_run_id
     WHERE s.project_id=$1 AND s.kind='API' AND a.removed_at IS NULL
       AND NOT EXISTS(SELECT 1 FROM app.api_regression_withdrawals w WHERE w.snapshot_id=s.id)`;
 
@@ -73,7 +74,7 @@ function qualification(row: RegressionRow) {
     caseId: row.case_id,
     revisionId: row.case_revision_id,
     revisionNo: row.revision_no,
-    source: row.debug_run_id ? 'debugPassed' : 'legacyApproval',
+    source: 'debugPassed',
     debugRunId: row.debug_run_id,
     environmentId: row.environment_id,
     savedAt: row.approved_at.toISOString(),
@@ -238,7 +239,7 @@ export class ApiRegressionService {
           await tx.query<DebugCandidateRow>(
             `SELECT r.state,r.scope_snapshot,d.source_case_id,d.source_case_revision_id,
                 d.scenario_revision_id,d.content->'set'->>'revisionId' set_revision_id,
-                d.draft_hash,d.expires_at,q.snapshot_id saved_snapshot_id
+                d.draft_hash,d.expires_at,d.content->'content' authored_content,q.snapshot_id saved_snapshot_id
               FROM app.api_debug_drafts d
               JOIN app.runs r ON r.id=d.run_id AND r.project_id=d.project_id
               LEFT JOIN app.api_regression_qualifications q ON q.debug_run_id=d.run_id
@@ -267,7 +268,7 @@ export class ApiRegressionService {
           item.caseId !== current.id ||
           scope.draftHash !== input.draftHash ||
           input.content.scenarioId !== scenario.id ||
-          canonicalJson(item.content) !== canonicalJson(input.content)
+          canonicalJson(debug.authored_content) !== canonicalJson(input.content)
         )
           stale();
         await requireQualificationEnvironment(
@@ -276,13 +277,13 @@ export class ApiRegressionService {
           scope.environmentId,
           scope.environmentRevisionId,
         );
-        const content = apiCaseContentSchema.parse(item.content);
+        const content = apiCaseContentSchema.parse(debug.authored_content);
         await requireCompleteDebug(
           tx,
           projectId,
           scope.runId,
           item.runItemId,
-          content,
+          item.content,
         );
         const asset =
           canonicalJson(current.content) === canonicalJson(content)

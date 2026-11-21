@@ -13,6 +13,7 @@ import {
   Skeleton,
   Space,
   Table,
+  Tabs,
   Tag,
   Typography,
 } from 'antd';
@@ -27,6 +28,8 @@ import {
 import { api, ApiError, describeError } from './api';
 import { ResultDetailPanel, outcomeLabels } from './result-detail';
 import { EvidenceViewer } from './evidence-viewer';
+import { EvidenceGallery } from './evidence-gallery';
+import type { EvidenceGalleryItem } from './evidence-gallery';
 import type { Project } from './types';
 import { PageHeading } from './page-heading';
 import { ExecutionRecords } from './execution-records';
@@ -101,11 +104,29 @@ function initialReportId() {
   return value.success ? value.data : null;
 }
 function reportRevisionFromUrl() {
-  const parsed = idSchema.safeParse(
-    new URLSearchParams(window.location.hash.split('?')[1]).get('revisionId'),
-  );
+  const query = new URLSearchParams(window.location.hash.split('?')[1]);
+  if (!query.has('reportId')) return 'current';
+  const parsed = idSchema.safeParse(query.get('revisionId'));
   return parsed.success ? parsed.data : 'current';
 }
+
+function issueReturnLink(query: URLSearchParams, projectId: string) {
+  const issueId = idSchema.safeParse(query.get('fromIssueId'));
+  const path = query.get('returnTo');
+  if (path?.startsWith('#issues?')) {
+    const origin = new URLSearchParams(path.slice('#issues?'.length));
+    if (
+      origin.get('projectId') === projectId &&
+      (!issueId.success || origin.get('issueId') === issueId.data)
+    )
+      return `#issues?${origin.toString()}`;
+  }
+  if (issueId.success)
+    return `#issues?${new URLSearchParams({ projectId, issueId: issueId.data })}`;
+  return undefined;
+}
+
+type ReportFilter = 'all' | 'failed' | 'gaps';
 
 export function ResultsPage({
   project,
@@ -140,8 +161,12 @@ export function ResultsPage({
     revisionId?: string;
     kind?: 'UI' | 'API';
     lookupRequest?: ReportRecoveryRequest;
+    initialStep?: number;
+    returnTo?: string;
+    linked?: boolean;
   } | null>(null);
-  const [fileId, setFileId] = useState<string | null>(null);
+  const [preview, setPreview] = useState<EvidenceGalleryItem | null>(null);
+  const [reportFilter, setReportFilter] = useState<ReportFilter>('all');
   const [lookupForm] = Form.useForm<{
     kind: ReportRecoveryKind;
     id: string;
@@ -222,10 +247,11 @@ export function ResultsPage({
   useEffect(() => {
     setReport(null);
     setSelectedResult(null);
-    setFileId(null);
+    setPreview(null);
     clearLookup();
     return () => lookupGuard.current.invalidate();
   }, [project?.id, userId]);
+  useEffect(() => setReportFilter('all'), [reportId, revisionId]);
   useEffect(() => subscribeIdentityChanges(clearLookup), []);
   useEffect(() => {
     function update() {
@@ -281,15 +307,48 @@ export function ResultsPage({
         return;
       const runId = idSchema.safeParse(query.get('runId'));
       const resultId = idSchema.safeParse(query.get('resultId'));
-      if (runId.success) {
+      if (resultId.success) {
+        const revision = idSchema.safeParse(query.get('resultRevisionId'));
+        const step = Number(query.get('step'));
+        const returnTo = issueReturnLink(query, project.id);
+        setSelectedResult({
+          id: resultId.data,
+          linked: true,
+          ...(revision.success ? { revisionId: revision.data } : {}),
+          ...(Number.isInteger(step) && step > 0 && step <= 1000
+            ? { initialStep: step }
+            : {}),
+          ...(returnTo ? { returnTo } : {}),
+        });
+      } else if (runId.success) {
         lookupForm.setFieldsValue({ kind: 'run', id: runId.data });
         void lookup({ kind: 'run', id: runId.data });
-      } else if (resultId.success) setSelectedResult({ id: resultId.data });
+      } else setSelectedResult((active) => (active?.linked ? null : active));
     }
     followLinkedRecord();
     window.addEventListener('hashchange', followLinkedRecord);
     return () => window.removeEventListener('hashchange', followLinkedRecord);
   }, [project?.id, userId]);
+  function closeResult() {
+    if (visibleResult?.linked) {
+      const query = new URLSearchParams(window.location.hash.split('?')[1]);
+      if (!query.has('reportId')) query.delete('revisionId');
+      for (const key of [
+        'resultId',
+        'resultRevisionId',
+        'step',
+        'fromIssueId',
+        'returnTo',
+      ])
+        query.delete(key);
+      window.history.replaceState(
+        null,
+        '',
+        `#reports${query.size ? `?${query}` : ''}`,
+      );
+    }
+    setSelectedResult(null);
+  }
   async function lookup(values: { kind: ReportRecoveryKind; id: string }) {
     if (!project || currentIdentityOwner() !== userId) return;
     const request = lookupGuard.current.begin({
@@ -409,6 +468,28 @@ export function ResultsPage({
     revisionId === 'current'
       ? (report?.facts ?? null)
       : (historical?.facts ?? null);
+  const evidenceByRef = new Map(
+    facts?.evidence.map((row) => [row.localEvidenceId, row]),
+  );
+  const missingFileIds = new Set(facts?.missingFileIds);
+  const visibleItems = (facts?.items ?? []).filter(({ result }) => {
+    if (reportFilter === 'all') return true;
+    if (reportFilter === 'failed') return result?.effectiveOutcome === 'failed';
+    return (
+      !!result &&
+      (result.effectiveOutcome === 'inconclusive' ||
+        !!result.content.evidenceGaps?.length ||
+        result.content.evidenceRefs.some((ref) => {
+          const evidence = evidenceByRef.get(ref);
+          return !evidence || missingFileIds.has(evidence.fileId);
+        }))
+    );
+  });
+  const recordedGaps =
+    facts?.items.reduce(
+      (count, row) => count + (row.result?.content.evidenceGaps?.length ?? 0),
+      0,
+    ) ?? 0;
   const currentHandling = [report?.currentHandling, historical?.currentHandling]
     .filter((value): value is NonNullable<typeof value> => Boolean(value))
     .sort((a, b) => Date.parse(b.capturedAt) - Date.parse(a.capturedAt))[0];
@@ -740,32 +821,16 @@ export function ResultsPage({
                   </span>
                 </div>
                 <div className="row wrap">
-                  <span className="caption">当前有效口径</span>
-                  <span className="badge green">
-                    通过 {facts.statistics.effective.passed}
-                  </span>
-                  <span className="badge red">
-                    失败 {facts.statistics.effective.failed}
-                  </span>
-                  <span className="badge amber">
-                    未执行 {facts.statistics.effective.notExecuted}
-                  </span>
-                  {BigInt(facts.statistics.effective.inconclusive) > 0n && (
-                    <span className="badge">
-                      证据不足 {facts.statistics.effective.inconclusive}
-                    </span>
-                  )}
-                  {BigInt(facts.statistics.effective.blocked) > 0n && (
-                    <span className="badge amber">
-                      受阻 {facts.statistics.effective.blocked}
-                    </span>
-                  )}
                   <span
                     className={`badge ${facts.deliveryStatus === 'complete' ? 'green' : 'amber'}`}
                   >
-                    交付
+                    文件交付 ·{' '}
                     {deliveryLabels[facts.deliveryStatus] ??
                       facts.deliveryStatus}
+                  </span>
+                  <span className="badge">
+                    清理 ·{' '}
+                    {cleanupLabels[facts.cleanupState] ?? facts.cleanupState}
                   </span>
                 </div>
                 {facts.executionProvenance === 'protocol-synthetic' && (
@@ -773,12 +838,41 @@ export function ResultsPage({
                     数据来源：合成协议结果，没有执行真实 UI 目标。
                   </div>
                 )}
-                <p className="caption">
-                  固定 {facts.statistics.denominator} 项 · 已回传{' '}
-                  {facts.statistics.reportedItems} 项 · 缺失文件{' '}
-                  {facts.missingFileIds.length} 个 · 清理
-                  {cleanupLabels[facts.cleanupState] ?? facts.cleanupState}
-                </p>
+                <div className="report-review-kpis" aria-label="报告指标">
+                  <div>
+                    <small>固定执行范围</small>
+                    <strong>{facts.statistics.denominator}</strong>
+                    <small>已回传 {facts.statistics.reportedItems} 项</small>
+                  </div>
+                  <div>
+                    <small>业务结果</small>
+                    <strong>
+                      {facts.statistics.effective.passed} 通过 ·{' '}
+                      {facts.statistics.effective.failed} 失败
+                    </strong>
+                    <small>
+                      {facts.statistics.effective.inconclusive} 项证据不足
+                    </small>
+                  </div>
+                  <div>
+                    <small>已验证证据文件</small>
+                    <strong>
+                      {
+                        facts.evidence.filter(
+                          (row) =>
+                            row.lastKnownFileStatus === 'verified' &&
+                            !missingFileIds.has(row.fileId),
+                        ).length
+                      }
+                    </strong>
+                    <small>按报告事实读取</small>
+                  </div>
+                  <div>
+                    <small>待处理证据</small>
+                    <strong>{facts.missingFileIds.length} 个文件</strong>
+                    <small>已登记 {recordedGaps} 项采集缺口</small>
+                  </div>
+                </div>
                 <Collapse
                   items={[
                     {
@@ -889,10 +983,23 @@ export function ResultsPage({
                     description="此报告记录本地已发生的事实。可登记问题，统计独立于正式计划与复测。"
                   />
                 )}
+                <Tabs
+                  aria-label="用例结果筛选"
+                  activeKey={reportFilter}
+                  onChange={(key) => {
+                    if (key === 'all' || key === 'failed' || key === 'gaps')
+                      setReportFilter(key);
+                  }}
+                  items={[
+                    { key: 'all', label: '全部结果' },
+                    { key: 'failed', label: '失败' },
+                    { key: 'gaps', label: '证据待补' },
+                  ]}
+                />
                 <Table
                   rowKey={(row) => row.scopeItem.runItemId}
                   pagination={{ pageSize: 10 }}
-                  dataSource={facts.items}
+                  dataSource={visibleItems}
                   scroll={{ x: 1150 }}
                   columns={[
                     {
@@ -905,6 +1012,12 @@ export function ResultsPage({
                           <br />
                           <Typography.Text strong>
                             {row.scopeItem.content.title}
+                            {'dataRow' in row.scopeItem &&
+                              row.scopeItem.dataRow && (
+                                <Tag color="cyan">
+                                  {row.scopeItem.dataRow.name}
+                                </Tag>
+                              )}
                           </Typography.Text>
                           {'localItemId' in row.scopeItem && (
                             <div className="caption">
@@ -946,6 +1059,22 @@ export function ResultsPage({
                           ? (cleanupLabels[row.result.cleanupState] ??
                             row.result.cleanupState)
                           : '无回传事实',
+                    },
+                    {
+                      title: '证据',
+                      render: (_, { result }) =>
+                        result ? (
+                          <div>
+                            已关联 {result.content.evidenceRefs.length} 项
+                            {!!result.content.evidenceGaps?.length && (
+                              <div className="caption">
+                                采集缺口 {result.content.evidenceGaps.length} 项
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          '—'
+                        ),
                     },
                     {
                       title: '结果详情',
@@ -1040,39 +1169,56 @@ export function ResultsPage({
                   />
                 )}
                 <Card size="small" title="报告证据清单">
-                  <Table
-                    rowKey="id"
-                    dataSource={facts.evidence}
-                    pagination={{ pageSize: 10 }}
-                    scroll={{ x: 900 }}
-                    columns={[
+                  <EvidenceGallery
+                    items={facts.evidence.map((row) => ({
+                      fileId: row.fileId,
+                      manifest: row.manifest,
+                      originalName: row.originalName,
+                      fileStatus: row.lastKnownFileStatus,
+                      source: row.manifest.source,
+                    }))}
+                    onOpen={setPreview}
+                  />
+                  <Collapse
+                    style={{ marginTop: 10 }}
+                    items={[
                       {
-                        title: '原件',
-                        render: (_, row) => (
-                          <Button
-                            type="link"
-                            onClick={() => setFileId(row.fileId)}
-                          >
-                            {row.originalName}
-                          </Button>
-                        ),
-                      },
-                      {
-                        title: '来源/采集',
-                        render: (_, row) =>
-                          `${row.manifest.source} / ${row.manifest.captureCompleteness}`,
-                      },
-                      { title: '类型', render: (_, row) => row.manifest.type },
-                      {
-                        title: '记录时字节状态',
-                        dataIndex: 'lastKnownFileStatus',
-                      },
-                      {
-                        title: 'SHA-256',
-                        render: (_, row) => (
-                          <Typography.Text code>
-                            {row.manifest.sha256}
-                          </Typography.Text>
+                        key: 'metadata',
+                        label: '报告记录时的文件状态和校验信息',
+                        children: (
+                          <Table
+                            rowKey="id"
+                            dataSource={facts.evidence}
+                            pagination={{ pageSize: 10 }}
+                            scroll={{ x: 900 }}
+                            columns={[
+                              {
+                                title: '原件',
+                                dataIndex: 'originalName',
+                              },
+                              {
+                                title: '来源/采集',
+                                render: (_, row) =>
+                                  `${row.manifest.source} / ${row.manifest.captureCompleteness}`,
+                              },
+                              {
+                                title: '类型',
+                                render: (_, row) => row.manifest.type,
+                              },
+                              {
+                                title: '记录时字节状态',
+                                dataIndex: 'lastKnownFileStatus',
+                              },
+                              {
+                                title: 'SHA-256',
+                                render: (_, row) => (
+                                  <Typography.Text code>
+                                    {row.manifest.sha256}
+                                  </Typography.Text>
+                                ),
+                              },
+                            ]}
+                          />
                         ),
                       },
                     ]}
@@ -1090,13 +1236,23 @@ export function ResultsPage({
         {...(visibleResult?.revisionId
           ? { reportBasisRevisionId: visibleResult.revisionId }
           : {})}
-        onClose={() => setSelectedResult(null)}
+        {...(visibleResult?.initialStep
+          ? { initialStep: visibleResult.initialStep }
+          : {})}
+        {...(visibleResult?.returnTo
+          ? { returnTo: visibleResult.returnTo }
+          : {})}
+        onClose={closeResult}
         onChanged={async () => {
           await loadReport();
           await load();
         }}
       />
-      <EvidenceViewer fileId={fileId} onClose={() => setFileId(null)} />
+      <EvidenceViewer
+        fileId={preview?.fileId ?? null}
+        evidenceType={preview?.manifest.type}
+        onClose={() => setPreview(null)}
+      />
     </div>
   );
 }

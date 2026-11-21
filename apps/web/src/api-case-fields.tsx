@@ -18,12 +18,14 @@ import {
   DeleteOutlined,
   PlusOutlined,
 } from '@ant-design/icons';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   assertionOperatorSchema,
+  apiCaseContentSchema,
   httpMethodSchema,
 } from '../../../packages/contracts/src/domain';
+import { assetDetailSchema } from '../../../packages/contracts/src/assets';
 import { testConfigurationListSchema } from '../../../packages/contracts/src/test-configuration';
 import type { TestConfigurationView } from '../../../packages/contracts/src/test-configuration';
 import { api, describeError } from './api';
@@ -39,6 +41,13 @@ export {
 export type { ApiDraft, ApiCase } from './api-draft';
 import { newRequest } from './api-draft';
 import type { ApiDraft, DraftRequest, Request, Assertion } from './api-draft';
+import {
+  draftVariableIssues,
+  variableOptions,
+  VariableField,
+  type ApiPreparationVariables,
+  type ApiVariableOption,
+} from './api-variable-fields';
 
 function RequestSections({
   items,
@@ -85,11 +94,13 @@ function NamedValues({
   values,
   onChange,
   disabled,
+  options,
 }: {
   label: string;
   values: { name: string; value: string }[];
   onChange: (values: { name: string; value: string }[]) => void;
   disabled: boolean;
+  options: ApiVariableOption[];
 }) {
   return (
     <div className="named-values-editor">
@@ -122,17 +133,16 @@ function NamedValues({
                 />
               </td>
               <td>
-                <Input
-                  aria-label={`${label}值 ${index + 1}`}
+                <VariableField
+                  label={`${label}值 ${index + 1}`}
                   placeholder="值或变量引用；不要填写真实凭据"
                   value={entry.value}
                   disabled={disabled}
-                  onChange={(event) =>
+                  options={options}
+                  onChange={(next) =>
                     onChange(
                       values.map((item, at) =>
-                        at === index
-                          ? { ...item, value: event.target.value }
-                          : item,
+                        at === index ? { ...item, value: next } : item,
                       ),
                     )
                   }
@@ -180,6 +190,10 @@ export function ApiCaseFields({
   disabled,
   presentation = 'stacked',
   documentation,
+  previewEnvironmentId,
+  onPreviewEnvironmentChange,
+  upstreamRequests = [],
+  preparationVariables,
 }: {
   projectId: string;
   variant?: 'business' | 'cleanup';
@@ -189,6 +203,10 @@ export function ApiCaseFields({
   disabled: boolean;
   presentation?: 'stacked' | 'workbench';
   documentation?: ReactNode;
+  previewEnvironmentId?: string | undefined;
+  onPreviewEnvironmentChange?: (id: string | undefined) => void;
+  upstreamRequests?: readonly DraftRequest[];
+  preparationVariables?: ApiPreparationVariables | undefined;
 }) {
   const workbench = presentation === 'workbench';
   const [activeStep, setActiveStep] = useState(value.requests[0]?.stepId);
@@ -204,13 +222,101 @@ export function ApiCaseFields({
   const [configurationError, setConfigurationError] = useState<string>();
   const [configurationLoading, setConfigurationLoading] = useState(false);
   const [configurationRefresh, setConfigurationRefresh] = useState(0);
+  const [localEnvironmentId, setLocalEnvironmentId] = useState<string>();
+  const pickedEnvironmentId =
+    onPreviewEnvironmentChange || variant === 'cleanup'
+      ? previewEnvironmentId
+      : localEnvironmentId;
+  const environments = configurations.filter(
+    (entry) => entry.content.kind === 'environment' && entry.content.active,
+  );
+  const selectedEnvironment = environments.find(
+    (entry) => entry.id === pickedEnvironmentId,
+  );
+  const references = value.base.preparations;
+  const [preparations, setPreparations] = useState<{
+    projectId: string;
+    references: typeof references;
+    context?: ApiPreparationVariables;
+  }>();
+  const currentPreparations =
+    preparations?.projectId === projectId &&
+    preparations.references === references
+      ? preparations
+      : undefined;
+  const resolvedPreparations =
+    preparationVariables ?? currentPreparations?.context;
+  const variableIssues = useMemo(
+    () =>
+      variant === 'business'
+        ? draftVariableIssues(value, selectedEnvironment, resolvedPreparations)
+        : [],
+    [variant, value, selectedEnvironment, resolvedPreparations],
+  );
+  useEffect(() => {
+    if (variant !== 'business' || !references?.length) return;
+    const controller = new AbortController();
+    const caseIds = [
+      ...new Set(references.map((reference) => reference.caseId)),
+    ];
+    void Promise.all(
+      caseIds.map(
+        async (caseId) =>
+          [
+            caseId,
+            await api(
+              `/projects/${projectId}/assets/${caseId}`,
+              { signal: controller.signal },
+              assetDetailSchema,
+            ),
+          ] as const,
+      ),
+    )
+      .then((catalog) => {
+        if (controller.signal.aborted) return;
+        const assets = new Map(catalog);
+        const context: ApiPreparationVariables = { steps: [], variables: {} };
+        for (const [index, reference] of references.entries()) {
+          const asset = assets.get(reference.caseId);
+          const snapshot = asset?.revisions.find(
+            (revision) => revision.id === reference.revisionId,
+          );
+          const source = apiCaseContentSchema.safeParse(snapshot?.content);
+          if (
+            !source.success ||
+            asset?.asset.removedAt ||
+            source.data.preparations?.length
+          ) {
+            setPreparations({ projectId, references });
+            return;
+          }
+          context.variables = {
+            ...context.variables,
+            ...source.data.variables,
+            ...reference.parameters,
+          };
+          context.steps.push(
+            ...source.data.steps.map((step) => ({
+              ...step,
+              name: `准备 ${index + 1} · ${step.name}`,
+            })),
+          );
+        }
+        setPreparations({ projectId, references, context });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted)
+          setPreparations({ projectId, references });
+      });
+    return () => controller.abort();
+  }, [projectId, references, variant]);
   useEffect(() => {
     const controller = new AbortController();
     setConfigurations([]);
     setConfigurationError(undefined);
     setConfigurationLoading(true);
     void Promise.allSettled(
-      ['purpose', 'authProfile'].map((kind) =>
+      ['purpose', 'authProfile', 'environment'].map((kind) =>
         api(
           `/projects/${projectId}/test-configuration?kind=${kind}`,
           { signal: controller.signal },
@@ -366,10 +472,54 @@ export function ApiCaseFields({
         <Alert
           type="warning"
           showIcon
-          title={`账号用途/认证目录未完整取得：${configurationError}`}
+          title={`环境、账号用途或认证目录未完整取得：${configurationError}`}
           description="原引用继续保留，不自动替换或切换账号。"
         />
       )}
+      {variant === 'business' && (
+        <Space wrap>
+          <Typography.Text type="secondary">变量预检环境</Typography.Text>
+          <Select
+            aria-label="变量预检环境"
+            style={{ minWidth: 210, maxWidth: '100%' }}
+            allowClear
+            disabled={disabled}
+            loading={configurationLoading}
+            value={pickedEnvironmentId}
+            options={environments.map((entry) => ({
+              value: entry.id,
+              label: entry.content.name,
+            }))}
+            placeholder="选择环境后可插入公共变量"
+            onChange={onPreviewEnvironmentChange ?? setLocalEnvironmentId}
+          />
+        </Space>
+      )}
+      {variableIssues.length > 0 && (
+        <Alert
+          type="error"
+          showIcon
+          title="变量引用预检未通过"
+          description={
+            <ul>
+              {variableIssues.slice(0, 5).map((issue) => (
+                <li key={`${issue.path.join(':')}:${issue.message}`}>
+                  {issue.path.join('/')}：{issue.message}
+                </li>
+              ))}
+            </ul>
+          }
+        />
+      )}
+      {variant === 'business' &&
+        currentPreparations &&
+        !resolvedPreparations && (
+          <Alert
+            type="warning"
+            showIcon
+            title="准备步骤的固定修订未加载，请检查用例与修订引用。"
+          />
+        )}
       {!workbench && (
         <Button
           disabled={disabled || configurationLoading}
@@ -405,53 +555,110 @@ export function ApiCaseFields({
         </div>
       )}
       {variant === 'business' && !workbench && variableFields}
-      {value.requests.map(
-        (request, index) =>
-          (!workbench || currentStep === request.stepId) && (
-            <Card
-              className={workbench ? 'workbench-request-card' : ''}
-              key={request.stepId}
-              size="small"
-              title={
-                workbench
-                  ? null
-                  : `${labelPrefix} ${index + 1} · ${request.name}`
-              }
-              extra={
-                variant === 'business' && !workbench ? (
-                  <Space>
-                    <Button
-                      aria-label={`上移${labelPrefix} ${index + 1}`}
-                      icon={<ArrowUpOutlined />}
-                      disabled={disabled || index === 0}
-                      onClick={() => move(index, -1)}
-                    />
-                    <Button
-                      aria-label={`下移${labelPrefix} ${index + 1}`}
-                      icon={<ArrowDownOutlined />}
-                      disabled={disabled || index === value.requests.length - 1}
-                      onClick={() => move(index, 1)}
-                    />
-                    <Button
-                      aria-label={`移除${labelPrefix} ${index + 1}`}
-                      danger
-                      icon={<DeleteOutlined />}
-                      disabled={disabled || value.requests.length === 1}
-                      onClick={() =>
-                        onChange({
-                          ...value,
-                          requests: value.requests.filter(
-                            (_, at) => at !== index,
-                          ),
-                        })
-                      }
-                    />
-                  </Space>
-                ) : null
-              }
-            >
-              <Space.Compact block className="section-alert">
-                {!workbench && (
+      {value.requests.map((request, index) => {
+        if (workbench && currentStep !== request.stepId) return null;
+        const options = variableOptions(
+          value,
+          [...upstreamRequests, ...value.requests.slice(0, index)],
+          selectedEnvironment,
+          resolvedPreparations,
+        );
+        return (
+          <Card
+            className={workbench ? 'workbench-request-card' : ''}
+            key={request.stepId}
+            size="small"
+            title={
+              workbench ? null : `${labelPrefix} ${index + 1} · ${request.name}`
+            }
+            extra={
+              variant === 'business' && !workbench ? (
+                <Space>
+                  <Button
+                    aria-label={`上移${labelPrefix} ${index + 1}`}
+                    icon={<ArrowUpOutlined />}
+                    disabled={disabled || index === 0}
+                    onClick={() => move(index, -1)}
+                  />
+                  <Button
+                    aria-label={`下移${labelPrefix} ${index + 1}`}
+                    icon={<ArrowDownOutlined />}
+                    disabled={disabled || index === value.requests.length - 1}
+                    onClick={() => move(index, 1)}
+                  />
+                  <Button
+                    aria-label={`移除${labelPrefix} ${index + 1}`}
+                    danger
+                    icon={<DeleteOutlined />}
+                    disabled={disabled || value.requests.length === 1}
+                    onClick={() =>
+                      onChange({
+                        ...value,
+                        requests: value.requests.filter(
+                          (_, at) => at !== index,
+                        ),
+                      })
+                    }
+                  />
+                </Space>
+              ) : null
+            }
+          >
+            <Space.Compact block className="section-alert">
+              {!workbench && (
+                <Input
+                  aria-label={`${labelPrefix} ${index + 1} 名称`}
+                  value={request.name}
+                  disabled={disabled}
+                  onChange={(event) =>
+                    update(index, { name: event.target.value })
+                  }
+                  placeholder="请求名称"
+                />
+              )}
+              <Select
+                aria-label={`${labelPrefix} ${index + 1} HTTP方法`}
+                style={{ minWidth: workbench ? 88 : 120, flex: '0 0 auto' }}
+                value={request.method}
+                disabled={disabled}
+                options={httpMethodSchema.options.map((method) => ({
+                  value: method,
+                  label: method,
+                }))}
+                onChange={(method: Request['method']) =>
+                  update(index, { method })
+                }
+              />
+              <VariableField
+                label={`${labelPrefix} ${index + 1} URL`}
+                value={request.url}
+                disabled={disabled}
+                options={options}
+                onChange={(url) => update(index, { url })}
+                placeholder="被测接口 URL 或已定义环境变量引用"
+              />
+              {workbench && (
+                <Button
+                  type="text"
+                  aria-label={`请求 ${index + 1} 步骤设置`}
+                  icon={<AppIcon name="settings" />}
+                  onClick={() => setSettingsStep(request.stepId)}
+                />
+              )}
+            </Space.Compact>
+            {workbench && (
+              <Modal
+                title={`请求 ${index + 1} · 步骤设置`}
+                open={settingsStep === request.stepId}
+                onCancel={() => setSettingsStep(null)}
+                zIndex={uiLayers.dialog}
+                width={610}
+                footer={
+                  <Button onClick={() => setSettingsStep(null)}>完成</Button>
+                }
+              >
+                <label className="field-label">
+                  请求名称
                   <Input
                     aria-label={`${labelPrefix} ${index + 1} 名称`}
                     value={request.name}
@@ -459,415 +666,219 @@ export function ApiCaseFields({
                     onChange={(event) =>
                       update(index, { name: event.target.value })
                     }
-                    placeholder="请求名称"
                   />
-                )}
-                <Select
-                  aria-label={`${labelPrefix} ${index + 1} HTTP方法`}
-                  style={{ minWidth: workbench ? 88 : 120, flex: '0 0 auto' }}
-                  value={request.method}
-                  disabled={disabled}
-                  options={httpMethodSchema.options.map((method) => ({
-                    value: method,
-                    label: method,
-                  }))}
-                  onChange={(method: Request['method']) =>
-                    update(index, { method })
-                  }
-                />
-                <Input
-                  aria-label={`${labelPrefix} ${index + 1} URL`}
-                  value={request.url}
-                  disabled={disabled}
-                  onChange={(event) =>
-                    update(index, { url: event.target.value })
-                  }
-                  placeholder="被测接口 URL 或已定义环境变量引用"
-                />
-                {workbench && (
+                </label>
+                <p className="caption mt">
+                  修改保留在当前用例草稿中，保存用例后产生新修订。
+                </p>
+                <Space className="mt">
                   <Button
-                    type="text"
-                    aria-label={`请求 ${index + 1} 步骤设置`}
-                    icon={<AppIcon name="settings" />}
-                    onClick={() => setSettingsStep(request.stepId)}
-                  />
-                )}
-              </Space.Compact>
-              {workbench && (
-                <Modal
-                  title={`请求 ${index + 1} · 步骤设置`}
-                  open={settingsStep === request.stepId}
-                  onCancel={() => setSettingsStep(null)}
-                  zIndex={uiLayers.dialog}
-                  width={610}
-                  footer={
-                    <Button onClick={() => setSettingsStep(null)}>完成</Button>
-                  }
-                >
-                  <label className="field-label">
-                    请求名称
-                    <Input
-                      aria-label={`${labelPrefix} ${index + 1} 名称`}
-                      value={request.name}
+                    disabled={disabled || index === 0}
+                    onClick={() => move(index, -1)}
+                  >
+                    上移请求
+                  </Button>
+                  <Button
+                    disabled={disabled || index === value.requests.length - 1}
+                    onClick={() => move(index, 1)}
+                  >
+                    下移请求
+                  </Button>
+                  <Button
+                    danger
+                    disabled={disabled || value.requests.length === 1}
+                    onClick={() => {
+                      onChange({
+                        ...value,
+                        requests: value.requests.filter(
+                          (_, at) => at !== index,
+                        ),
+                      });
+                      setSettingsStep(null);
+                    }}
+                  >
+                    移除请求
+                  </Button>
+                </Space>
+              </Modal>
+            )}
+            <RequestSections
+              workbench={workbench}
+              items={[
+                {
+                  key: 'configuration',
+                  label: '账号用途、认证与请求超时',
+                  children: (
+                    <Space direction="vertical" style={{ width: '100%' }}>
+                      <Select
+                        aria-label={`${labelPrefix} ${index + 1} 账号用途`}
+                        value={request.purposeRef}
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        loading={configurationLoading}
+                        disabled={disabled}
+                        style={{ width: '100%' }}
+                        options={referenceOptions(
+                          'purpose',
+                          request.purposeRef,
+                        )}
+                        placeholder="不指定账号用途"
+                        onChange={(id: string | undefined) =>
+                          update(index, { purposeRef: id })
+                        }
+                      />
+                      <Select
+                        aria-label={`${labelPrefix} ${index + 1} 认证定义`}
+                        value={request.authProfileRef}
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        loading={configurationLoading}
+                        disabled={disabled}
+                        style={{ width: '100%' }}
+                        options={referenceOptions(
+                          'authProfile',
+                          request.authProfileRef,
+                        )}
+                        placeholder="不指定认证定义；不自动借用其他账号"
+                        onChange={(id: string | undefined) =>
+                          update(index, { authProfileRef: id })
+                        }
+                      />
+                      <Space wrap>
+                        <Typography.Text>单次请求超时（毫秒）</Typography.Text>
+                        <InputNumber<number>
+                          aria-label={`${labelPrefix} ${index + 1} 超时毫秒`}
+                          min={100}
+                          max={120000}
+                          step={100}
+                          precision={0}
+                          value={request.timeoutMs ?? null}
+                          disabled={disabled}
+                          placeholder="平台默认"
+                          onChange={(number) =>
+                            update(index, { timeoutMs: number ?? undefined })
+                          }
+                        />
+                        <Typography.Text type="secondary">
+                          100～120000；不自动重试。
+                        </Typography.Text>
+                      </Space>
+                    </Space>
+                  ),
+                },
+                {
+                  key: 'parameters',
+                  label: '参数',
+                  children: (
+                    <NamedValues
+                      label="Query"
+                      values={request.query}
                       disabled={disabled}
-                      onChange={(event) =>
-                        update(index, { name: event.target.value })
-                      }
+                      options={options}
+                      onChange={(query) => update(index, { query })}
                     />
-                  </label>
-                  <p className="caption mt">
-                    修改保留在当前用例草稿中，保存用例后产生新修订。
-                  </p>
-                  <Space className="mt">
-                    <Button
-                      disabled={disabled || index === 0}
-                      onClick={() => move(index, -1)}
-                    >
-                      上移请求
-                    </Button>
-                    <Button
-                      disabled={disabled || index === value.requests.length - 1}
-                      onClick={() => move(index, 1)}
-                    >
-                      下移请求
-                    </Button>
-                    <Button
-                      danger
-                      disabled={disabled || value.requests.length === 1}
-                      onClick={() => {
-                        onChange({
-                          ...value,
-                          requests: value.requests.filter(
-                            (_, at) => at !== index,
-                          ),
-                        });
-                        setSettingsStep(null);
-                      }}
-                    >
-                      移除请求
-                    </Button>
-                  </Space>
-                </Modal>
-              )}
-              <RequestSections
-                workbench={workbench}
-                items={[
-                  {
-                    key: 'configuration',
-                    label: '账号用途、认证与请求超时',
-                    children: (
-                      <Space direction="vertical" style={{ width: '100%' }}>
-                        <Select
-                          aria-label={`${labelPrefix} ${index + 1} 账号用途`}
-                          value={request.purposeRef}
-                          allowClear
-                          showSearch
-                          optionFilterProp="label"
-                          loading={configurationLoading}
-                          disabled={disabled}
-                          style={{ width: '100%' }}
-                          options={referenceOptions(
-                            'purpose',
-                            request.purposeRef,
-                          )}
-                          placeholder="不指定账号用途"
-                          onChange={(id: string | undefined) =>
-                            update(index, { purposeRef: id })
-                          }
-                        />
-                        <Select
-                          aria-label={`${labelPrefix} ${index + 1} 认证定义`}
-                          value={request.authProfileRef}
-                          allowClear
-                          showSearch
-                          optionFilterProp="label"
-                          loading={configurationLoading}
-                          disabled={disabled}
-                          style={{ width: '100%' }}
-                          options={referenceOptions(
-                            'authProfile',
-                            request.authProfileRef,
-                          )}
-                          placeholder="不指定认证定义；不自动借用其他账号"
-                          onChange={(id: string | undefined) =>
-                            update(index, { authProfileRef: id })
-                          }
-                        />
-                        <Space wrap>
-                          <Typography.Text>
-                            单次请求超时（毫秒）
-                          </Typography.Text>
-                          <InputNumber<number>
-                            aria-label={`${labelPrefix} ${index + 1} 超时毫秒`}
-                            min={100}
-                            max={120000}
-                            step={100}
-                            precision={0}
-                            value={request.timeoutMs ?? null}
-                            disabled={disabled}
-                            placeholder="平台默认"
-                            onChange={(number) =>
-                              update(index, { timeoutMs: number ?? undefined })
-                            }
-                          />
-                          <Typography.Text type="secondary">
-                            100～120000；不自动重试。
-                          </Typography.Text>
-                        </Space>
-                      </Space>
-                    ),
-                  },
-                  {
-                    key: 'parameters',
-                    label: '参数',
-                    children: (
-                      <NamedValues
-                        label="Query"
-                        values={request.query}
+                  ),
+                },
+                {
+                  key: 'headers',
+                  label: '请求头',
+                  children: (
+                    <NamedValues
+                      label="Header"
+                      values={request.headers}
+                      disabled={disabled}
+                      options={options}
+                      onChange={(headers) => update(index, { headers })}
+                    />
+                  ),
+                },
+                {
+                  key: 'body',
+                  label: `Body · ${request.body.format}`,
+                  children: (
+                    <Space direction="vertical" style={{ width: '100%' }}>
+                      <Select
+                        aria-label={`${labelPrefix} ${index + 1} Body格式`}
+                        value={request.body.format}
                         disabled={disabled}
-                        onChange={(query) => update(index, { query })}
+                        options={['none', 'json', 'text', 'form'].map(
+                          (format) => ({ value: format, label: format }),
+                        )}
+                        onChange={(format: Request['body']['format']) =>
+                          update(index, {
+                            body:
+                              format === 'json'
+                                ? { format, value: {} }
+                                : format === 'text'
+                                  ? {
+                                      format,
+                                      value: request.bodyText,
+                                      mediaType: 'text/plain',
+                                    }
+                                  : format === 'form'
+                                    ? { format, fields: [] }
+                                    : { format },
+                          })
+                        }
                       />
-                    ),
-                  },
-                  {
-                    key: 'headers',
-                    label: '请求头',
-                    children: (
-                      <NamedValues
-                        label="Header"
-                        values={request.headers}
-                        disabled={disabled}
-                        onChange={(headers) => update(index, { headers })}
-                      />
-                    ),
-                  },
-                  {
-                    key: 'body',
-                    label: `Body · ${request.body.format}`,
-                    children: (
-                      <Space direction="vertical" style={{ width: '100%' }}>
-                        <Select
-                          aria-label={`${labelPrefix} ${index + 1} Body格式`}
-                          value={request.body.format}
+                      {(request.body.format === 'json' ||
+                        request.body.format === 'text') && (
+                        <VariableField
+                          label={`${labelPrefix} ${index + 1} Body内容`}
+                          format={request.body.format}
+                          value={request.bodyText}
                           disabled={disabled}
-                          options={['none', 'json', 'text', 'form'].map(
-                            (format) => ({ value: format, label: format }),
-                          )}
-                          onChange={(format: Request['body']['format']) =>
+                          options={options}
+                          onChange={(bodyText) => update(index, { bodyText })}
+                        />
+                      )}
+                      {request.body.format === 'form' && (
+                        <NamedValues
+                          label="表单字段"
+                          values={request.body.fields}
+                          disabled={disabled}
+                          options={options}
+                          onChange={(fields) =>
                             update(index, {
-                              body:
-                                format === 'json'
-                                  ? { format, value: {} }
-                                  : format === 'text'
-                                    ? {
-                                        format,
-                                        value: request.bodyText,
-                                        mediaType: 'text/plain',
-                                      }
-                                    : format === 'form'
-                                      ? { format, fields: [] }
-                                      : { format },
+                              body: { format: 'form', fields },
                             })
                           }
                         />
-                        {(request.body.format === 'json' ||
-                          request.body.format === 'text') && (
-                          <Input.TextArea
-                            aria-label={`${labelPrefix} ${index + 1} Body内容`}
-                            rows={5}
-                            value={request.bodyText}
-                            disabled={disabled}
-                            onChange={(event) =>
-                              update(index, { bodyText: event.target.value })
-                            }
-                          />
-                        )}
-                        {request.body.format === 'form' && (
-                          <NamedValues
-                            label="表单字段"
-                            values={request.body.fields}
-                            disabled={disabled}
-                            onChange={(fields) =>
-                              update(index, {
-                                body: { format: 'form', fields },
-                              })
-                            }
-                          />
-                        )}
-                      </Space>
-                    ),
-                  },
-                  {
-                    key: 'assertions',
-                    label: `断言 · ${request.assertions.length}`,
-                    children: (
-                      <Space direction="vertical" style={{ width: '100%' }}>
-                        {request.assertions.map((assertion, at) => (
-                          <Space
-                            direction="vertical"
-                            key={assertion.id}
-                            className="assertion-editor"
-                          >
-                            <Space wrap>
-                              <Select
-                                aria-label={`${labelPrefix} ${index + 1} 断言 ${at + 1} 来源`}
-                                value={assertion.source}
-                                disabled={disabled}
-                                options={[
-                                  'status',
-                                  'json',
-                                  'header',
-                                  'body',
-                                  'variable',
-                                ].map((source) => ({
-                                  value: source,
-                                  label: source,
-                                }))}
-                                onChange={(source: Assertion['source']) =>
-                                  update(index, {
-                                    assertions: request.assertions.map(
-                                      (item, pos) =>
-                                        pos === at ? { ...item, source } : item,
-                                    ),
-                                  })
-                                }
-                              />
-                              <Input
-                                aria-label={`${labelPrefix} ${index + 1} 断言 ${at + 1} 路径`}
-                                placeholder="JSON/响应头/变量路径"
-                                value={assertion.path ?? ''}
-                                disabled={disabled}
-                                onChange={(event) =>
-                                  update(index, {
-                                    assertions: request.assertions.map(
-                                      (item, pos) =>
-                                        pos === at
-                                          ? {
-                                              ...item,
-                                              path: event.target.value,
-                                            }
-                                          : item,
-                                    ),
-                                  })
-                                }
-                              />
-                              <Select
-                                aria-label={`${labelPrefix} ${index + 1} 断言 ${at + 1} 运算符`}
-                                value={assertion.operator}
-                                disabled={disabled}
-                                options={assertionOperatorSchema.options.map(
-                                  (operator) => ({
-                                    value: operator,
-                                    label: operator,
-                                  }),
-                                )}
-                                onChange={(operator: Assertion['operator']) =>
-                                  update(index, {
-                                    assertions: request.assertions.map(
-                                      (item, pos) =>
-                                        pos === at
-                                          ? { ...item, operator }
-                                          : item,
-                                    ),
-                                  })
-                                }
-                              />
-                              <Button
-                                aria-label={`移除${labelPrefix} ${index + 1} 断言 ${at + 1}`}
-                                danger
-                                icon={<DeleteOutlined />}
-                                disabled={disabled}
-                                onClick={() =>
-                                  update(index, {
-                                    assertions: request.assertions.filter(
-                                      (_, pos) => pos !== at,
-                                    ),
-                                  })
-                                }
-                              />
-                            </Space>
-                            {assertion.operator !== 'exists' && (
-                              <Input
-                                aria-label={`${labelPrefix} ${index + 1} 断言 ${at + 1} 预期JSON值`}
-                                placeholder='JSON 预期值，如 200、"ok"、true'
-                                value={assertion.expectedText}
-                                disabled={disabled}
-                                onChange={(event) =>
-                                  update(index, {
-                                    assertions: request.assertions.map(
-                                      (item, pos) =>
-                                        pos === at
-                                          ? {
-                                              ...item,
-                                              expectedText: event.target.value,
-                                            }
-                                          : item,
-                                    ),
-                                  })
-                                }
-                              />
-                            )}
-                          </Space>
-                        ))}
-                        <Button
-                          icon={<PlusOutlined />}
-                          disabled={
-                            disabled || request.assertions.length >= 200
-                          }
-                          onClick={() =>
-                            update(index, {
-                              assertions: [
-                                ...request.assertions,
-                                {
-                                  id: crypto.randomUUID(),
-                                  source: 'status',
-                                  operator: 'equals',
-                                  expectedText: '',
-                                },
-                              ],
-                            })
-                          }
+                      )}
+                    </Space>
+                  ),
+                },
+                {
+                  key: 'assertions',
+                  label: `断言 · ${request.assertions.length}`,
+                  children: (
+                    <Space direction="vertical" style={{ width: '100%' }}>
+                      {request.assertions.map((assertion, at) => (
+                        <Space
+                          direction="vertical"
+                          key={assertion.id}
+                          className="assertion-editor"
                         >
-                          添加业务断言
-                        </Button>
-                      </Space>
-                    ),
-                  },
-                  {
-                    key: 'extractors',
-                    label: `变量提取 · ${request.extractors.length}`,
-                    children: (
-                      <Space direction="vertical" style={{ width: '100%' }}>
-                        {request.extractors.map((extractor, at) => (
-                          <Space wrap key={at}>
-                            <Input
-                              aria-label={`提取变量名 ${at + 1}`}
-                              placeholder="变量名"
-                              disabled={disabled}
-                              value={extractor.name}
-                              onChange={(event) =>
-                                update(index, {
-                                  extractors: request.extractors.map(
-                                    (item, pos) =>
-                                      pos === at
-                                        ? { ...item, name: event.target.value }
-                                        : item,
-                                  ),
-                                })
-                              }
-                            />
+                          <Space wrap>
                             <Select
-                              value={extractor.source}
-                              aria-label={`提取来源 ${at + 1}`}
+                              aria-label={`${labelPrefix} ${index + 1} 断言 ${at + 1} 来源`}
+                              value={assertion.source}
                               disabled={disabled}
-                              options={['json', 'header', 'status', 'body'].map(
-                                (source) => ({ value: source, label: source }),
-                              )}
-                              onChange={(
-                                source: Request['extractors'][number]['source'],
-                              ) =>
+                              options={[
+                                'status',
+                                'json',
+                                'header',
+                                'body',
+                                'variable',
+                              ].map((source) => ({
+                                value: source,
+                                label: source,
+                              }))}
+                              onChange={(source: Assertion['source']) =>
                                 update(index, {
-                                  extractors: request.extractors.map(
+                                  assertions: request.assertions.map(
                                     (item, pos) =>
                                       pos === at ? { ...item, source } : item,
                                   ),
@@ -875,141 +886,298 @@ export function ApiCaseFields({
                               }
                             />
                             <Input
-                              aria-label={`提取路径 ${at + 1}`}
-                              placeholder="路径"
-                              disabled={disabled}
-                              value={extractor.path ?? ''}
-                              onChange={(event) =>
-                                update(index, {
-                                  extractors: request.extractors.map(
-                                    (item, pos) =>
-                                      pos === at
-                                        ? { ...item, path: event.target.value }
-                                        : item,
-                                  ),
-                                })
-                              }
-                            />
-                            <Checkbox
-                              checked={extractor.required}
+                              aria-label={`${labelPrefix} ${index + 1} 断言 ${at + 1} 路径`}
+                              placeholder="JSON/响应头/变量路径"
+                              value={assertion.path ?? ''}
                               disabled={disabled}
                               onChange={(event) =>
                                 update(index, {
-                                  extractors: request.extractors.map(
+                                  assertions: request.assertions.map(
                                     (item, pos) =>
                                       pos === at
                                         ? {
                                             ...item,
-                                            required: event.target.checked,
+                                            path: event.target.value,
                                           }
                                         : item,
                                   ),
                                 })
                               }
-                            >
-                              必须提取
-                            </Checkbox>
+                            />
+                            <Select
+                              aria-label={`${labelPrefix} ${index + 1} 断言 ${at + 1} 运算符`}
+                              value={assertion.operator}
+                              disabled={disabled}
+                              options={assertionOperatorSchema.options.map(
+                                (operator) => ({
+                                  value: operator,
+                                  label: operator,
+                                }),
+                              )}
+                              onChange={(operator: Assertion['operator']) =>
+                                update(index, {
+                                  assertions: request.assertions.map(
+                                    (item, pos) =>
+                                      pos === at ? { ...item, operator } : item,
+                                  ),
+                                })
+                              }
+                            />
                             <Button
-                              aria-label={`移除变量提取 ${at + 1}`}
+                              aria-label={`移除${labelPrefix} ${index + 1} 断言 ${at + 1}`}
                               danger
                               icon={<DeleteOutlined />}
                               disabled={disabled}
                               onClick={() =>
                                 update(index, {
-                                  extractors: request.extractors.filter(
+                                  assertions: request.assertions.filter(
                                     (_, pos) => pos !== at,
                                   ),
                                 })
                               }
                             />
                           </Space>
-                        ))}
-                        <Button
-                          icon={<PlusOutlined />}
-                          disabled={
-                            disabled || request.extractors.length >= 100
-                          }
-                          onClick={() =>
-                            update(index, {
-                              extractors: [
-                                ...request.extractors,
-                                { name: '', source: 'json', required: true },
-                              ],
-                            })
-                          }
-                        >
-                          添加变量提取
-                        </Button>
-                      </Space>
-                    ),
-                  },
-                  {
-                    key: 'scripts',
-                    label: '受限脚本扩展',
-                    children: (
-                      <Space direction="vertical" style={{ width: '100%' }}>
-                        <Typography.Text type="secondary">
-                          脚本将在已审接口执行通道中受限运行；此页面不会执行代码。
-                        </Typography.Text>
-                        <Input.TextArea
-                          aria-label={`${labelPrefix} ${index + 1} 前处理脚本`}
-                          placeholder="前处理脚本"
-                          rows={4}
-                          value={request.preScript ?? ''}
-                          disabled={disabled}
-                          maxLength={64000}
-                          onChange={(event) =>
-                            update(index, { preScript: event.target.value })
-                          }
-                        />
-                        <Input.TextArea
-                          aria-label={`${labelPrefix} ${index + 1} 响应处理脚本`}
-                          placeholder="响应处理/复杂断言脚本"
-                          rows={4}
-                          value={request.postScript ?? ''}
-                          disabled={disabled}
-                          maxLength={64000}
-                          onChange={(event) =>
-                            update(index, { postScript: event.target.value })
-                          }
-                        />
-                      </Space>
-                    ),
-                  },
-                  ...(workbench && variant === 'business'
-                    ? [
-                        {
-                          key: 'cleanup',
-                          label: '数据清理',
-                          children: (
-                            <ApiCleanupFields
-                              projectId={projectId}
-                              value={value}
-                              onChange={onChange}
+                          {assertion.operator !== 'exists' && (
+                            <Input
+                              aria-label={`${labelPrefix} ${index + 1} 断言 ${at + 1} 预期JSON值`}
+                              placeholder='JSON 预期值，如 200、"ok"、true'
+                              value={assertion.expectedText}
                               disabled={disabled}
+                              onChange={(event) =>
+                                update(index, {
+                                  assertions: request.assertions.map(
+                                    (item, pos) =>
+                                      pos === at
+                                        ? {
+                                            ...item,
+                                            expectedText: event.target.value,
+                                          }
+                                        : item,
+                                  ),
+                                })
+                              }
                             />
-                          ),
-                        },
-                        {
-                          key: 'documentation',
-                          label: '用例说明',
-                          children: (
-                            <Space
-                              direction="vertical"
-                              style={{ width: '100%' }}
-                            >
-                              {documentation}
-                              {variableFields}
-                            </Space>
-                          ),
-                        },
-                      ]
-                    : []),
-                ]}
-              />
-            </Card>
-          ),
-      )}
+                          )}
+                        </Space>
+                      ))}
+                      <Button
+                        icon={<PlusOutlined />}
+                        disabled={disabled || request.assertions.length >= 200}
+                        onClick={() =>
+                          update(index, {
+                            assertions: [
+                              ...request.assertions,
+                              {
+                                id: crypto.randomUUID(),
+                                source: 'status',
+                                operator: 'equals',
+                                expectedText: '',
+                              },
+                            ],
+                          })
+                        }
+                      >
+                        添加业务断言
+                      </Button>
+                    </Space>
+                  ),
+                },
+                {
+                  key: 'extractors',
+                  label: `变量提取 · ${request.extractors.length}`,
+                  children: (
+                    <Space direction="vertical" style={{ width: '100%' }}>
+                      {request.extractors.map((extractor, at) => (
+                        <Space wrap key={at}>
+                          <Input
+                            aria-label={`提取变量名 ${at + 1}`}
+                            placeholder="变量名"
+                            disabled={disabled}
+                            value={extractor.name}
+                            onChange={(event) =>
+                              update(index, {
+                                extractors: request.extractors.map(
+                                  (item, pos) =>
+                                    pos === at
+                                      ? { ...item, name: event.target.value }
+                                      : item,
+                                ),
+                              })
+                            }
+                          />
+                          <Select
+                            value={extractor.source}
+                            aria-label={`提取来源 ${at + 1}`}
+                            disabled={disabled}
+                            options={['json', 'header', 'status', 'body'].map(
+                              (source) => ({ value: source, label: source }),
+                            )}
+                            onChange={(
+                              source: Request['extractors'][number]['source'],
+                            ) =>
+                              update(index, {
+                                extractors: request.extractors.map(
+                                  (item, pos) =>
+                                    pos === at ? { ...item, source } : item,
+                                ),
+                              })
+                            }
+                          />
+                          <Input
+                            aria-label={`提取路径 ${at + 1}`}
+                            placeholder="路径"
+                            disabled={disabled}
+                            value={extractor.path ?? ''}
+                            onChange={(event) =>
+                              update(index, {
+                                extractors: request.extractors.map(
+                                  (item, pos) =>
+                                    pos === at
+                                      ? { ...item, path: event.target.value }
+                                      : item,
+                                ),
+                              })
+                            }
+                          />
+                          <Checkbox
+                            checked={extractor.required}
+                            disabled={disabled}
+                            onChange={(event) =>
+                              update(index, {
+                                extractors: request.extractors.map(
+                                  (item, pos) =>
+                                    pos === at
+                                      ? {
+                                          ...item,
+                                          required: event.target.checked,
+                                        }
+                                      : item,
+                                ),
+                              })
+                            }
+                          >
+                            必须提取
+                          </Checkbox>
+                          <Checkbox
+                            checked={extractor.sensitive === true}
+                            disabled={disabled}
+                            onChange={(event) =>
+                              update(index, {
+                                extractors: request.extractors.map(
+                                  (item, pos) =>
+                                    pos === at
+                                      ? {
+                                          ...item,
+                                          sensitive: event.target.checked,
+                                        }
+                                      : item,
+                                ),
+                              })
+                            }
+                          >
+                            敏感文本
+                          </Checkbox>
+                          <Button
+                            aria-label={`移除变量提取 ${at + 1}`}
+                            danger
+                            icon={<DeleteOutlined />}
+                            disabled={disabled}
+                            onClick={() =>
+                              update(index, {
+                                extractors: request.extractors.filter(
+                                  (_, pos) => pos !== at,
+                                ),
+                              })
+                            }
+                          />
+                        </Space>
+                      ))}
+                      <Button
+                        icon={<PlusOutlined />}
+                        disabled={disabled || request.extractors.length >= 100}
+                        onClick={() =>
+                          update(index, {
+                            extractors: [
+                              ...request.extractors,
+                              { name: '', source: 'json', required: true },
+                            ],
+                          })
+                        }
+                      >
+                        添加变量提取
+                      </Button>
+                      <Typography.Text type="secondary">
+                        敏感提取值只在本次用例的请求变量中使用，报告和脚本只显示遮蔽值。
+                      </Typography.Text>
+                    </Space>
+                  ),
+                },
+                {
+                  key: 'scripts',
+                  label: '受限脚本扩展',
+                  children: (
+                    <Space direction="vertical" style={{ width: '100%' }}>
+                      <Typography.Text type="secondary">
+                        脚本将在已审接口执行通道中受限运行；此页面不会执行代码。
+                      </Typography.Text>
+                      <Input.TextArea
+                        aria-label={`${labelPrefix} ${index + 1} 前处理脚本`}
+                        placeholder="前处理脚本"
+                        rows={4}
+                        value={request.preScript ?? ''}
+                        disabled={disabled}
+                        maxLength={64000}
+                        onChange={(event) =>
+                          update(index, { preScript: event.target.value })
+                        }
+                      />
+                      <Input.TextArea
+                        aria-label={`${labelPrefix} ${index + 1} 响应处理脚本`}
+                        placeholder="响应处理/复杂断言脚本"
+                        rows={4}
+                        value={request.postScript ?? ''}
+                        disabled={disabled}
+                        maxLength={64000}
+                        onChange={(event) =>
+                          update(index, { postScript: event.target.value })
+                        }
+                      />
+                    </Space>
+                  ),
+                },
+                ...(workbench && variant === 'business'
+                  ? [
+                      {
+                        key: 'cleanup',
+                        label: '数据清理',
+                        children: (
+                          <ApiCleanupFields
+                            projectId={projectId}
+                            value={value}
+                            onChange={onChange}
+                            disabled={disabled}
+                            previewEnvironmentId={pickedEnvironmentId}
+                            preparationVariables={resolvedPreparations}
+                          />
+                        ),
+                      },
+                      {
+                        key: 'documentation',
+                        label: '用例说明',
+                        children: (
+                          <Space direction="vertical" style={{ width: '100%' }}>
+                            {documentation}
+                            {variableFields}
+                          </Space>
+                        ),
+                      },
+                    ]
+                  : []),
+              ]}
+            />
+          </Card>
+        );
+      })}
       {variant === 'business' && !workbench && (
         <Button
           icon={<PlusOutlined />}
@@ -1027,6 +1195,8 @@ export function ApiCaseFields({
           value={value}
           onChange={onChange}
           disabled={disabled}
+          previewEnvironmentId={pickedEnvironmentId}
+          preparationVariables={resolvedPreparations}
         />
       )}
     </Space>

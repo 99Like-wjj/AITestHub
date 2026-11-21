@@ -68,7 +68,7 @@ export const externalServiceInputSchema = z.strictObject({
     .array(idSchema)
     .max(1000)
     .refine((ids) => new Set(ids).size === ids.length, '用户不可重复'),
-  protocolMode: z.enum(['auto', 'modern', 'legacy']),
+  protocolMode: z.literal('modern'),
   tools: z
     .array(externalApprovedToolSchema)
     .max(64)

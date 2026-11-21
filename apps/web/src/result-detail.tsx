@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Button,
-  Card,
   Collapse,
   Descriptions,
   Drawer,
@@ -13,6 +12,7 @@ import {
   Skeleton,
   Space,
   Table,
+  Tabs,
   Tag,
   Typography,
   Upload,
@@ -36,19 +36,21 @@ import type { FileMetadata } from '../../../packages/contracts/src/files';
 import { api, ApiError, describeError } from './api';
 import { uploadProjectFile } from './file-channel';
 import { EvidenceViewer } from './evidence-viewer';
+import { EvidenceGallery } from './evidence-gallery';
+import type { EvidenceGalleryItem } from './evidence-gallery';
+import {
+  EvidenceGapList,
+  outcomeLabels,
+  OverallObservation,
+  ResultOutcomeTag,
+  ResultUiSteps,
+} from './result-steps';
+import { ApiResultTrace } from './api-result-trace';
 import type { Project } from './types';
 import { uiLayers } from './ui-layers';
 
 type Result = z.infer<typeof resultDetailSchema>['result'];
-export const outcomeLabels: Record<string, string> = {
-  passed: '通过',
-  failed: '失败',
-  blocked: '受阻',
-  inconclusive: '证据不足',
-  notExecuted: '未执行',
-  notReported: '未回传',
-  notAssessed: '尚无人工最终结论',
-};
+export { outcomeLabels } from './result-steps';
 const errors = (failure: unknown) =>
   failure instanceof z.ZodError
     ? failure.issues
@@ -261,6 +263,8 @@ export function ResultDetailPanel({
   executionKind,
   resultId,
   reportBasisRevisionId,
+  initialStep,
+  returnTo,
   onClose,
   onChanged,
 }: {
@@ -268,10 +272,20 @@ export function ResultDetailPanel({
   executionKind?: 'UI' | 'API';
   resultId: string | null;
   reportBasisRevisionId?: string;
+  initialStep?: number;
+  returnTo?: string;
   onClose: () => void;
   onChanged: () => Promise<void>;
 }) {
-  const [result, setResult] = useState<Result | null>(null);
+  const [loadedResult, setResult] = useState<{
+    projectId: string;
+    result: Result;
+  } | null>(null);
+  const result =
+    loadedResult?.projectId === project.id &&
+    loadedResult.result.id === resultId
+      ? loadedResult.result
+      : null;
   const [resolvedKind, setResolvedKind] = useState<'UI' | 'API' | null>(
     executionKind ?? null,
   );
@@ -279,7 +293,7 @@ export function ResultDetailPanel({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
   const [revisionId, setRevisionId] = useState<string | null>(null);
-  const [fileId, setFileId] = useState<string | null>(null);
+  const [evidence, setEvidence] = useState<EvidenceGalleryItem | null>(null);
   const [evidenceTarget, setEvidenceTarget] = useState<Result | null>(null);
   const [editor, setEditor] = useState<{
     mode: 'assess' | 'amend';
@@ -300,7 +314,10 @@ export function ResultDetailPanel({
   }>();
   const generation = useRef(0);
   const canAssess = project.roles.includes('tester');
-  async function load(signal?: AbortSignal) {
+  async function load(
+    signal?: AbortSignal,
+    selection: 'initial' | 'preserve' | 'latest' = 'preserve',
+  ) {
     const epoch = ++generation.current;
     if (!resultId) return;
     setLoading(true);
@@ -311,10 +328,22 @@ export function ResultDetailPanel({
         resultDetailSchema,
       );
       if (!signal?.aborted && epoch === generation.current) {
-        setResult(response.result);
-        setRevisionId(response.result.revisionId);
+        setResult({ projectId: project.id, result: response.result });
+        setRevisionId((current) =>
+          selection === 'latest'
+            ? response.result.revisionId
+            : selection === 'initial'
+              ? (reportBasisRevisionId ?? response.result.revisionId)
+              : (current ??
+                reportBasisRevisionId ??
+                response.result.revisionId),
+        );
         setError(undefined);
-        if (!executionKind) {
+        const kind = executionKind ?? response.result.scopeItem?.kind;
+        if (kind) {
+          setResolvedKind(kind);
+          setKindError(undefined);
+        } else {
           try {
             const run = await api(
               `/projects/${project.id}/ui-executions/${response.result.runId}`,
@@ -346,18 +375,36 @@ export function ResultDetailPanel({
     setResolvedKind(executionKind ?? null);
     setKindError(undefined);
     setEditor(null);
-    setFileId(null);
+    setEvidence(null);
     setEvidenceTarget(null);
-    void load(controller.signal);
+    setRevisionId(null);
+    setError(undefined);
+    setLoading(false);
+    void load(controller.signal, 'initial');
     return () => controller.abort();
-  }, [project.id, resultId, executionKind]);
+  }, [project.id, resultId, executionKind, reportBasisRevisionId]);
   const revision = result?.history.find((row) => row.id === revisionId);
-  const content = revision?.content ?? result?.content;
+  const viewingCurrent = !!result && revisionId === result.revisionId;
+  const content =
+    revision?.content ?? (viewingCurrent ? result?.content : undefined);
+  const refs = new Set(content?.evidenceRefs ?? []);
+  const linkedEvidence = (result?.evidence ?? [])
+    .filter((item) => refs.has(item.manifest.localEvidenceId))
+    .map((item) => ({
+      ...item,
+      source:
+        item.source === 'manualAddition' ? item.source : item.manifest.source,
+    }));
+  const manualEvidence = (result?.evidence ?? []).filter(
+    (item) =>
+      item.source === 'manualAddition' &&
+      !refs.has(item.manifest.localEvidenceId),
+  );
   const assessment = result?.assessments.find(
     (row) => row.id === result.assessmentRevisionId,
   );
   function openEditor(mode: 'assess' | 'amend') {
-    if (!result) return;
+    if (!result || !viewingCurrent) return;
     setEditor({ mode, basis: result, commandId: crypto.randomUUID() });
     setEditorDirty(false);
     setDiscardEditor(false);
@@ -432,7 +479,7 @@ export function ResultDetailPanel({
       }
       setEditor(null);
       setEditorDirty(false);
-      await load();
+      await load(undefined, editor.mode === 'amend' ? 'latest' : 'preserve');
       await onChanged();
     } catch (failure) {
       if (unknownWrite(failure)) setUncertain(true);
@@ -453,193 +500,276 @@ export function ResultDetailPanel({
       >
         {loading && <Skeleton active />}
         {error && <Alert type="error" showIcon title={error} />}
-        {result && content && (
-          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <Descriptions
-              bordered
-              size="small"
-              column={1}
-              items={[
-                { key: 'id', label: '结果ID', children: result.id },
-                {
-                  key: 'run',
-                  label: '执行/范围项',
-                  children: `${result.runId} / ${result.runItemId}`,
-                },
-                {
-                  key: 'original',
-                  label: '首次采集原始判断',
-                  children:
-                    outcomeLabels[
-                      result.history.find((row) => row.revisionNo === 1)
-                        ?.content.originalOutcome ?? 'notReported'
-                    ],
-                },
-                {
-                  key: 'reported',
-                  label: '当前采集修订判断',
-                  children: outcomeLabels[result.content.originalOutcome],
-                },
-                {
-                  key: 'final',
-                  label: '当前人工最终结论',
-                  children: assessment
-                    ? outcomeLabels[assessment.finalOutcome]
-                    : '尚无人工最终结论',
-                },
-                {
-                  key: 'finalreason',
-                  label: '当前人工结论依据',
-                  children: assessment?.reason ?? '尚未登记',
-                },
-              ]}
-            />
-            {reportBasisRevisionId &&
-              reportBasisRevisionId !== result.revisionId && (
-                <Alert
-                  type="info"
-                  title={`来源报告绑定 ${reportBasisRevisionId}；此详情查询当前结果 ${result.revisionId}，不能把当前内容套进旧存档。`}
-                  showIcon
-                />
+        {result && (
+          <div className="result-review">
+            <div className="result-review-header">
+              <div>
+                <h2>{result.scopeItem?.title ?? '执行结果详情'}</h2>
+                {result.scopeItem?.dataRow && (
+                  <Tag color="cyan">
+                    数据行 {result.scopeItem.dataRow.name} ·{' '}
+                    {result.scopeItem.dataRow.id}
+                  </Tag>
+                )}
+                {result.scopeItem?.preparationSources?.length ? (
+                  <Tag>
+                    固定准备修订 {result.scopeItem.preparationSources.length} 项
+                  </Tag>
+                ) : null}
+                <small className="result-review-muted result-review-id">
+                  原执行 {result.runId}
+                </small>
+              </div>
+              {returnTo && <Button href={returnTo}>返回缺陷</Button>}
+            </div>
+            <div className="result-review-meta">
+              <div>
+                <small>用例快照</small>
+                <strong>
+                  {result.scopeItem?.revisionNo
+                    ? `r${result.scopeItem.revisionNo}`
+                    : (result.scopeItem?.revisionId ?? '未记录修订')}
+                </strong>
+              </div>
+              <div>
+                <small>
+                  采集判断 · {revision ? `r${revision.revisionNo}` : '所选修订'}
+                </small>
+                <div>
+                  {content ? (
+                    <ResultOutcomeTag outcome={content.originalOutcome} />
+                  ) : (
+                    '未取得所选修订'
+                  )}
+                </div>
+              </div>
+              <div>
+                <small>当前人工最终结论</small>
+                <div>
+                  <ResultOutcomeTag
+                    outcome={assessment?.finalOutcome ?? 'notAssessed'}
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="result-review-basis">
+              <div>
+                <strong>
+                  {reportBasisRevisionId && revisionId === reportBasisRevisionId
+                    ? '来源绑定的采集修订'
+                    : viewingCurrent
+                      ? '当前采集修订'
+                      : '历史采集修订'}
+                </strong>
+                <div className="result-review-muted">
+                  {revision && `r${revision.revisionNo}`}
+                  {revision?.createdAt &&
+                    ` · ${new Date(revision.createdAt).toLocaleString('zh-CN')}`}
+                  {revision?.reason && ` · ${revision.reason}`}
+                </div>
+              </div>
+              <Select
+                aria-label="结果采集修订历史"
+                value={revisionId}
+                onChange={(id: string) => setRevisionId(id)}
+                options={result.history.map((row) => ({
+                  value: row.id,
+                  label: `r${row.revisionNo}${row.id === reportBasisRevisionId ? ' · 来源绑定' : ''}${row.id === result.revisionId ? ' · 当前' : ''}`,
+                }))}
+              />
+              {!viewingCurrent && (
+                <Button onClick={() => setRevisionId(result.revisionId)}>
+                  查看当前修订
+                </Button>
               )}
-            <Space wrap>
-              <Button onClick={() => void load()}>只读刷新当前结果</Button>
-              <Button
-                disabled={!canAssess}
-                onClick={() => openEditor('assess')}
-              >
-                登记人工最终结论
-              </Button>
-              <Button
-                disabled={
-                  !canAssess || !result.history.length || resolvedKind !== 'UI'
-                }
-                onClick={() => openEditor('amend')}
-              >
-                申请更正 UI 采集事实
-              </Button>
-              <Button
-                disabled={!canAssess}
-                onClick={() => setEvidenceTarget(result)}
-              >
-                人工补充证据
-              </Button>
-            </Space>
-            <Typography.Text type="secondary">
-              接口原始事实更正会由服务端拒绝，使用独立人工最终结论；项目管理员不自动取得测试角色。人工判断、补证不执行测试、不改变缺陷状态。
-            </Typography.Text>
+            </div>
             {kindError && (
               <Alert
                 type="warning"
-                title={`未取得原执行类型，暂不开采集更正入口：${kindError}`}
+                title="未取得执行类型"
+                description={kindError}
                 showIcon
               />
             )}
-            <Select
-              aria-label="结果采集修订历史"
-              value={revisionId}
-              onChange={setRevisionId}
-              style={{ width: '100%' }}
-              options={result.history.map((row) => ({
-                value: row.id,
-                label: `r${row.revisionNo}${row.id === result.revisionId ? '（当前采集修订）' : ''} · ${row.createdAt} · ${row.reason ?? '原始采集'}`,
-              }))}
-            />
-            <Card
-              size="small"
-              title={`正在查看的采集修订：${revision?.id ?? result.revisionId} · ${outcomeLabels[content.originalOutcome]}`}
-            >
-              <Typography.Paragraph className="message-prose">
-                {content.actualObservations}
-              </Typography.Paragraph>
-              {content.reason && (
-                <Typography.Paragraph>
-                  说明：{content.reason}
-                </Typography.Paragraph>
-              )}
-              <Typography.Paragraph type="secondary">
-                副作用确定性：{content.sideEffectCertainty}；开始：
-                {content.startedAt ?? '未记录'}；结束：
-                {content.endedAt ?? '未记录'}。
-              </Typography.Paragraph>
-              <Collapse
+            {!content ? (
+              <Alert
+                type="warning"
+                showIcon
+                title="来源引用的采集修订未取得"
+                description="可选择其他有记录的修订。"
+              />
+            ) : (
+              <Tabs
+                key={`${result.id}:${resolvedKind ?? ''}`}
                 items={[
                   {
-                    key: 'actual',
-                    label: '实际动作与资料依据',
+                    key: 'steps',
+                    label: resolvedKind === 'API' ? '请求与断言' : '步骤与证据',
+                    children:
+                      resolvedKind === 'API' ? (
+                        <div className="result-review-content">
+                          <ApiResultTrace
+                            key={`${result.runId}:${result.runItemId}:${initialStep ?? ''}`}
+                            projectId={project.id}
+                            runId={result.runId}
+                            runItemId={result.runItemId}
+                            initialStep={initialStep}
+                          />
+                          <Collapse
+                            items={[
+                              {
+                                key: 'original',
+                                label: '原始诊断记录',
+                                children: (
+                                  <OverallObservation content={content} />
+                                ),
+                              },
+                            ]}
+                          />
+                        </div>
+                      ) : (
+                        <ResultUiSteps
+                          key={`${revisionId}:${initialStep ?? ''}`}
+                          content={content}
+                          scope={result.scopeItem}
+                          evidence={linkedEvidence}
+                          initialStep={initialStep}
+                          onOpen={setEvidence}
+                        />
+                      ),
+                  },
+                  {
+                    key: 'evidence',
+                    label: '证据清单',
                     children: (
-                      <pre className="message-code">
-                        {JSON.stringify(
-                          {
-                            actions: content.actualActions ?? [],
-                            basis: content.basis ?? [],
-                            evidenceRefs: content.evidenceRefs,
-                          },
-                          null,
-                          2,
+                      <div className="result-review-content">
+                        <h3>所选修订关联的证据</h3>
+                        <EvidenceGallery
+                          key={revisionId}
+                          items={linkedEvidence}
+                          onOpen={setEvidence}
+                        />
+                        {content.evidenceGaps?.length ? (
+                          <>
+                            <h3>待处理的证据</h3>
+                            <EvidenceGapList gaps={content.evidenceGaps} />
+                          </>
+                        ) : null}
+                        {viewingCurrent && manualEvidence.length > 0 && (
+                          <>
+                            <h3>人工补证</h3>
+                            <EvidenceGallery
+                              items={manualEvidence}
+                              onOpen={setEvidence}
+                            />
+                          </>
                         )}
-                      </pre>
+                      </div>
+                    ),
+                  },
+                  {
+                    key: 'handling',
+                    label: '判断记录',
+                    children: (
+                      <div className="result-review-content">
+                        <Descriptions
+                          size="small"
+                          bordered
+                          column={2}
+                          items={[
+                            {
+                              key: 'initial',
+                              label: '首次采集原始判断',
+                              children: (
+                                <ResultOutcomeTag
+                                  outcome={
+                                    result.history.find(
+                                      (row) => row.revisionNo === 1,
+                                    )?.content.originalOutcome ?? 'notReported'
+                                  }
+                                />
+                              ),
+                            },
+                            {
+                              key: 'current',
+                              label: '当前采集修订判断',
+                              children: (
+                                <ResultOutcomeTag
+                                  outcome={result.content.originalOutcome}
+                                />
+                              ),
+                            },
+                            {
+                              key: 'certainty',
+                              label: '所选修订副作用确定性',
+                              children: content.sideEffectCertainty,
+                            },
+                            {
+                              key: 'times',
+                              label: '执行时间',
+                              children: `${content.startedAt ?? '未记录'} — ${content.endedAt ?? '未记录'}`,
+                            },
+                          ]}
+                        />
+                        <Space wrap>
+                          <Button onClick={() => void load()}>
+                            刷新结果记录
+                          </Button>
+                          <Button
+                            disabled={!canAssess || !viewingCurrent}
+                            onClick={() => openEditor('assess')}
+                          >
+                            登记人工最终结论
+                          </Button>
+                          <Button
+                            disabled={
+                              !canAssess ||
+                              !viewingCurrent ||
+                              !result.history.length ||
+                              resolvedKind !== 'UI'
+                            }
+                            onClick={() => openEditor('amend')}
+                          >
+                            申请更正 UI 采集事实
+                          </Button>
+                          <Button
+                            disabled={!canAssess || !viewingCurrent}
+                            onClick={() => setEvidenceTarget(result)}
+                          >
+                            人工补充证据
+                          </Button>
+                        </Space>
+                        <Table
+                          rowKey="id"
+                          pagination={false}
+                          dataSource={result.assessments}
+                          scroll={{ x: 700 }}
+                          columns={[
+                            {
+                              title: '人工判断',
+                              render: (_, row) => (
+                                <Space>
+                                  <ResultOutcomeTag
+                                    outcome={row.finalOutcome}
+                                  />
+                                  {row.id === result.assessmentRevisionId &&
+                                    '当前'}
+                                </Space>
+                              ),
+                            },
+                            { title: '原因', dataIndex: 'reason' },
+                            { title: '操作者', dataIndex: 'actorId' },
+                            { title: '时间', dataIndex: 'createdAt' },
+                          ]}
+                          locale={{ emptyText: '尚无人工最终结论' }}
+                        />
+                      </div>
                     ),
                   },
                 ]}
               />
-            </Card>
-            <Card size="small" title="独立的人工结论历史">
-              <Table
-                rowKey="id"
-                pagination={false}
-                dataSource={result.assessments}
-                scroll={{ x: 700 }}
-                columns={[
-                  {
-                    title: '判断',
-                    render: (_, row) => (
-                      <Space>
-                        <Tag>{outcomeLabels[row.finalOutcome]}</Tag>
-                        {row.id === result.assessmentRevisionId && '当前'}
-                      </Space>
-                    ),
-                  },
-                  { title: '原因', dataIndex: 'reason' },
-                  { title: '操作者', dataIndex: 'actorId' },
-                  { title: '时间', dataIndex: 'createdAt' },
-                ]}
-                locale={{ emptyText: '尚无人工最终结论，不伪造为通过。' }}
-              />
-            </Card>
-            <Card size="small" title="结果证据与来源">
-              <Table
-                rowKey="id"
-                pagination={false}
-                dataSource={result.evidence}
-                scroll={{ x: 700 }}
-                columns={[
-                  {
-                    title: '证据',
-                    render: (_, row) => (
-                      <Button type="link" onClick={() => setFileId(row.fileId)}>
-                        {row.manifest.localEvidenceId}
-                      </Button>
-                    ),
-                  },
-                  { title: '类型', render: (_, row) => row.manifest.type },
-                  {
-                    title: '关联来源',
-                    render: (_, row) =>
-                      row.source === 'manualAddition'
-                        ? '人工补证'
-                        : '原采集关联',
-                  },
-                  {
-                    title: '采集声明',
-                    render: (_, row) =>
-                      `${row.manifest.source} / ${row.manifest.captureCompleteness}`,
-                  },
-                  { title: '文件ID', dataIndex: 'fileId' },
-                ]}
-              />
-            </Card>
-          </Space>
+            )}
+          </div>
         )}
       </Drawer>
       <Modal
@@ -788,7 +918,11 @@ export function ResultDetailPanel({
           await onChanged();
         }}
       />
-      <EvidenceViewer fileId={fileId} onClose={() => setFileId(null)} />
+      <EvidenceViewer
+        fileId={evidence?.fileId ?? null}
+        evidenceType={evidence?.manifest.type}
+        onClose={() => setEvidence(null)}
+      />
     </>
   );
 }

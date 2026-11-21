@@ -182,6 +182,7 @@ export const extractorSchema = z.strictObject({
   source: z.enum(['json', 'header', 'status', 'body']),
   path: z.string().max(2000).optional(),
   required: z.boolean(),
+  sensitive: z.boolean().optional(),
 });
 export const assertionOperatorSchema = z.enum([
   'equals',
@@ -292,6 +293,18 @@ export const cleanupPolicySchema = z.discriminatedUnion('mode', [
     steps: z.array(cleanupStepSchema).min(1).max(100),
   }),
 ]);
+export const apiDataRowSchema = z.strictObject({
+  id: localIdSchema,
+  name: z.string().trim().min(1).max(120),
+  values: z.record(variableNameSchema, z.json()),
+});
+export const apiPreparationReferenceSchema = z.strictObject({
+  caseId: idSchema,
+  revisionId: idSchema,
+  parameters: z.record(variableNameSchema, z.json()),
+});
+export const apiDataRowAnchorSchema = apiDataRowSchema.pick({ id: true, name: true });
+export const apiPreparationAnchorSchema = apiPreparationReferenceSchema.pick({ caseId: true, revisionId: true });
 export const apiCaseContentSchema = z
   .strictObject({
     kind: z.literal('API'),
@@ -303,10 +316,14 @@ export const apiCaseContentSchema = z
     basisRefs: z.array(basisRefSchema).max(100),
     dslVersion: z.literal('ath.api-case.v1'),
     variables: z.record(variableNameSchema, z.json()),
+    dataRows: z.array(apiDataRowSchema).min(1).max(100).optional(),
+    preparations: z.array(apiPreparationReferenceSchema).min(1).max(20).optional(),
     steps: z.array(apiRequestStepSchema).min(1).max(100),
     cleanup: cleanupPolicySchema,
   })
   .superRefine((content, context) => {
+    if (content.dataRows && new Set(content.dataRows.map(row => row.id)).size !== content.dataRows.length)
+      context.addIssue({ code:'custom',path:['dataRows'],message:'数据行标识不可重复' });
     if (
       new Set(content.steps.map((step) => step.stepId)).size !==
       content.steps.length
@@ -524,6 +541,8 @@ export const scopeItemSchema = z.strictObject({
   content: caseContentSchema,
   ordinal: z.number().int().min(0),
   issueIds: z.array(idSchema),
+  dataRow: apiDataRowAnchorSchema.optional(),
+  preparationSources: z.array(apiPreparationAnchorSchema).max(20).optional(),
 });
 export const executionScopeSchema = z
   .strictObject({
@@ -619,6 +638,19 @@ export const evidenceManifestItemSchema = z.strictObject({
   capturedAt: timestampSchema.optional(),
   source: z.enum(['original', 'derived', 'manualAddition']).default('original'),
 });
+const evidenceStepOrdinal = z.number().int().min(1).max(100);
+export const resultStepObservationSchema = z.strictObject({
+  ordinal: evidenceStepOrdinal,
+  actual: z.string().trim().min(1).max(10_000),
+  outcome: uiOutcomeSchema.optional(),
+  evidenceRefs: z.array(localIdSchema).max(100).default([]),
+});
+export const resultEvidenceGapSchema = z.strictObject({
+  ordinal: evidenceStepOrdinal.optional(),
+  label: z.string().trim().min(1).max(200),
+  state: z.enum(['notCaptured', 'pendingUpload', 'uploadFailed']),
+  reason: z.string().trim().min(1).max(2000),
+});
 export const resultItemSchema = z.strictObject({
   runItemId: idSchema,
   localResultId: localIdSchema,
@@ -629,6 +661,12 @@ export const resultItemSchema = z.strictObject({
   basis: z.array(basisRefSchema).max(100).optional(),
   sideEffectCertainty: sideEffectCertaintySchema,
   evidenceRefs: z.array(localIdSchema).max(1000),
+  stepObservations: z
+    .array(resultStepObservationSchema)
+    .max(100)
+    .refine((steps) => new Set(steps.map((step) => step.ordinal)).size === steps.length, '步骤序号不可重复')
+    .optional(),
+  evidenceGaps: z.array(resultEvidenceGapSchema).max(100).optional(),
   startedAt: timestampSchema.optional(),
   endedAt: timestampSchema.optional(),
 });

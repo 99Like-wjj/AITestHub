@@ -23,6 +23,7 @@ import { missingFiles } from '../results/evidence.js';
 import { RetestService } from '../retests/service.js';
 import { UiProgressBatchService } from './progress-batch.js';
 import { assertLocalUiActor } from '../results/delivery-access.js';
+import { initializeNativeUiDelivery } from '../results/delivery-store.js';
 import {
   uiDeliveryGate,
   deliveryMissingFiles,
@@ -199,6 +200,13 @@ export class UiExecutionService {
             input.localExecutionId,
             input.executionProvenance,
           ],
+        );
+        await initializeNativeUiDelivery(
+          tx,
+          runId,
+          projectId,
+          actor.userId,
+          scope.snapshotDigest,
         );
         for (const item of scope.items)
           await tx.query(

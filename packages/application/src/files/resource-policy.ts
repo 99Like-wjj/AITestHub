@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import {
-  defaultResourcePolicy,
   type ResourcePolicyCapabilities,
   type ResourcePolicySnapshot,
 } from '../../../contracts/src/resource-policy.js';
@@ -11,7 +10,6 @@ import { resourcePolicyReaderFromEnvironment } from '../resource-policy/environm
 import type { ResourcePolicyAnchorReader } from '../resource-policy/anchor.js';
 import { loadAnchoredResourcePolicy } from '../resource-policy/operations.js';
 import { loadAcceptedResourcePolicy } from '../resource-policy/loader.js';
-import { resourcePolicyDigest } from '../resource-policy/core.js';
 import { runtimeResourceCapabilities } from '../resource-policy/capabilities.js';
 import { resourcePolicyInstallationState } from '../resource-policy/installation.js';
 
@@ -20,7 +18,7 @@ export const fileResourceCapabilities = runtimeResourceCapabilities;
 export const fileIntentDigest = (value: unknown): string =>
   createHash('sha256').update(canonicalJson(value)).digest('hex');
 export type FilePolicySnapshot = ResourcePolicySnapshot & {
-  readonly source: 'active' | 'accepted' | 'legacyDefault';
+  readonly source: 'active' | 'accepted';
 };
 export type FilePolicyIntent = {
   ownerId: string;
@@ -78,36 +76,12 @@ interface Acceptance {
   policy_digest: string;
   payload_digest: string;
 }
-const legacy: FilePolicySnapshot = Object.freeze({
-  revisionId: '34dbe2ea-c9c9-48d9-9318-06b20fba8e92',
-  digest: resourcePolicyDigest(defaultResourcePolicy),
-  policy: defaultResourcePolicy,
-  source: 'legacyDefault',
-});
-
 /** Only trusted caller identities and SQL facts enter this port; never expose intent/policy parameters to a tool. */
 export class FileResourcePolicies {
   constructor(
     private readonly openReader: () => Promise<ResourcePolicyAnchorReader> = resourcePolicyReaderFromEnvironment,
     private readonly capabilities: ResourcePolicyCapabilities = fileResourceCapabilities,
   ) {}
-  private async state(tx: SqlExecutor): Promise<'ready' | 'pre34'> {
-    return resourcePolicyInstallationState(tx);
-  }
-  private async pre34NewIntent(): Promise<FilePolicySnapshot> {
-    try {
-      // Only an authenticated, readable absence is an installation before policy
-      // existed. A newer/old/corrupt external control is a restore fence, not a default.
-      if ((await (await this.openReader()).read()) === null) return legacy;
-    } catch {
-      /* Missing key, unreadable/corrupt anchor, and undefined are not null. */
-    }
-    throw new DomainError(
-      'DEPENDENCY_UNAVAILABLE',
-      '旧数据库缺少最新文件资源策略；新意图保持关闭，不能采用旧默认。',
-      503,
-    );
-  }
   private async stored(
     tx: SqlExecutor,
     intent: FilePolicyIntent,
@@ -140,12 +114,21 @@ export class FileResourcePolicies {
     tx: SqlExecutor,
     intent?: FilePolicyIntent,
   ): Promise<FilePolicySnapshot> {
-    if ((await this.state(tx)) === 'pre34')
-      return intent?.existing ? legacy : this.pre34NewIntent();
+    if ((await resourcePolicyInstallationState(tx)) !== 'ready')
+      throw new DomainError(
+        'DEPENDENCY_UNAVAILABLE',
+        '运行数据库尚未升级到文件资源策略版本。',
+        503,
+      );
     if (intent) {
       const saved = await this.stored(tx, intent);
       if (saved) return saved;
-      if (intent.existing) return legacy;
+      if (intent.existing)
+        throw new DomainError(
+          'UNSUPPORTED_OPERATION',
+          '历史受理缺少当前资源策略绑定；已验证原件仍可查阅。',
+          410,
+        );
     }
     return {
       ...(await loadAnchoredResourcePolicy(
@@ -156,7 +139,7 @@ export class FileResourcePolicies {
       source: 'active',
     };
   }
-  /** In the same authorized business-acceptance transaction. Existing history without a sidecar remains legacy. */
+  /** In the same authorized business-acceptance transaction. Same-intent replay reuses the bound policy. */
   async accept(
     tx: SqlExecutor,
     intent: FilePolicyIntent,

@@ -390,49 +390,44 @@ export class ControlJournal implements TransactionControlObserver {
     };
   }
   async assertCurrentSource() {
-    let head: ControlHead | undefined;
-    for (let attempt = 0; attempt < 20; attempt++) {
-      try {
-        head = await this.files.head();
-        break;
-      } catch {
-        if (attempt === 19) throw unavailable();
-        await new Promise((done) => setTimeout(done, 25));
-      }
-    }
-    if (!head?.committed) throw unavailable();
-    const row = (
-      await this.db.query<StateRow>(
-        'SELECT platform_id,control_sequence,state_digest FROM app.recovery_control_state WHERE singleton',
+    return this.db.transaction(async (tx) => {
+      // The same lock guards every journal write. Verify the signed file and DB position together.
+      await tx.query('SELECT pg_advisory_xact_lock_shared(415948022)');
+      const head = await this.files.head();
+      if (!head.committed) throw unavailable();
+      const row = (
+        await tx.query<StateRow>(
+          'SELECT platform_id,control_sequence,state_digest FROM app.recovery_control_state WHERE singleton',
+        )
+      ).rows[0];
+      if (
+        !row ||
+        row.platform_id !== head.platformId ||
+        Number(row.control_sequence) < head.committed.sequence
       )
-    ).rows[0];
-    if (
-      !row ||
-      row.platform_id !== head.platformId ||
-      Number(row.control_sequence) < head.committed.sequence
-    )
+        throw unavailable();
+      if (
+        Number(row.control_sequence) === head.committed.sequence &&
+        row.state_digest === head.committed.stateDigest &&
+        (!head.pending || this.livePrepared.has(head.pending.id))
+      ) {
+        await this.files.assertBodyAvailable(head);
+        return;
+      }
+      if (
+        head.pending &&
+        Number(row.control_sequence) === head.pending.sequence &&
+        row.state_digest === head.pending.stateDigest
+      ) {
+        await this.files.assertBodyAvailable({
+          ...head,
+          committed: head.pending,
+          pending: null,
+        });
+        return;
+      }
       throw unavailable();
-    if (
-      Number(row.control_sequence) === head.committed.sequence &&
-      row.state_digest === head.committed.stateDigest &&
-      (!head.pending || this.livePrepared.has(head.pending.id))
-    ) {
-      await this.files.assertBodyAvailable(head);
-      return;
-    }
-    if (
-      head.pending &&
-      Number(row.control_sequence) === head.pending.sequence &&
-      row.state_digest === head.pending.stateDigest
-    ) {
-      await this.files.assertBodyAvailable({
-        ...head,
-        committed: head.pending,
-        pending: null,
-      });
-      return;
-    }
-    throw unavailable();
+    });
   }
   /** Trusted restore/backup dependency only; never register this internal value as a Web/AI/MCP DTO. */
   async latest(): Promise<{ head: ControlHead; state: SecurityState }> {

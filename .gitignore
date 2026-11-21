@@ -33,7 +33,7 @@ __pycache__/
 *.local.json
 deployment-profiles/
 
-# Only the reviewed source schema snapshot is publishable
+# Historical contract snapshots retain their frozen source bytes.
 /tooling/local-client/contracts/*
 !/tooling/local-client/contracts/8869d4dc-bb5c-45fe-a8d1-98913be7bb01/
 !/tooling/local-client/contracts/ui-archive-v1.json

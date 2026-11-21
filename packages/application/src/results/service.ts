@@ -1,8 +1,7 @@
 import { UiArchiveService } from '../ui-executions/archive.js';
 import { reportExecutionScopeSchema } from '../../../contracts/src/ui-archives.js';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
-  resultSubmissionResourceSchema as resultSubmissionSchema,
   resultSubmissionReceiptSchema,
   resultItemSchema,
   resultAmendmentSchema,
@@ -18,7 +17,7 @@ import type {
 } from '../../../persistence/src/database.js';
 import { requireProject } from '../access/policy.js';
 import { OperationService } from '../operations/service.js';
-import { DomainError, forbidden, stale } from '../errors.js';
+import { DomainError, stale } from '../errors.js';
 import { audit } from '../events.js';
 import { readRun, semanticDigest } from '../ui-executions/service.js';
 import {
@@ -28,12 +27,9 @@ import {
   missingFiles,
 } from './evidence.js';
 import { persistReportRevision } from '../reports/service.js';
-import { recordBusinessActivity } from '../requirements/service.js';
 import { assertSafeResultContent } from './safety.js';
 import { ensureFailedProblemInTransaction } from '../issues/problems.js';
-import type { FilesService } from '../files/service.js';
-import { parseSafeResultJson } from './json-file.js';
-import { prepareUiResults, missingUiFiles } from './preparation.js';
+import { missingUiFiles } from './preparation.js';
 import { assertSubmissionFileBudget } from '../files/submission-budget.js';
 import { assertReferencedEvidenceFileBudget } from './submission-budget.js';
 import {
@@ -43,8 +39,8 @@ import {
   type FileResourcePolicies,
 } from '../files/resource-policy.js';
 import { assertLocalUiActor } from './delivery-access.js';
+import { assertResultEvidenceScope, readResultScope } from './result-scope.js';
 import {
-  assertV1UiWriteMode,
   uiDeliveryGate,
   deliveryMissingFiles,
   projectUiDelivery,
@@ -60,12 +56,6 @@ interface ResultRow {
   current_assessment_revision_id: string | null;
   content: unknown;
 }
-interface OriginalJson {
-  fileId: string;
-  sha256: string;
-  bytes: number;
-}
-
 export class ResultService {
   get archives() {
     return new UiArchiveService(this.db);
@@ -77,493 +67,8 @@ export class ResultService {
   ) {
     this.operations = new OperationService(db);
   }
-  prepareUi(actor: ActorContext, projectId: string, raw: unknown) {
-    return prepareUiResults(this.db, actor, projectId, raw, this.policies);
-  }
   missingUiFiles(actor: ActorContext, projectId: string, runId: string) {
     return missingUiFiles(this.db, actor, projectId, runId);
-  }
-
-  async submitUiFile(
-    actor: ActorContext,
-    projectId: string,
-    fileId: string,
-    files: FilesService,
-  ) {
-    assertLocalUiActor(actor);
-    await this.db.transaction((tx) =>
-      requireProject(tx, actor, projectId, 'results.submit'),
-    );
-    const metadata = (await files.metadata(actor, fileId)).file;
-    if (metadata.ownerScope !== 'project' || metadata.projectId !== projectId)
-      throw new DomainError('FORBIDDEN', '结果文件须属于此项目。', 403);
-    if (
-      metadata.mediaType !== 'application/json' ||
-      BigInt(metadata.bytes) > 16n * 1024n * 1024n
-    )
-      throw new DomainError(
-        'VALIDATION_ERROR',
-        '结果文件须是至多16MiB的UTF-8 JSON。',
-        400,
-      );
-    const downloaded = await files.download(actor, fileId);
-    const chunks: Buffer[] = [];
-    let length = 0;
-    let input: unknown;
-    try {
-      for await (const chunk of downloaded.body) {
-        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        length += bytes.length;
-        if (length > 16 * 1024 * 1024)
-          throw new Error('Result payload too large');
-        chunks.push(bytes);
-      }
-      const bytes = Buffer.concat(chunks);
-      if (
-        bytes.length !== Number(metadata.bytes) ||
-        createHash('sha256').update(bytes).digest('hex') !== metadata.sha256
-      )
-        throw new Error('Result bytes differ from verified registration');
-      input = parseSafeResultJson(bytes);
-    } catch (error: unknown) {
-      if (error instanceof DomainError) throw error;
-      throw new DomainError(
-        'VALIDATION_ERROR',
-        '结果文件不能读取为完整UTF-8 JSON；请核对原资源状态和内容。',
-        400,
-      );
-    } finally {
-      downloaded.body.destroy();
-    }
-    const parsed = resultSubmissionSchema.parse(input);
-    if (metadata.runId !== null && metadata.runId !== parsed.runId)
-      throw new DomainError(
-        'BUSINESS_CONFLICT',
-        '结果JSON与文件登记的执行归属不一致。',
-        409,
-      );
-    return this.submitUiInternal(actor, projectId, parsed, {
-      fileId,
-      sha256: metadata.sha256,
-      bytes: length,
-    });
-  }
-
-  async submitUi(actor: ActorContext, projectId: string, raw: unknown) {
-    assertLocalUiActor(actor);
-    return this.submitUiInternal(actor, projectId, raw);
-  }
-  private async bindOriginalJson(
-    tx: SqlExecutor,
-    actor: ActorContext,
-    projectId: string,
-    input: ReturnType<typeof resultSubmissionSchema.parse>,
-    source: OriginalJson,
-    receipt: ReturnType<typeof resultSubmissionReceiptSchema.parse>,
-  ) {
-    if (
-      !receipt.reportId ||
-      !receipt.perItemResults.some(
-        (item) => item.status === 'accepted' || item.status === 'skipped',
-      )
-    )
-      return;
-    await requireProject(tx, actor, projectId, 'results.submit');
-    const submission = (
-      await tx.query<{ semantic_digest: string }>(
-        'SELECT semantic_digest FROM app.result_submissions WHERE actor_id=$1 AND submission_id=$2 AND run_id=$3 FOR UPDATE',
-        [actor.userId, input.submissionId, input.runId],
-      )
-    ).rows[0];
-    if (!submission || submission.semantic_digest !== semanticDigest(input))
-      throw new DomainError(
-        'BUSINESS_CONFLICT',
-        '没有与该原JSON一致的已受理结果回执，不能伪造报告关联。',
-        409,
-      );
-    if (
-      (
-        await tx.query(
-          "SELECT 1 FROM app.audit_events WHERE action='results.original-json-linked' AND actor_id=$1 AND project_id=$2 AND object_id=$3 AND payload->>'submissionId'=$4 LIMIT 1",
-          [actor.userId, projectId, receipt.reportId, input.submissionId],
-        )
-      ).rowCount
-    )
-      return;
-    const policy = await this.policies.read(tx, {
-      ownerId: actor.userId,
-      projectId,
-      namespace: 'results.submit',
-      key: input.submissionId,
-      payloadDigest: fileIntentDigest(input),
-      existing: true,
-    });
-    assertFilePolicyCounts(policy, input.evidenceManifest.length);
-    await assertSubmissionFileBudget(
-      tx,
-      projectId,
-      [...input.evidenceManifest.map((item) => item.fileId), source.fileId],
-      policy,
-      'callerCounted',
-    );
-    const file = (
-      await tx.query<{ declared_sha256: string; declared_bytes: string }>(
-        "SELECT declared_sha256,declared_bytes::text FROM app.file_resources WHERE id=$1 AND project_id=$2 AND owner_scope='project' AND status='verified' AND deleted_at IS NULL AND (run_id IS NULL OR run_id=$3) FOR SHARE",
-        [source.fileId, projectId, input.runId],
-      )
-    ).rows[0];
-    if (
-      !file ||
-      file.declared_sha256 !== source.sha256 ||
-      Number(file.declared_bytes) !== source.bytes
-    )
-      throw new DomainError(
-        'PRECONDITIONS_MISSING',
-        '原JSON资源已失效或摘要变化，未绑定报告。',
-        422,
-      );
-    if (
-      !(
-        await tx.query(
-          'SELECT 1 FROM app.reports WHERE id=$1 AND project_id=$2 AND run_id=$3',
-          [receipt.reportId, projectId, input.runId],
-        )
-      ).rowCount
-    )
-      throw new DomainError('NOT_FOUND', '没有该项目执行报告。', 404);
-    await tx.query(
-      "INSERT INTO app.resource_references(resource_id,project_id,reference_type,reference_id,created_by) VALUES($1,$2,'report',$3,$4) ON CONFLICT DO NOTHING",
-      [source.fileId, projectId, receipt.reportId, actor.userId],
-    );
-    await audit(
-      tx,
-      actor,
-      'results.original-json-linked',
-      receipt.reportId,
-      projectId,
-      {
-        fileId: source.fileId,
-        sha256: source.sha256,
-        bytes: source.bytes,
-        submissionId: input.submissionId,
-        runId: input.runId,
-        resultsAccepted: receipt.resultsAccepted,
-        hasConflicts: receipt.perItemResults.some(
-          (item) => item.status === 'conflict',
-        ),
-      },
-    );
-  }
-  private async submitUiInternal(
-    actor: ActorContext,
-    projectId: string,
-    raw: unknown,
-    source?: OriginalJson,
-  ) {
-    assertSafeResultContent(raw);
-    const input = resultSubmissionSchema.parse(raw);
-    const digest = semanticDigest(input);
-    let originalChecked = false;
-    const receipt = await this.operations.execute(
-      actor,
-      'results.submit',
-      input.submissionId,
-      { projectId, ...input },
-      async (tx) => {
-        await requireProject(tx, actor, projectId, 'results.submit');
-      },
-      async (tx) => {
-        const run = await readRun(tx, projectId, input.runId, true);
-        if (run.kind !== 'UI' || run.created_by !== actor.userId) forbidden();
-        await assertV1UiWriteMode(tx, run.id);
-        if (input.snapshotDigest !== run.scope_digest)
-          throw new DomainError(
-            'BUSINESS_CONFLICT',
-            '结果不是基于此执行的固定范围。',
-            409,
-          );
-        const scope = reportExecutionScopeSchema.parse(run.scope_snapshot);
-        const scopeIds = new Set(scope.items.map((item) => item.runItemId));
-        if (scope.sourceType === 'uiArchive') {
-          const declared = new Map(
-            scope.items.map((item) => [item.runItemId, item.declaredOutcome]),
-          );
-          if (
-            Date.parse(input.endedAt) !== Date.parse(scope.endedAt) ||
-            input.items.some(
-              (item) => item.originalOutcome !== declared.get(item.runItemId),
-            ) ||
-            input.notExecutedItemIds.some(
-              (id) => declared.get(id) !== 'notExecuted',
-            )
-          )
-            throw new DomainError(
-              'BUSINESS_CONFLICT',
-              '原始归档结果须符合已确认范围、结束时间与结论。',
-              409,
-            );
-        }
-        const allIds = [
-          ...input.items.map((item) => item.runItemId),
-          ...input.notExecutedItemIds,
-        ];
-        if (allIds.some((id) => !scopeIds.has(id)))
-          throw new DomainError(
-            'BUSINESS_CONFLICT',
-            '结果包含固定范围以外的用例项；额外问题需使用独立问题记录。',
-            409,
-          );
-        if (
-          input.completion === 'complete' &&
-          new Set(allIds).size !== scopeIds.size
-        ) {
-          throw new DomainError(
-            'PRECONDITIONS_MISSING',
-            '完整结束必须明确覆盖全部固定项，包含明确未执行的内容。',
-            422,
-          );
-        }
-        const policy = await this.policies.accept(tx, {
-          ownerId: actor.userId,
-          projectId,
-          namespace: 'results.submit',
-          key: input.submissionId,
-          payloadDigest: fileIntentDigest(input),
-          existing: false,
-        });
-        assertFilePolicyCounts(policy, input.evidenceManifest.length);
-        await assertSubmissionFileBudget(
-          tx,
-          projectId,
-          [
-            ...input.evidenceManifest.map((item) => item.fileId),
-            ...(source ? [source.fileId] : []),
-          ],
-          policy,
-          'callerCounted',
-        );
-        await registerEvidence(
-          tx,
-          actor,
-          projectId,
-          run.id,
-          input.evidenceManifest,
-        );
-        const items = [
-          ...input.items,
-          ...input.notExecutedItemIds.map((runItemId) =>
-            resultItemSchema.parse({
-              runItemId,
-              localResultId: `notExecuted:${runItemId}`,
-              originalOutcome: 'notExecuted',
-              actualObservations: '客户端明确声明此固定项未执行。',
-              reason: '未执行',
-              sideEffectCertainty: 'notApplicable',
-              evidenceRefs: [],
-              endedAt: input.endedAt,
-            }),
-          ),
-        ];
-        const perItemResults: {
-          objectId: string;
-          status: 'accepted' | 'skipped' | 'conflict';
-          revisionId?: string;
-          code?: string;
-          message?: string;
-        }[] = [];
-        let accepted = 0;
-        for (const item of items) {
-          const itemDigest = semanticDigest(item);
-          const previous = (
-            await tx.query<ResultRow & { semantic_digest: string }>(
-              `SELECT r.*,v.content,v.semantic_digest FROM app.results r JOIN app.result_revisions v ON v.id=r.current_revision_id
-             WHERE r.project_id=$1 AND r.run_id=$2 AND r.run_item_id=$3 FOR UPDATE OF r`,
-              [projectId, run.id, item.runItemId],
-            )
-          ).rows[0];
-          if (previous) {
-            if (previous.semantic_digest === itemDigest)
-              perItemResults.push({
-                objectId: item.runItemId,
-                status: 'skipped',
-                revisionId: previous.current_revision_id,
-                message: '此内容已接收，未重复生成结果。',
-              });
-            else
-              perItemResults.push({
-                objectId: item.runItemId,
-                status: 'conflict',
-                code: 'EXPLICIT_AMENDMENT_REQUIRED',
-                message: '已有原始结果；更正须指明结果修订与原因。',
-              });
-            continue;
-          }
-          if (
-            (
-              await tx.query(
-                'SELECT 1 FROM app.results WHERE run_id=$1 AND local_result_id=$2',
-                [run.id, item.localResultId],
-              )
-            ).rowCount
-          ) {
-            perItemResults.push({
-              objectId: item.runItemId,
-              status: 'conflict',
-              code: 'LOCAL_RESULT_ID_CONFLICT',
-              message: '此执行的本地结果标识已用于另一项。',
-            });
-            continue;
-          }
-          const evidenceIds = await evidenceIdsForReferences(
-            tx,
-            run.id,
-            item.evidenceRefs,
-          );
-          const id = randomUUID();
-          const revisionId = randomUUID();
-          await tx.query(
-            'INSERT INTO app.results(id,project_id,run_id,run_item_id,local_result_id,current_revision_id,created_by) VALUES($1,$2,$3,$4,$5,$6,$7)',
-            [
-              id,
-              projectId,
-              run.id,
-              item.runItemId,
-              item.localResultId,
-              revisionId,
-              actor.userId,
-            ],
-          );
-          await tx.query(
-            'INSERT INTO app.result_revisions(id,result_id,revision_no,content,semantic_digest,actor_id) VALUES($1,$2,1,$3,$4,$5)',
-            [revisionId, id, JSON.stringify(item), itemDigest, actor.userId],
-          );
-          await linkEvidence(tx, actor, id, evidenceIds, 'original');
-          await ensureFailedProblemInTransaction(
-            tx,
-            actor,
-            projectId,
-            id,
-            revisionId,
-          );
-          await tx.query(
-            `UPDATE app.run_items SET state=$2,outcome=$3,side_effect_certainty=$4,started_at=$5,ended_at=$6 WHERE id=$1`,
-            [
-              item.runItemId,
-              item.originalOutcome === 'notExecuted'
-                ? 'notExecuted'
-                : 'completed',
-              item.originalOutcome,
-              item.sideEffectCertainty,
-              item.startedAt ?? null,
-              item.endedAt ?? input.endedAt,
-            ],
-          );
-          accepted++;
-          perItemResults.push({
-            objectId: item.runItemId,
-            status: 'accepted',
-            revisionId,
-          });
-        }
-        const hasConflicts = perItemResults.some(
-          (item) => item.status === 'conflict',
-        );
-        const receivedCount = Number(
-          (
-            await tx.query<{ count: string }>(
-              'SELECT count(*)::text count FROM app.results WHERE run_id=$1',
-              [run.id],
-            )
-          ).rows[0]?.count ?? '0',
-        );
-        const state =
-          accepted === 0
-            ? run.state
-            : receivedCount === scope.items.length &&
-                !hasConflicts &&
-                input.completion === 'complete'
-              ? 'completed'
-              : 'terminated';
-        await tx.query(
-          'UPDATE app.runs SET state=$2,ended_at=CASE WHEN $5 THEN $3::timestamptz ELSE ended_at END,delivery_status=$4,row_version=row_version+1 WHERE id=$1',
-          [
-            run.id,
-            scope.sourceType === 'uiArchive' ? run.state : state,
-            input.endedAt,
-            receivedCount
-              ? 'incomplete'
-              : input.evidenceManifest.length
-                ? 'receiving'
-                : 'notSubmitted',
-            accepted > 0 && scope.sourceType !== 'uiArchive',
-          ],
-        );
-        const report = await persistReportRevision(
-          tx,
-          actor,
-          projectId,
-          run.id,
-          'result-submission',
-        );
-        const missingFileIds = await missingFiles(tx, run.id);
-        const receipt = resultSubmissionReceiptSchema.parse({
-          submissionId: input.submissionId,
-          semanticDigest: digest,
-          resultsAccepted: accepted,
-          missingFileIds,
-          deliveryStatus: receivedCount
-            ? report.facts.deliveryStatus
-            : input.evidenceManifest.length
-              ? 'receiving'
-              : 'notSubmitted',
-          reportId: report.reportId,
-          reportUrl: report.reportUrl,
-          perItemResults,
-        });
-        await tx.query(
-          'INSERT INTO app.result_submissions(run_id,actor_id,submission_id,semantic_digest,payload,receipt) VALUES($1,$2,$3,$4,$5,$6)',
-          [
-            run.id,
-            actor.userId,
-            input.submissionId,
-            digest,
-            JSON.stringify(input),
-            JSON.stringify(receipt),
-          ],
-        );
-        if (source) {
-          await this.bindOriginalJson(
-            tx,
-            actor,
-            projectId,
-            input,
-            source,
-            receipt,
-          );
-          originalChecked = true;
-        }
-        if (accepted > 0 && scope.sourceType !== 'uiArchive')
-          for (const versionId of new Set(
-            scope.items.map((item) => item.requirementVersionId),
-          ))
-            await recordBusinessActivity(tx, projectId, versionId);
-        await audit(tx, actor, 'results.submitted', run.id, projectId, {
-          accepted,
-          hasConflicts,
-          deliveryStatus: receipt.deliveryStatus,
-          reportId: receipt.reportId,
-        });
-        return receipt;
-      },
-      projectId,
-    );
-    // A direct-body submission may later deliver its first original file. The immutable receipt proves acceptance;
-    // locking that submission and the first-link audit makes replay attach at most one original, without resubmitting facts.
-    if (source && !originalChecked)
-      await this.db.transaction((tx) =>
-        this.bindOriginalJson(tx, actor, projectId, input, source, receipt),
-      );
-    return receipt;
   }
 
   async receipt(actor: ActorContext, projectId: string, submissionId: string) {
@@ -660,6 +165,12 @@ export class ResultService {
           payloadDigest: fileIntentDigest(input),
           existing: false,
         });
+        await assertResultEvidenceScope(
+          tx,
+          projectId,
+          row.run_id,
+          input.replacement,
+        );
         await assertReferencedEvidenceFileBudget(
           tx,
           projectId,
@@ -902,6 +413,12 @@ export class ResultService {
     return this.db.transaction(async (tx) => {
       await requireProject(tx, actor, projectId, 'project.read');
       const result = await this.result(tx, projectId, resultId);
+      const scopeItem = await readResultScope(
+        tx,
+        projectId,
+        result.run_id,
+        result.run_item_id,
+      );
       const history = await tx.query<{
         id: string;
         revision_no: number;
@@ -941,6 +458,7 @@ export class ResultService {
           revisionId: result.current_revision_id,
           assessmentRevisionId: result.current_assessment_revision_id,
           content: resultItemSchema.parse(result.content),
+          ...(scopeItem ? { scopeItem } : {}),
           history: history.rows.map((row) => ({
             id: row.id,
             revisionNo: row.revision_no,

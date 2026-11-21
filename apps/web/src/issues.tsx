@@ -61,6 +61,7 @@ import { IssueDetailPanel } from './issue-detail';
 import type { IssueSelection } from './issue-detail';
 import { ResultDetailPanel } from './result-detail';
 import { EvidenceViewer } from './evidence-viewer';
+import type { EvidenceType } from './evidence-gallery';
 import { RetestPreparationDialog, RetestHistory } from './retests';
 import type { RetestTarget } from './retests';
 import { CommandDialog, useBusinessCommand } from './business-command';
@@ -371,7 +372,10 @@ export function IssuesPage({
     id: string;
     revisionId: string;
   } | null>(null);
-  const [fileId, setFileId] = useState<string | null>(null);
+  const [evidenceSelection, setEvidenceSelection] = useState<{
+    fileId: string;
+    evidenceType?: EvidenceType;
+  } | null>(null);
   const epoch = useRef(0);
   const refreshDetail = useRef<() => Promise<void>>(async () => {});
   const registerRefresh = useCallback((refresh: () => Promise<void>) => {
@@ -1296,7 +1300,12 @@ export function IssuesPage({
           setRetest({ session: crypto.randomUUID(), issues })
         }
         onResult={(id, revisionId) => setResultSelection({ id, revisionId })}
-        onEvidence={setFileId}
+        onEvidence={(fileId, evidenceType) =>
+          setEvidenceSelection({
+            fileId,
+            ...(evidenceType ? { evidenceType } : {}),
+          })
+        }
         onRegisterRefresh={registerRefresh}
       />
       <IssueEditor
@@ -1371,7 +1380,13 @@ export function IssuesPage({
         onClose={() => setResultSelection(null)}
         onChanged={refresh}
       />
-      <EvidenceViewer fileId={fileId} onClose={() => setFileId(null)} />
+      <EvidenceViewer
+        fileId={evidenceSelection?.fileId ?? null}
+        {...(evidenceSelection?.evidenceType
+          ? { evidenceType: evidenceSelection.evidenceType }
+          : {})}
+        onClose={() => setEvidenceSelection(null)}
+      />
     </div>
   );
 }

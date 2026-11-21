@@ -16,7 +16,6 @@ import {
 } from '../../../contracts/src/api-execution.js';
 import {
   assetChangeSetSchema,
-  resultSubmissionResourceSchema as resultSubmissionSchema,
   resultAmendmentSchema,
   uiProgressInputSchema,
 } from '../../../contracts/src/domain.js';
@@ -778,22 +777,6 @@ export function createBusinessRegistry(
   add(
     'ath_results',
     '接收实际本地UI明细；原始判断、更正、人工最终结论与缺文件独立。平台AI不得构造实际观察。',
-    'prepare',
-    shape('prepare', resultSubmissionSchema),
-    'read',
-    (a, i) => results.prepareUi(a, i.projectId, i.input),
-  );
-  add(
-    'ath_results',
-    '接收实际本地UI明细；原始判断、更正、人工最终结论与缺文件独立。平台AI不得构造实际观察。',
-    'commit',
-    shape('commit', resultSubmissionSchema),
-    'write',
-    (a, i) => results.submitUi(a, i.projectId, i.input),
-  );
-  add(
-    'ath_results',
-    '接收实际本地UI明细；原始判断、更正、人工最终结论与缺文件独立。平台AI不得构造实际观察。',
     'receipt',
     z.strictObject({
       op: z.literal('receipt'),
@@ -811,21 +794,6 @@ export function createBusinessRegistry(
     'write',
     (a, i) => results.amend(a, i.projectId, i.input),
   );
-  if (services.files) {
-    const files = services.files;
-    add(
-      'ath_results',
-      '从本项目已验证UTF-8 JSON文件接收真实UI明细；字节不进入模型，固定run/提交幂等语义不变。',
-      'submit-file',
-      z.strictObject({
-        op: z.literal('submit-file'),
-        ...project,
-        fileId: idSchema,
-      }),
-      'write',
-      (a, i) => results.submitUiFile(a, i.projectId, i.fileId, files),
-    );
-  }
   add(
     'ath_results',
     '接收实际本地UI明细；原始判断、更正、人工最终结论与缺文件独立。平台AI不得构造实际观察。',

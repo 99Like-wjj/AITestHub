@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import type { SqlExecutor } from '../../../persistence/src/database.js';
 import { executionScopeSchema } from '../../../contracts/src/domain.js';
@@ -61,66 +60,33 @@ export async function ensureDeliveryHead(
   run: RunRow,
 ): Promise<DeliveryHead> {
   const existing = await deliveryHead(tx, run.id, true);
-  if (existing) return existing;
-  const legacy = ['completed', 'terminated', 'interrupted'].includes(run.state);
-  const ended = legacy
-    ? ((
-        await tx.query<{ ended_at: Date | null }>(
-          'SELECT ended_at FROM app.runs WHERE id=$1',
-          [run.id],
-        )
-      ).rows[0]?.ended_at ?? null)
-    : null;
+  if (existing?.mode !== 'nativeV2')
+    throw new DomainError(
+      'UNSUPPORTED_OPERATION',
+      '此历史执行仅供查阅和原回执核对；新执行须使用当前 UI 交付。',
+      410,
+    );
+  return existing;
+}
+
+export async function initializeNativeUiDelivery(
+  tx: SqlExecutor,
+  runId: string,
+  projectId: string,
+  ownerId: string,
+  scopeDigest: string,
+) {
+  await requireUiDeliveryReady(tx);
   const initialDigest = semanticDigest({
     schemaVersion: 'ath.ui-delivery-ledger.v2',
-    runId: run.id,
-    snapshotDigest: run.scope_digest,
+    runId,
+    snapshotDigest: scopeDigest,
   });
   await tx.query(
-    `INSERT INTO app.ui_delivery_heads(run_id,project_id,owner_id,scope_digest,mode,legacy_state,legacy_ended_at,ledger_digest)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [
-      run.id,
-      run.project_id,
-      run.created_by,
-      run.scope_digest,
-      legacy ? 'legacyDeliveryOnly' : 'nativeV2',
-      legacy ? run.state : null,
-      ended,
-      initialDigest,
-    ],
+    `INSERT INTO app.ui_delivery_heads(run_id,project_id,owner_id,scope_digest,mode,ledger_digest)
+    VALUES($1,$2,$3,$4,'nativeV2',$5)`,
+    [runId, projectId, ownerId, scopeDigest, initialDigest],
   );
-  if (legacy) {
-    const id = randomUUID(),
-      payload = {
-        runId: run.id,
-        snapshotDigest: run.scope_digest,
-        legacyState: run.state,
-        endedAt: ended?.toISOString() ?? null,
-      };
-    // Import the prior recorded end as an immutable legacy basis; never invent its date or rewrite the old run.
-    await tx.query(
-      `INSERT INTO app.ui_execution_facts(id,project_id,run_id,owner_id,scope_digest,sequence,fact_kind,semantic_digest,end_kind,ended_at,reason,provenance,legacy_state,payload,receipt)
-      VALUES($1,$2,$3,$4,$5,1,'end',$6,'legacy',$7,'保留v1既有结束状态；不代表本次重新执行。','legacy-v1',$8,$9,$10)`,
-      [
-        id,
-        run.project_id,
-        run.id,
-        run.created_by,
-        run.scope_digest,
-        semanticDigest(payload),
-        ended,
-        run.state,
-        JSON.stringify(payload),
-        JSON.stringify({ factId: id, ...payload, importedLegacy: true }),
-      ],
-    );
-    await tx.query(
-      'UPDATE app.ui_delivery_heads SET execution_version=1,last_execution_fact_id=$2,last_end_fact_id=$2 WHERE run_id=$1',
-      [run.id, id],
-    );
-  }
-  return (await deliveryHead(tx, run.id, true))!;
 }
 export async function executionFact(
   tx: SqlExecutor,

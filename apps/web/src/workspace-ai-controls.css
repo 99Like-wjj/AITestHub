@@ -49,6 +49,12 @@
 .workspace-copy-reply:hover {
   background: var(--hover);
 }
+
+.workspace-user-message-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
 .workspace-access-menu .ant-dropdown-menu-item {
   gap: 7px;
   padding: 7px 9px;

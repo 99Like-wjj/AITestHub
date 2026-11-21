@@ -4,6 +4,7 @@ import { assetSchema } from './assets.js';
 import {
 scopeItemSchema,
 apiCaseContentSchema,
+apiDataRowAnchorSchema,
 executionScopeSchema,
 assertionSchema,
 runStateSchema,
@@ -41,6 +42,15 @@ export const safeResponseSchema = z.strictObject({
   errorCode: z.string().max(100).nullable(),
   redactionVersion: z.literal('ath.api-redaction.v1'),
 });
+const evidenceScalar = z.union([z.string().max(512),z.number(),z.boolean(),z.null()]);
+export const apiRecordedAssertionSchema = z.strictObject({
+  passed: z.boolean(),
+  message: z.string().max(2000),
+  comparison: z.strictObject({
+    id: z.string().max(200), field: z.string().max(2000), operator: z.string().max(100),
+    expected: evidenceScalar, actual: evidenceScalar,
+  }).optional(),
+});
 export const attemptReceiptInputSchema = z.strictObject({
   intentId: idSchema,
   response: safeResponseSchema,
@@ -49,9 +59,7 @@ export const attemptReceiptInputSchema = z.strictObject({
   sideEffectCertainty: z.enum(['known', 'unknown', 'notApplicable']),
   extractions: z.record(z.string(), jsonSchema).default({}),
   assertions: z
-    .array(
-      z.strictObject({ passed: z.boolean(), message: z.string().max(2000) }),
-    )
+    .array(apiRecordedAssertionSchema)
     .max(1000)
     .default([]),
   authToken: z.string().min(1).max(16384).optional(),
@@ -135,6 +143,7 @@ export const startDebugInputSchema = z
   .strictObject({
     commandId: commandIdSchema,
     environmentId: idSchema,
+    dataRowId: apiDataRowAnchorSchema.shape.id.optional(),
     productBuild: z.string().max(200).nullable(),
     sourceCaseId: idSchema.nullable(),
     sourceCaseRevisionId: idSchema.nullable(),
@@ -226,11 +235,27 @@ export const apiAttemptDetailSchema = z.strictObject({
     request_safe: z.json(),
     response_safe: safeResponseSchema.nullable(),
     extractions_safe: z.record(z.string(), z.json()),
-    assertions_safe: z.array(
-      z.strictObject({ passed: z.boolean(), message: z.string() }),
-    ),
+    assertions_safe: z.array(apiRecordedAssertionSchema),
     reason: z.string(),
   }),
+});
+export const apiResultTraceSchema = z.strictObject({
+  attempts: z.array(
+    apiAttemptDetailSchema.shape.attempt.pick({
+      id: true,
+      phase: true,
+      step_id: true,
+      state: true,
+      outcome: true,
+      send_intent_at: true,
+      side_effect_certainty: true,
+      reason: true,
+    }).extend({
+      step_name: z.string().nullable(),
+      status: safeResponseSchema.shape.status,
+      elapsed_ms: safeResponseSchema.shape.elapsedMs.nullable(),
+    }),
+  ).max(1000),
 });
 export const debugTraceSchema = z.strictObject({
   runId: idSchema,

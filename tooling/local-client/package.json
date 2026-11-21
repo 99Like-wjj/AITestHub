@@ -1,6 +1,6 @@
 {
   "name": "@aitesthub/local-client",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -14,7 +14,7 @@
   },
   "files": [
     "dist/src",
-    "dist/contracts/8869d4dc-bb5c-45fe-a8d1-98913be7bb01",
+    "dist/contracts/current.json",
     "LICENSE",
     "NOTICE",
     "README.md",

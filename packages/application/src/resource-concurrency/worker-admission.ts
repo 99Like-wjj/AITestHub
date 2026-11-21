@@ -53,10 +53,8 @@ class TrustedTaskAdmission {
     transaction: SqlExecutor,
   ): Promise<TaskSlotDecision> {
     const anchor = await this.anchor();
-    const policy = await loadClaimPolicy(
-      transaction,
-      (tx) => loadAnchoredResourcePolicy(tx, this.capabilities, anchor),
-      () => anchor.read(),
+    const policy = await loadClaimPolicy(transaction, (tx) =>
+      loadAnchoredResourcePolicy(tx, this.capabilities, anchor),
     );
     return lockTaskSlot(transaction, this.kind, policy);
   }

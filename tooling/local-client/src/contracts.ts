@@ -1,15 +1,49 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/client/validators/cf-worker';
-import catalog from '../contracts/8869d4dc-bb5c-45fe-a8d1-98913be7bb01/catalog.json' with { type: 'json' };
-import components from '../contracts/8869d4dc-bb5c-45fe-a8d1-98913be7bb01/components.json' with { type: 'json' };
-import archives from '../contracts/ui-archive-v1.json' with { type: 'json' };
+import { z } from 'zod';
 import { localFailure } from './errors.js';
 
-export const contractArtifactId = '8869d4dc-bb5c-45fe-a8d1-98913be7bb01';
+const jsonSchema = z.record(z.string(), z.json());
+const artifactSchema = z.strictObject({
+  schemaVersion: z.literal('ath.local-sdk-contract.v1'),
+  protocolVersion: z.iso.date(),
+  artifactVersion: z.string().min(1),
+  tools: z
+    .array(z.strictObject({ name: z.string().min(1), inputSchema: jsonSchema }))
+    .min(1),
+  components: z.record(z.string(), jsonSchema),
+});
+
+function readCurrentContract() {
+  try {
+    const bytes = readFileSync(
+      new URL('../contracts/current.json', import.meta.url),
+    );
+    const artifact = artifactSchema.parse(JSON.parse(bytes.toString('utf8')));
+    const inputs = new Map(
+      artifact.tools.map(({ name, inputSchema }) => [name, inputSchema]),
+    );
+    if (inputs.size !== artifact.tools.length)
+      throw Error('Repeated tool names.');
+    return {
+      artifact,
+      inputs,
+      id: createHash('sha256').update(bytes).digest('hex'),
+    };
+  } catch {
+    throw localFailure(
+      'UNSUPPORTED_CONTRACT',
+      '当前 SDK 契约文件缺失或无效；未发送。',
+    );
+  }
+}
+
+const contract = readCurrentContract();
+export const contractArtifactId = contract.id;
+export const contractProtocolVersion = contract.artifact.protocolVersion;
+export const contractVersion = contract.artifact.artifactVersion;
 const engine = new CfWorkerJsonSchemaValidator();
-const inputSchemas = new Map<string, unknown>(
-  catalog.tools.map((tool) => [tool.name, tool.inputSchema]),
-);
-inputSchemas.set('ath_ui_archives', archives.schemas.uiArchiveToolInputSchema);
 const cache = new Map<
   string,
   ReturnType<CfWorkerJsonSchemaValidator['getValidator']>
@@ -48,16 +82,15 @@ export function validateToolInput(
   name: string,
   args: Record<string, unknown>,
 ): void {
-  const schema = inputSchemas.get(name);
+  const schema = contract.inputs.get(name);
   if (!schema)
     throw localFailure('UNSUPPORTED_TOOL', '此工具不在官方已发布目录。');
   // Whole JSON Schema keeps all same-op leaves, including both strict operation-status/get forms.
   validate(`tool:${name}`, schema, args);
 }
 export function validateComponent(name: string, value: unknown): void {
-  const schemas: Record<string, unknown> = components.schemas;
-  const schema = schemas[name];
-  if (!schema)
+  const schemas = contract.artifact.components;
+  if (!Object.hasOwn(schemas, name))
     throw localFailure('UNSUPPORTED_CONTRACT', '此组件不在发布快照。');
-  validate(`component:${name}`, schema, value);
+  validate(`component:${name}`, schemas[name], value);
 }

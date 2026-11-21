@@ -225,15 +225,10 @@ export async function readAiTaskSession({
       publish();
     }
     if (event.type !== 'ai.text' && event.type !== 'ai.summary') onEvent(event);
-    // New segments consume deltas directly. Old workers have no boundaries and
-    // continue the previous snapshot fallback, without guessing old phases.
     if (
-      (event.type !== 'ai.text' &&
-        event.type !== 'ai.summary' &&
-        event.type !== 'ai.modelDispatched') ||
-      !presentation?.segments.some(
-        (segment) => segment.phase !== 'unclassified',
-      )
+      event.type !== 'ai.text' &&
+      event.type !== 'ai.summary' &&
+      event.type !== 'ai.modelDispatched'
     )
       scheduleRefresh();
   }

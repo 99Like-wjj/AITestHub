@@ -22,17 +22,22 @@ import { api, describeError } from './api';
 import { ApiCaseFields } from './api-case-fields';
 import { newRequest } from './api-draft';
 import type { ApiDraft, DraftCleanupStep } from './api-draft';
+import type { ApiPreparationVariables } from './api-variable-fields';
 
 export function ApiCleanupFields({
   projectId,
   value,
   onChange,
   disabled,
+  previewEnvironmentId,
+  preparationVariables,
 }: {
   projectId: string;
   value: ApiDraft;
   onChange: (value: ApiDraft) => void;
   disabled: boolean;
+  previewEnvironmentId?: string | undefined;
+  preparationVariables?: ApiPreparationVariables | undefined;
 }) {
   const [configurations, setConfigurations] = useState<TestConfigurationView[]>(
     [],
@@ -217,8 +222,7 @@ export function ApiCleanupFields({
                     >
                       <Space direction="vertical" style={{ width: '100%' }}>
                         <Typography.Text>
-                          本步必要目标引用（每行一项，env/case/extract/auth
-                          开头）
+                          本步必要目标引用（每行一项，env/case/extract 开头）
                         </Typography.Text>
                         <Input.TextArea
                           aria-label={`清理 ${index + 1} 必要目标引用`}
@@ -238,6 +242,16 @@ export function ApiCleanupFields({
                             variant="cleanup"
                             labelPrefix={`HTTP清理 ${index + 1} 请求`}
                             disabled={disabled}
+                            previewEnvironmentId={previewEnvironmentId}
+                            preparationVariables={preparationVariables}
+                            upstreamRequests={[
+                              ...value.requests,
+                              ...value.cleanupDraft.steps
+                                .slice(0, index)
+                                .flatMap((prior) =>
+                                  prior.type === 'http' ? [prior.request] : [],
+                                ),
+                            ]}
                             value={{ ...value, requests: [step.request] }}
                             onChange={(draft) => {
                               const request = draft.requests[0];

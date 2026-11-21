@@ -161,26 +161,17 @@ export class ResultsController {
     );
   }
   @Post('result-submissions')
-  async submit(@Req() req: Request, @Res() res: Response) {
-    return res.json(
-      await this.results.submitUi(
-        await this.actor(req, res),
-        this.project(req),
-        req.body,
-      ),
+  async retiredSubmission(@Req() req: Request, @Res() res: Response) {
+    await this.actor(req, res);
+    throw new DomainError(
+      'UNSUPPORTED_OPERATION',
+      '旧版结果写入口已退役，请使用当前 UI 结果批次。',
+      410,
     );
   }
   @Post('result-submissions/prepare')
   async prepareSubmission(@Req() req: Request, @Res() res: Response) {
-    return res
-      .status(200)
-      .json(
-        await this.results.prepareUi(
-          await this.actor(req, res),
-          this.project(req),
-          req.body,
-        ),
-      );
+    return this.retiredSubmission(req, res);
   }
   @Get('result-submissions/missing-files/:runId')
   async missingSubmissionFiles(@Req() req: Request, @Res() res: Response) {
