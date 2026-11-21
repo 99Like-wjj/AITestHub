@@ -36,6 +36,8 @@ const mediaTypes = new Set([
   'text/html',
   'text/markdown',
   'text/csv',
+  'text/event-stream',
+  'application/x-ndjson',
   'image/png',
   'image/jpeg',
   'image/webp',
@@ -364,7 +366,6 @@ export class FilesService {
   async metadata(actor: ActorContext, id: string) {
     return this.db.transaction(async (transaction) => {
       const file = await this.authorizedFile(transaction, actor, id);
-      await this.policies.read(transaction, policyIntent(file));
       return { file: dto(file) };
     });
   }
@@ -694,7 +695,6 @@ export class FilesService {
         false,
         conversationId,
       );
-      await this.policies.read(transaction, policyIntent(row));
       return row;
     });
     if (file.status !== 'verified' || !file.storage_key)

@@ -17,6 +17,8 @@ cleanupStateSchema,
 deliveryStatusSchema,
 resultSubmissionReceiptSchema,
 runStateSchema,
+apiDataRowAnchorSchema,
+apiPreparationAnchorSchema,
 } from './domain.js';
 
 export const claimLocalExecutionInputSchema =
@@ -138,6 +140,19 @@ export const runStatusSchema = z.strictObject({
   reportId: idSchema.nullable(),
   scope: reportExecutionScopeSchema,
 });
+export const resultScopeItemSchema = z.strictObject({
+  kind: z.enum(['UI', 'API']),
+  caseId: idSchema.nullable(),
+  revisionId: idSchema.nullable(),
+  revisionNo: z.number().int().positive().nullable(),
+  approvalSnapshotId: idSchema.nullable(),
+  title: z.string(),
+  dataRow: apiDataRowAnchorSchema.optional(),
+  preparationSources: z.array(apiPreparationAnchorSchema).optional(),
+  preconditions: z.array(z.string()),
+  expected: z.string().nullable(),
+  steps: z.array(z.strictObject({ action: z.string(), expected: z.string().optional() })),
+});
 export const resultDetailSchema = z.strictObject({
   result: z.strictObject({
     id: idSchema,
@@ -146,6 +161,7 @@ export const resultDetailSchema = z.strictObject({
     revisionId: idSchema,
     assessmentRevisionId: idSchema.nullable(),
     content: resultItemSchema,
+    scopeItem: resultScopeItemSchema.optional(),
     history: z.array(
       z.strictObject({
         id: idSchema,

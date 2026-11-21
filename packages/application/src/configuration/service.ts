@@ -28,7 +28,7 @@ import {
   ModelConfigurationV2Service,
   type ModelDiscoveryPort,
 } from './v2-service.js';
-import { readPersistedModelSelection } from './model-selection.js';
+import { modelSelectionV2Schema } from '../../../contracts/src/model-configuration-v2.js';
 import {
   ModelConnectionsService,
   type ModelConnectionProbePort,
@@ -120,7 +120,7 @@ export class ConfigurationService {
     );
   }
 
-  /** New selections and old accepted records have separate, explicit readers. */
+  /** Current task execution uses the current model selection contract. */
   async resolveRuntimeSelection(actor: ActorContext, raw: unknown) {
     return this.db.transaction((tx) =>
       this.resolveRuntimeSelectionInTransaction(tx, actor, raw),
@@ -132,95 +132,18 @@ export class ConfigurationService {
     raw: unknown,
     auxiliary = false,
   ) {
-    const input = readPersistedModelSelection(raw);
-    if (input.kind === 'v2')
-      return this.v2.resolveInTransaction(
-        tx,
-        actor,
-        input.selection,
-        auxiliary,
-      );
-    await currentUser(tx, actor);
-    const row = await this.row(tx, input.selection.modelServiceId);
-    if (
-      !auxiliary &&
-      row.access_policy !== 'allActive' &&
-      !(
-        await tx.query(
-          'SELECT 1 FROM app.model_grants WHERE model_service_id=$1 AND user_id=$2',
-          [row.id, actor.userId],
-        )
-      ).rowCount
-    )
-      throw new DomainError('FORBIDDEN', '当前账号没有此模型使用权限。', 403);
-    if (row.config_revision === input.selection.configRevision) {
-      if (row.provider === null)
-        throw new DomainError(
-          'PRECONDITIONS_MISSING',
-          '新服务必须明确选择稳定模型行。',
-          422,
-        );
-      return this.selection(row, input.selection.effort);
-    }
-    const ready = (
-      await tx.query<{ ready: boolean }>(
-        "SELECT to_regclass('app.model_legacy_bindings') IS NOT NULL ready",
-      )
-    ).rows[0]?.ready;
-    if (!ready) stale();
-    const record = (
-      await tx.query<{ snapshot: unknown; matches: boolean }>(
-        `SELECT r.snapshot,encode(sha256(convert_to(r.snapshot::text,'UTF8')),'hex')=b.legacy_snapshot_digest matches
-        FROM app.model_legacy_bindings b JOIN app.model_service_revisions r ON r.model_service_id=b.model_service_id AND r.revision=b.legacy_revision
-        JOIN app.model_entries e ON e.id=b.model_entry_id AND e.model_service_id=b.model_service_id
-        WHERE b.model_service_id=$1 AND b.legacy_revision=$2 AND b.upgraded_revision=$3 AND e.enabled AND e.removed_at IS NULL`,
-        [row.id, input.selection.configRevision, row.config_revision],
-      )
-    ).rows[0];
-    if (!record?.matches) stale();
-    const saved = modelServiceSchema.parse(record.snapshot);
-    if (
-      saved.id !== row.id ||
-      saved.configRevision !== input.selection.configRevision ||
-      saved.credentialRef !== row.credential_ref ||
-      saved.modelId !== row.model_id ||
-      saved.provider !== row.provider ||
-      saved.baseUrl !== row.base_url ||
-      saved.name !== row.name ||
-      saved.enabled !== row.enabled ||
-      saved.accessPolicy !== row.access_policy ||
-      saved.contextLimit !==
-        (row.context_limit === null ? null : Number(row.context_limit)) ||
-      saved.maxOutput !==
-        (row.max_output === null ? null : Number(row.max_output)) ||
-      saved.defaultEffort !== row.default_effort ||
-      JSON.stringify(saved.effortValues) !==
-        JSON.stringify(row.effort_values) ||
-      JSON.stringify(saved.allowedDataScopes) !==
-        JSON.stringify(row.allowed_data_scopes ?? ['syntheticPublicOnly']) ||
-      JSON.stringify(saved.capabilities) !==
-        JSON.stringify(modelCapabilitiesSchema.parse(row.capabilities))
-    )
-      throw new DomainError(
-        'DEPENDENCY_UNAVAILABLE',
-        '原已受理模型与升级绑定不一致，不会替换模型。',
-        503,
-      );
-    return {
-      ...this.selection(row, input.selection.effort),
-      configRevision: input.selection.configRevision,
-    };
+    const selection = modelSelectionV2Schema.parse(raw);
+    return this.v2.resolveInTransaction(tx, actor, selection, auxiliary);
   }
 
-  /** Existing Aux work retains its original frozen selector, including a pre35 binding. */
   async resolveAcceptedAuxiliarySelection(actor: ActorContext, raw: unknown) {
-    const input = readPersistedModelSelection(raw);
+    const selection = modelSelectionV2Schema.parse(raw);
     return this.db.transaction(async (tx) => {
       await currentUser(tx, actor);
       const auxiliary = (
         await tx.query<{
           model_service_id: string | null;
-          model_entry_id?: string | null;
+          model_entry_id: string | null;
           enabled: boolean;
           effort: string | null;
         }>(
@@ -229,40 +152,23 @@ export class ConfigurationService {
       ).rows[0];
       if (
         !auxiliary?.enabled ||
-        auxiliary.model_service_id !== input.selection.modelServiceId
+        auxiliary.model_service_id !== selection.modelServiceId
       )
         throw new DomainError(
           'MODEL_NOT_CONFIGURED',
-          '原系统辅助配置已停用或已改变；不会借用聊天模型。',
+          '原系统辅助配置已停用或已改变。',
           422,
         );
-      if (
-        input.kind === 'v2' &&
-        auxiliary.model_entry_id !== input.selection.modelEntryId
-      )
-        stale();
-      if (input.kind === 'legacy' && auxiliary.model_entry_id) {
-        const binding = (
-          await tx.query(
-            'SELECT 1 FROM app.model_legacy_bindings WHERE model_service_id=$1 AND legacy_revision=$2 AND model_entry_id=$3',
-            [
-              input.selection.modelServiceId,
-              input.selection.configRevision,
-              auxiliary.model_entry_id,
-            ],
-          )
-        ).rowCount;
-        if (!binding) stale();
-      }
-      const selected = await this.resolveRuntimeSelectionInTransaction(
+      if (auxiliary.model_entry_id !== selection.modelEntryId) stale();
+      const selected = await this.v2.resolveInTransaction(
         tx,
         actor,
-        { ...input.selection, effort: auxiliary.effort },
+        { ...selection, effort: auxiliary.effort },
         true,
       );
       if (
-        input.selection.effort !== undefined &&
-        input.selection.effort !== selected.effort
+        selection.effort !== undefined &&
+        selection.effort !== selected.effort
       )
         stale();
       return selected;

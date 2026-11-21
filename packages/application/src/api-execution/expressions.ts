@@ -9,24 +9,12 @@ import {
   extractorSchema,
 } from '../../../contracts/src/domain.js';
 import type { z } from 'zod';
+import {
+  apiPlaceholderPattern,
+  readApiPath,
+} from '../../../contracts/src/api-variable-refs.js';
 
-export function readPath(value: unknown, path: string): unknown {
-  const segments = path
-    .replace(/^\$\.?/, '')
-    .replace(/\[(\d+)\]/g, '.$1')
-    .split('.')
-    .filter(Boolean);
-  let current = value;
-  for (const segment of segments) {
-    if (['__proto__', 'prototype', 'constructor'].includes(segment))
-      return undefined;
-    if (current === null || typeof current !== 'object') return undefined;
-    current = Object.prototype.hasOwnProperty.call(current, segment)
-      ? Reflect.get(current, segment)
-      : undefined;
-  }
-  return current;
-}
+export const readPath = readApiPath;
 export function nonEmpty(value: unknown): value is string | number | boolean {
   return typeof value === 'number'
     ? Number.isFinite(value)
@@ -39,22 +27,10 @@ export function contextVariables(
 ) {
   return { env: environment, case: variables.case, extract: variables.extract };
 }
-export function templateReferences(value: unknown): string[] {
-  if (typeof value === 'string')
-    return [
-      ...value.matchAll(
-        /\{\{((?:env|case|extract)\.[A-Za-z_][A-Za-z0-9_.]*)\}\}/g,
-      ),
-    ].flatMap((match) => (match[1] ? [match[1]] : []));
-  if (Array.isArray(value)) return value.flatMap(templateReferences);
-  if (value && typeof value === 'object')
-    return Object.values(value).flatMap(templateReferences);
-  return [];
-}
 export function interpolate(value: unknown, context: unknown): JsonValue {
   if (typeof value === 'string') {
-    const exact = /^\{\{([A-Za-z_][A-Za-z0-9_.]*)\}\}$/.exec(value);
-    if (exact?.[1]) {
+    const exact = apiPlaceholderPattern().exec(value);
+    if (exact?.[0] === value && exact[1]) {
       const resolved = readPath(context, exact[1]);
       if (resolved === undefined)
         throw new DomainError(
@@ -65,7 +41,7 @@ export function interpolate(value: unknown, context: unknown): JsonValue {
       return asJson(resolved);
     }
     return value.replace(
-      /\{\{([A-Za-z_][A-Za-z0-9_.]*)\}\}/g,
+      apiPlaceholderPattern(),
       (_match: string, path: string) => {
         const resolved = readPath(context, path);
         if (
@@ -188,10 +164,7 @@ export function extractVariables(
 ): Record<string, JsonValue> {
   const result: Record<string, JsonValue> = {};
   for (const extractor of extractors) {
-    const value = observationValue(extractor.source, extractor.path, response, {
-      case: {},
-      extract: {},
-    });
+    const value = extractionValue(extractor, response);
     if (
       value === undefined ||
       value === null ||
@@ -210,6 +183,19 @@ export function extractVariables(
     result[extractor.name] = asJson(value);
   }
   return result;
+}
+export function extractionValue(
+  extractor: Pick<
+    z.infer<typeof extractorSchema>,
+    'source' | 'path' | 'sensitive'
+  >,
+  response: RawObservation,
+): unknown {
+  if (extractor.sensitive && extractor.source === 'body') return response.body;
+  return observationValue(extractor.source, extractor.path, response, {
+    case: {},
+    extract: {},
+  });
 }
 export const parseApiContent = (value: unknown) =>
   apiCaseContentSchema.parse(value);

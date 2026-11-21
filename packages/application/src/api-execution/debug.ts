@@ -11,6 +11,7 @@ import {
   apiCaseContentSchema,
   scenarioContentSchema,
 } from '../../../contracts/src/domain.js';
+import { apiVariableIssues } from '../../../contracts/src/api-variable-refs.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import type { Database } from '../../../persistence/src/database.js';
 import { requireProject } from '../access/policy.js';
@@ -21,7 +22,11 @@ import { audit } from '../events.js';
 import { canonicalJson, OperationService } from '../operations/service.js';
 import { PlanService } from '../plans/service.js';
 import { assertSafeModelInput } from '../security/model-input.js';
-import { ExecutionGateway, profileFor } from './gateway.js';
+import { ExecutionGateway, profileFor, publicEnvironment } from './gateway.js';
+import {
+  freezeApiCaseComposition,
+  materializedApiRows,
+} from './case-composition.js';
 
 const digest = (value: unknown) =>
   createHash('sha256').update(canonicalJson(value)).digest('hex');
@@ -153,17 +158,33 @@ export class ApiDebugService {
               throw error;
           }
         }
+        const composition = await freezeApiCaseComposition(
+          transaction,
+          projectId,
+          input.content,
+        );
+        const variants = materializedApiRows(composition);
+        const chosen = input.dataRowId
+          ? variants.find((row) => row.dataRow?.id === input.dataRowId)
+          : variants[0];
+        if (!chosen)
+          throw new DomainError(
+            'PRECONDITIONS_MISSING',
+            '调试所选数据行不存在。',
+            422,
+          );
+        const effective = chosen.content;
         const requests = [
-          ...input.content.steps,
-          ...(input.content.cleanup.mode === 'none'
+          ...effective.steps,
+          ...(effective.cleanup.mode === 'none'
             ? []
-            : input.content.cleanup.steps.flatMap((step) =>
+            : effective.cleanup.steps.flatMap((step) =>
                 step.type === 'http' ? [step.request] : [],
               )),
         ];
         if (
-          input.content.cleanup.mode !== 'none' &&
-          input.content.cleanup.steps.some(
+          effective.cleanup.mode !== 'none' &&
+          effective.cleanup.steps.some(
             (step) =>
               step.type === 'sql' && step.environmentId !== input.environmentId,
           )
@@ -182,19 +203,29 @@ export class ApiDebugService {
             requests.flatMap((step) =>
               step.purposeRef ? [step.purposeRef] : [],
             ),
-            input.content.cleanup.mode === 'none'
+            effective.cleanup.mode === 'none'
               ? []
-              : input.content.cleanup.steps.flatMap((step) =>
+              : effective.cleanup.steps.flatMap((step) =>
                   step.type === 'sql' ? [step.connectionId] : [],
                 ),
             requests.flatMap((step) =>
               step.authProfileRef ? [step.authProfileRef] : [],
             ),
           );
+        const invalid = apiVariableIssues(
+          effective,
+          publicEnvironment(configuration),
+        )[0];
+        if (invalid)
+          throw new DomainError(
+            'PRECONDITIONS_MISSING',
+            `${invalid.path.join('/')}：${invalid.message}`,
+            422,
+          );
         for (const step of requests) profileFor(configuration, step);
         if (
           containsBoundSecret(
-            input.content,
+            effective,
             await this.gateway.protectedValues(configuration, transaction),
           )
         )
@@ -213,6 +244,7 @@ export class ApiDebugService {
           environmentRevisionId: configuration.environment.revisionId,
           productBuild: input.productBuild,
           content: input.content,
+          ...(chosen.dataRow ? { dataRowId: chosen.dataRow.id } : {}),
         });
         const base = {
           schemaVersion: 'ath.debug-execution-scope.v1',
@@ -235,7 +267,11 @@ export class ApiDebugService {
               setId: scenario.set_id,
               scenarioId: scenario.id,
               scenario: scenarioContent,
-              content: input.content,
+              content: effective,
+              ...(chosen.dataRow ? { dataRow: chosen.dataRow } : {}),
+              ...(composition.preparationSources.length
+                ? { preparationSources: composition.preparationSources }
+                : {}),
               ordinal: 0,
               issueIds: [],
             },

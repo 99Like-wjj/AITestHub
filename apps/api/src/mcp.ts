@@ -130,7 +130,7 @@ async function requireCurrentKey(
     }
   });
 }
-function createServer(
+export function createOfficialMcpServer(
   db: Database,
   actor: ActorContext,
   services: DomainMcpServices,
@@ -285,7 +285,7 @@ export function mountMcp(
       );
       await requireCurrentKey(db, actor);
       const handler = createMcpHandler(
-        () => createServer(db, actor, services),
+        () => createOfficialMcpServer(db, actor, services),
         {
           legacy: 'reject',
           responseMode: 'auto',

@@ -22,7 +22,6 @@ import { assertLocalUiActor } from './delivery-access.js';
 import {
   authorizeDelivery,
   ensureDeliveryHead,
-  deliveryHead,
   executionFact,
   coverageSnapshot,
   uiDeliveryOperations,
@@ -291,8 +290,7 @@ export class UiDeliveryLifecycle {
         const id = randomUUID(),
           at = new Date(),
           sequence = (BigInt(head.execution_version) + 1n).toString(),
-          mode =
-            head.mode === 'legacyDeliveryOnly' ? 'legacyResumed' : head.mode;
+          mode = head.mode;
         const fact = uiExecutionFactSchema.parse({
           id,
           runId: run.id,
@@ -394,13 +392,7 @@ export class UiDeliveryLifecycle {
             input.snapshotDigest,
             true,
           ),
-          head = await deliveryHead(tx, run.id, true);
-        if (!head)
-          throw new DomainError(
-            'PRECONDITIONS_MISSING',
-            '没有v2接收账本；请保留原批次，不能凭范围生成封账。',
-            422,
-          );
+          head = await ensureDeliveryHead(tx, run);
         if (
           head.ledger_version !== input.expectedLedgerVersion ||
           head.ledger_digest !== input.expectedLedgerDigest

@@ -1161,25 +1161,15 @@ export class ConversationsService {
           )
         ).rowCount;
         const snapshot = {
-          ...('runtimeVersion' in selection
-            ? {
-                schemaVersion: 'ath.model-snapshot.v2',
-                modelServiceId: selection.modelServiceId,
-                modelEntryId: selection.modelEntryId,
-                serviceRevision: selection.serviceRevision,
-                serviceName: selection.serviceName,
-                modelDisplayName: selection.modelDisplayName,
-                protocol: selection.protocol,
-                modelId: selection.modelId,
-                effort: selection.effort,
-              }
-            : {
-                modelServiceId: selection.modelServiceId,
-                configRevision: selection.configRevision,
-                provider: selection.provider,
-                modelId: selection.modelId,
-                effort: selection.effort,
-              }),
+          schemaVersion: 'ath.model-snapshot.v2',
+          modelServiceId: selection.modelServiceId,
+          modelEntryId: selection.modelEntryId,
+          serviceRevision: selection.serviceRevision,
+          serviceName: selection.serviceName,
+          modelDisplayName: selection.modelDisplayName,
+          protocol: selection.protocol,
+          modelId: selection.modelId,
+          effort: selection.effort,
           ...(input.accessMode
             ? { workspaceAccessMode: input.accessMode }
             : {}),
@@ -1214,18 +1204,12 @@ export class ConversationsService {
             conversationId,
             userMessageId,
             assistantMessageId,
-            'runtimeVersion' in selection
-              ? {
-                  modelServiceId: selection.modelServiceId,
-                  modelEntryId: selection.modelEntryId,
-                  serviceRevision: selection.serviceRevision,
-                  effort: selection.effort,
-                }
-              : {
-                  modelServiceId: selection.modelServiceId,
-                  configRevision: selection.configRevision,
-                  effort: selection.effort,
-                },
+            {
+              modelServiceId: selection.modelServiceId,
+              modelEntryId: selection.modelEntryId,
+              serviceRevision: selection.serviceRevision,
+              effort: selection.effort,
+            },
             input.operationTarget,
             input.dataScope,
           ],

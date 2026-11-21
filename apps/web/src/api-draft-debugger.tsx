@@ -30,6 +30,8 @@ import { testConfigurationListSchema } from '../../../packages/contracts/src/tes
 import type { TestConfigurationView } from '../../../packages/contracts/src/test-configuration';
 import { api, ApiError, describeError } from './api';
 import { idSchema } from '../../../packages/contracts/src/base';
+import { apiAuthoringVariableIssues } from '../../../packages/contracts/src/api-variable-refs';
+import { configuredEnvironment } from './api-variable-fields';
 import type { Project } from './types';
 import { uiLayers } from './ui-layers';
 
@@ -41,6 +43,7 @@ export interface DiagnosticDraft {
   sourceCaseId: string | null;
   sourceCaseRevisionId: string | null;
   sourceCaseRowVersion?: number;
+  previewEnvironmentId?: string;
 }
 type Restoration = { kind: 'command' | 'run'; id: string };
 const evaluationLabels = {
@@ -81,6 +84,7 @@ export function ApiDraftDebugger({
   const [savingQualification, setSavingQualification] = useState(false);
   const [form] = Form.useForm<{
     environmentId: string;
+    dataRowId?: string;
     productBuild: string;
   }>();
   const commandId = useRef<string>(crypto.randomUUID());
@@ -130,12 +134,17 @@ export function ApiDraftDebugger({
     )
       .then(({ configurations }) => {
         if (!controller.signal.aborted && epoch.current === generation) {
-          setEnvironments(
-            configurations.filter(
-              (entry) =>
-                entry.content.kind === 'environment' && entry.content.active,
-            ),
+          const active = configurations.filter(
+            (entry) =>
+              entry.content.kind === 'environment' && entry.content.active,
           );
+          setEnvironments(active);
+          if (
+            draft?.previewEnvironmentId &&
+            active.some((entry) => entry.id === draft.previewEnvironmentId) &&
+            !form.getFieldValue('environmentId')
+          )
+            form.setFieldValue('environmentId', draft.previewEnvironmentId);
         }
       })
       .catch((failure: unknown) => {
@@ -226,6 +235,7 @@ export function ApiDraftDebugger({
   }
   async function start(values: {
     environmentId: string;
+    dataRowId?: string;
     productBuild: string;
   }) {
     if (!draft || pending || receipt || uncertain) return;
@@ -233,9 +243,19 @@ export function ApiDraftDebugger({
     setPending(true);
     setError(undefined);
     try {
+      const selected = environments.find(
+        (entry) => entry.id === values.environmentId,
+      );
+      const invalid = apiAuthoringVariableIssues(
+        draft.content,
+        configuredEnvironment(selected),
+      )[0];
+      if (invalid)
+        throw new Error(`${invalid.path.join('/')}：${invalid.message}`);
       const input = startDebugInputSchema.parse({
         commandId: commandId.current,
         environmentId: values.environmentId,
+        ...(values.dataRowId ? { dataRowId: values.dataRowId } : {}),
         productBuild: values.productBuild?.trim() || null,
         sourceCaseId: draft.sourceCaseId,
         sourceCaseRevisionId: draft.sourceCaseRevisionId,
@@ -497,6 +517,22 @@ export function ApiDraftDebugger({
                 placeholder="请选择已确认的隔离目标"
               />
             </Form.Item>
+            {draft.content.dataRows?.length ? (
+              <Form.Item
+                name="dataRowId"
+                label="本轮调试数据行"
+                initialValue={draft.content.dataRows[0]?.id}
+                rules={[{ required: true }]}
+              >
+                <Select
+                  disabled={pending || Boolean(receipt) || uncertain}
+                  options={draft.content.dataRows.map((row) => ({
+                    value: row.id,
+                    label: `${row.name} · ${row.id}`,
+                  }))}
+                />
+              </Form.Item>
+            ) : null}
             <Form.Item name="productBuild" label="被测版本/构建标识（可留空）">
               <Input
                 maxLength={200}

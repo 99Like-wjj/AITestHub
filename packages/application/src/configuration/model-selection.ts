@@ -1,11 +1,7 @@
 import { z } from 'zod';
 import { workspaceAccessModeSchema } from '../../../contracts/src/workspace-access.js';
-import { modelSelectionInputSchema } from '../../../contracts/src/configuration.js';
 import { legacyMessageModelSnapshotSchema } from '../../../contracts/src/conversations.js';
-import {
-  modelSelectionV2Schema,
-  messageModelSnapshotV2Schema,
-} from '../../../contracts/src/model-configuration-v2.js';
+import { messageModelSnapshotV2Schema } from '../../../contracts/src/model-configuration-v2.js';
 import type {
   ModelProtocol,
   ModelAuthScheme,
@@ -31,16 +27,6 @@ export interface RuntimeModelSelectionV2 {
   credentialRef: string;
   allowedDataScope: 'syntheticPublicOnly';
   allowedDataScopes: ('syntheticPublicOnly' | 'authorizedRelevantTestData')[];
-}
-
-/** Persisted input only. Public V2 routes never accept the legacy alternative. */
-export function readPersistedModelSelection(raw: unknown) {
-  const v2 = modelSelectionV2Schema.safeParse(raw);
-  if (v2.success) return { kind: 'v2' as const, selection: v2.data };
-  return {
-    kind: 'legacy' as const,
-    selection: modelSelectionInputSchema.parse(raw),
-  };
 }
 
 const legacyMessage = legacyMessageModelSnapshotSchema.extend({

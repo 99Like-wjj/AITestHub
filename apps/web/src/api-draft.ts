@@ -3,6 +3,7 @@ import {
   apiCaseContentSchema,
   variableNameSchema,
 } from '../../../packages/contracts/src/domain';
+import { apiAuthoringVariableIssues } from '../../../packages/contracts/src/api-variable-refs';
 
 export type ApiCase = z.infer<typeof apiCaseContentSchema>;
 export type Request = ApiCase['steps'][number];
@@ -135,7 +136,7 @@ export function serializeRequest(
     }),
   };
 }
-export function serializeApiDraft(draft: ApiDraft): ApiCase {
+export function apiDraftContent(draft: ApiDraft): ApiCase {
   const names = new Set<string>();
   const entries = draft.variableEntries.map((entry, index) => {
     const parsedName = variableNameSchema.safeParse(entry.name);
@@ -188,4 +189,10 @@ export function serializeApiDraft(draft: ApiDraft): ApiCase {
     ),
     cleanup,
   });
+}
+export function serializeApiDraft(draft: ApiDraft): ApiCase {
+  const input = apiDraftContent(draft);
+  const invalid = apiAuthoringVariableIssues(input)[0];
+  if (invalid) throw new Error(`${invalid.path.join('/')}：${invalid.message}`);
+  return input;
 }

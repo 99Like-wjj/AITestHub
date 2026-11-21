@@ -1002,11 +1002,7 @@ export function RequirementComposer({
                           {resourceByteLabel(
                             material.acceptedCapabilities.limits.maxFileBytes,
                           )}{' '}
-                          ·{' '}
-                          {material.acceptedCapabilities.policy.source ===
-                          'legacyDefault'
-                            ? '旧版明确默认'
-                            : '原受理策略'}
+                          · 原受理策略
                         </Typography.Text>
                       )}
                     </Space>

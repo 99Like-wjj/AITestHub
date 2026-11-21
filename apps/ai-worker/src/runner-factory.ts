@@ -70,97 +70,84 @@ export function createConversationRunnerFactory(
     );
     let activeIntentId: string | null = null;
     let activeInput: Parameters<ConversationRunner['run']>[1] | undefined;
-    const v2 = 'runtimeVersion' in selection;
     const budgetKey = JSON.stringify({
       owner: actor.userId,
       service: selection.modelServiceId,
-      entry: v2 ? selection.modelEntryId : selection.modelId,
-      revision: v2 ? selection.serviceRevision : selection.configRevision,
-      protocol: v2 ? selection.protocol : 'chatCompletions',
+      entry: selection.modelEntryId,
+      revision: selection.serviceRevision,
+      protocol: selection.protocol,
     });
     let calibration = budgetCalibration.get(budgetKey);
     if (!calibration) {
       calibration = createModelBudgetCalibration();
       budgetCalibration.set(budgetKey, calibration);
     }
-    const native = createNativeModelAdapter(
-      v2 ? selection.protocol : 'chatCompletions',
-      {
-        baseUrl: selection.baseUrl,
-        model: selection.modelId,
-        ...(selection.contextLimit
-          ? { contextLimit: selection.contextLimit }
-          : {}),
-        contextBudgetCalibration: calibration,
-        onContextBudget: (budget) => {
-          if (activeInput && activeIntentId)
-            activeInput.onEvent({
-              type: 'contextBudget',
-              stage: 'dispatch',
-              modelAttemptId: activeIntentId,
-              budget: agentContextBudgetSnapshotSchema.parse(budget),
-            });
-        },
-        // Only an administrator-saved loopback HTTP endpoint can pass the native adapter guard.
-        allowLocalHttp: true,
-        ...(v2 ? { authScheme: selection.authScheme } : {}),
-        timeoutMs: 60_000,
-        onFetchStarted: (timing) => {
-          if (activeInput && activeIntentId)
-            activeInput.onEvent({
-              type: 'modelDispatched',
-              segmentId: activeIntentId,
-              ...timing,
-            });
-        },
-        onDispatch: async (attempt) => {
-          await activeInput?.authorizeContext();
-          if (!activeIntentId)
-            throw new DomainError(
-              'PRECONDITIONS_MISSING',
-              '模型发送缺少持久意图，不会发送。',
-              422,
-            );
-          const updated = await db.query(
-            "UPDATE app.model_call_ledger SET client_request_id=$2 WHERE id=$1 AND initiator_user_id=$3 AND model_service_id=$4 AND status='dispatchIntent' RETURNING id",
-            [
-              activeIntentId,
-              attempt.clientRequestId,
-              actor.userId,
-              selection.modelServiceId,
-            ],
-          );
-          if (!updated.rowCount)
-            throw new DomainError(
-              'BUSINESS_CONFLICT',
-              '模型发送意图已失效，不会重放。',
-              409,
-            );
-        },
-        credential: async () => {
-          const current = await configuration.resolveRuntimeSelection(
-            actor,
-            v2
-              ? {
-                  modelServiceId: selection.modelServiceId,
-                  modelEntryId: selection.modelEntryId,
-                  serviceRevision: selection.serviceRevision,
-                  effort: selection.effort,
-                }
-              : {
-                  modelServiceId: selection.modelServiceId,
-                  configRevision: selection.configRevision,
-                  effort: selection.effort,
-                },
-          );
-          return broker.resolve(current.credentialRef, {
-            ownerScope: 'platform',
-            ownerId: current.modelServiceId,
-            purpose: 'model-api-key',
+    const native = createNativeModelAdapter(selection.protocol, {
+      baseUrl: selection.baseUrl,
+      model: selection.modelId,
+      ...(selection.contextLimit
+        ? { contextLimit: selection.contextLimit }
+        : {}),
+      contextBudgetCalibration: calibration,
+      onContextBudget: (budget) => {
+        if (activeInput && activeIntentId)
+          activeInput.onEvent({
+            type: 'contextBudget',
+            stage: 'dispatch',
+            modelAttemptId: activeIntentId,
+            budget: agentContextBudgetSnapshotSchema.parse(budget),
           });
-        },
       },
-    );
+      // Only an administrator-saved loopback HTTP endpoint can pass the native adapter guard.
+      allowLocalHttp: true,
+      authScheme: selection.authScheme,
+      timeoutMs: 60_000,
+      onFetchStarted: (timing) => {
+        if (activeInput && activeIntentId)
+          activeInput.onEvent({
+            type: 'modelDispatched',
+            segmentId: activeIntentId,
+            ...timing,
+          });
+      },
+      onDispatch: async (attempt) => {
+        await activeInput?.authorizeContext();
+        if (!activeIntentId)
+          throw new DomainError(
+            'PRECONDITIONS_MISSING',
+            '模型发送缺少持久意图，不会发送。',
+            422,
+          );
+        const updated = await db.query(
+          "UPDATE app.model_call_ledger SET client_request_id=$2 WHERE id=$1 AND initiator_user_id=$3 AND model_service_id=$4 AND status='dispatchIntent' RETURNING id",
+          [
+            activeIntentId,
+            attempt.clientRequestId,
+            actor.userId,
+            selection.modelServiceId,
+          ],
+        );
+        if (!updated.rowCount)
+          throw new DomainError(
+            'BUSINESS_CONFLICT',
+            '模型发送意图已失效，不会重放。',
+            409,
+          );
+      },
+      credential: async () => {
+        const current = await configuration.resolveRuntimeSelection(actor, {
+          modelServiceId: selection.modelServiceId,
+          modelEntryId: selection.modelEntryId,
+          serviceRevision: selection.serviceRevision,
+          effort: selection.effort,
+        });
+        return broker.resolve(current.credentialRef, {
+          ownerScope: 'platform',
+          ownerId: current.modelServiceId,
+          purpose: 'model-api-key',
+        });
+      },
+    });
     const supportedEffort = z
       .string()
       .regex(/^[a-z][a-z0-9_-]{0,39}$/)
@@ -203,16 +190,12 @@ export function createConversationRunnerFactory(
       ...(options.officeSchedules
         ? { officeSchedules: options.officeSchedules }
         : {}),
-      ...(v2
-        ? {
-            modelSelection: {
-              modelServiceId: selection.modelServiceId,
-              modelEntryId: selection.modelEntryId,
-              serviceRevision: selection.serviceRevision,
-              effort: selection.effort,
-            },
-          }
-        : {}),
+      modelSelection: {
+        modelServiceId: selection.modelServiceId,
+        modelEntryId: selection.modelEntryId,
+        serviceRevision: selection.serviceRevision,
+        effort: selection.effort,
+      },
       ...(options.calculation ? { calculation: options.calculation } : {}),
       ...(options.calculation
         ? { office: new AgentOfficeService(options.calculation) }
@@ -237,7 +220,7 @@ export function createConversationRunnerFactory(
         invocations: new ExternalMcpInvocations(db, externalMcp),
       },
       // Wire-format support permits the tool loop; this is not a supplier capability verification.
-      toolCalling: v2 ? true : selection.capabilities.toolCalling,
+      toolCalling: true,
       businessServices: {
         testConfiguration,
         plans,

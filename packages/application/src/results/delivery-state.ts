@@ -63,25 +63,6 @@ export async function requireUiDeliveryReady(tx: SqlExecutor): Promise<void> {
     );
 }
 /** New v1 writes cannot bypass an already activated v2 execution fact chain. */
-export async function assertV1UiWriteMode(
-  tx: SqlExecutor,
-  runId: string,
-): Promise<void> {
-  if (
-    (await uiDeliveryReady(tx)) &&
-    (
-      await tx.query('SELECT 1 FROM app.ui_delivery_heads WHERE run_id=$1', [
-        runId,
-      ])
-    ).rowCount
-  )
-    throw new DomainError(
-      'BUSINESS_CONFLICT',
-      '此run已启用v2累计交付；新增v1提交不能改变执行结束，请使用原v2批次与明确事实链。',
-      409,
-    );
-}
-/** Batch-only uploads must not be mistaken for sealed delivery by older report projections. */
 export async function uiDeliveryGates(
   tx: SqlExecutor,
   runIds: readonly string[],

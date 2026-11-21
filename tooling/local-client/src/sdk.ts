@@ -7,16 +7,20 @@ import {
 import type { ToolPort } from './ports.js';
 import { LocalClientError, localFailure } from './errors.js';
 import { assertSafe, assertMcpArgumentBudget } from './safety.js';
-import { validateToolInput } from './contracts.js';
+import {
+  contractProtocolVersion,
+  contractVersion,
+  validateToolInput,
+} from './contracts.js';
 import { platformOrigin } from './workspace.js';
 
 /** Trusted host connects this SDK instance to its configured authenticated transport. */
 export function createSafeSdkClient(): Client {
   return new Client(
-    { name: 'AITestHub local shared client', version: '0.1.3' },
+    { name: 'AITestHub local shared client', version: contractVersion },
     {
       versionNegotiation: {
-        mode: { pin: '2026-07-28' },
+        mode: { pin: contractProtocolVersion },
         probe: { maxRetries: 0 },
       },
       inputRequired: { autoFulfill: false },

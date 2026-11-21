@@ -35,6 +35,12 @@ import { DomainError, stale } from '../errors.js';
 import { canonicalJson, OperationService } from '../operations/service.js';
 import { TestConfigurationService } from '../test-configuration/service.js';
 import { capacityPolicies } from '../recovery/capacity-policy.js';
+import {
+  freezeApiCaseComposition,
+  materializedApiRows,
+} from '../api-execution/case-composition.js';
+import { publicEnvironment } from '../api-execution/gateway.js';
+import { apiVariableIssues } from '../../../contracts/src/api-variable-refs.js';
 
 interface PlanRow extends QueryResultRow {
   id: string;
@@ -655,9 +661,13 @@ export class PlanService {
         caseId,
         'API',
       );
-      const content = apiCaseContentSchema.parse(
-        approved.snapshot.case.content,
+      const composition = await freezeApiCaseComposition(
+        transaction,
+        projectId,
+        apiCaseContentSchema.parse(approved.snapshot.case.content),
       );
+      const { content, preparationSources } = composition;
+      const rows = materializedApiRows(composition);
       const requests = [
         ...content.steps,
         ...(content.cleanup.mode === 'none'
@@ -700,6 +710,18 @@ export class PlanService {
           connectionIds,
           profileIds,
         );
+      for (const row of rows) {
+        const invalid = apiVariableIssues(
+          row.content,
+          publicEnvironment(configuration),
+        )[0];
+        if (invalid)
+          throw new DomainError(
+            'PRECONDITIONS_MISSING',
+            `${row.dataRow ? `数据行 ${row.dataRow.name} · ` : ''}${invalid.path.join('/')}：${invalid.message}`,
+            422,
+          );
+      }
       for (const step of requests)
         if (step.authProfileRef) {
           const profile = configuration.profiles.find(
@@ -739,6 +761,8 @@ export class PlanService {
         approved,
         configuration,
         content,
+        rows,
+        preparationSources,
       };
     } catch (error: unknown) {
       if (!(error instanceof DomainError)) throw error;
@@ -1295,7 +1319,16 @@ export class PlanService {
         );
       const runId = randomUUID();
       const snapshotId = randomUUID();
-      const items = analysed.map((entry, ordinal) =>
+      const entries = analysed.flatMap((source) =>
+        source.rows.map((row) => ({ source, row })),
+      );
+      if (entries.length > 10_000)
+        throw new DomainError(
+          'PRECONDITIONS_MISSING',
+          '数据行展开超过 10000 个执行项。',
+          422,
+        );
+      const items = entries.map(({ source: entry, row: frozen }, ordinal) =>
         scopeItemSchema.parse({
           runItemId: randomUUID(),
           caseId: entry.approved.approval.caseId,
@@ -1305,7 +1338,11 @@ export class PlanService {
           setId: entry.approved.snapshot.case.setId,
           scenarioId: entry.approved.snapshot.scenario.id,
           scenario: entry.approved.snapshot.scenario.content,
-          content: entry.content,
+          content: frozen.content,
+          ...(frozen.dataRow ? { dataRow: frozen.dataRow } : {}),
+          ...(entry.preparationSources.length
+            ? { preparationSources: entry.preparationSources }
+            : {}),
           ordinal,
           issueIds: [],
         }),
@@ -1357,7 +1394,7 @@ export class PlanService {
           }),
         ],
       );
-      for (const [index, item] of items.entries())
+      for (const item of items)
         await transaction.query(
           `INSERT INTO app.run_items(id,project_id,run_id,ordinal,case_id,approval_snapshot_id,snapshot,cleanup_state)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -1369,7 +1406,7 @@ export class PlanService {
             item.caseId,
             item.approvalSnapshotId,
             JSON.stringify(item),
-            analysed[index]?.content.cleanup.mode === 'none'
+            item.content.kind === 'API' && item.content.cleanup.mode === 'none'
               ? 'notConfigured'
               : 'pending',
           ],

@@ -39,7 +39,6 @@ import { assertLocalUiActor } from './delivery-access.js';
 import {
   authorizeDelivery,
   ensureDeliveryHead,
-  deliveryHead,
   uiDeliveryOperations,
 } from './delivery-store.js';
 import { appendUiOriginal } from './delivery-model.js';
@@ -58,12 +57,6 @@ import {
 type ItemReceipt = z.infer<
   typeof uiBatchReceiptSchema
 >['perItemResults'][number];
-const initialLedger = (run: RunRow) =>
-  semanticDigest({
-    schemaVersion: 'ath.ui-delivery-ledger.v2',
-    runId: run.id,
-    snapshotDigest: run.scope_digest,
-  });
 function involvedRefs(input: UiResultBatch) {
   return [
     ...new Set([
@@ -214,7 +207,7 @@ export class UiDeliveryBatches {
           input.runId,
           input.snapshotDigest,
         ),
-        head = await deliveryHead(tx, run.id),
+        head = await ensureDeliveryHead(tx, run),
         policy = await this.batchPolicy(tx, actor, projectId, input, false),
         budget = await this.files(tx, projectId, run, input, policy);
       this.scope(run, input);
@@ -223,15 +216,11 @@ export class UiDeliveryBatches {
         batchId: input.batchId,
         snapshotDigest: run.scope_digest,
         semanticDigest: semanticDigest(input),
-        mode:
-          head?.mode ??
-          (['completed', 'terminated', 'interrupted'].includes(run.state)
-            ? 'legacyDeliveryOnly'
-            : 'nativeV2'),
+        mode: head.mode,
         rowVersion: run.row_version,
-        headRowVersion: head?.row_version ?? null,
-        ledgerVersion: head?.ledger_version ?? '0',
-        ledgerDigest: head?.ledger_digest ?? initialLedger(run),
+        headRowVersion: head.row_version,
+        ledgerVersion: head.ledger_version,
+        ledgerDigest: head.ledger_digest,
         involvedEvidence: budget.refs.length,
         uniqueFiles: budget.uniqueFiles,
         declaredBytes: budget.declaredBytes,

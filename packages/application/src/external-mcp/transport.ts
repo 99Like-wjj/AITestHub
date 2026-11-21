@@ -54,6 +54,12 @@ export async function withExternalMcpSession<T>(
   options: ExternalSessionOptions,
   work: (session: ExternalMcpSession) => Promise<T>,
 ): Promise<T> {
+  if (options.protocolMode !== 'modern')
+    throw new DomainError(
+      'UNSUPPORTED_OPERATION',
+      '请更新外部 MCP 服务到当前协议后再连接。',
+      422,
+    );
   const endpoint = normalizedExternalEndpoint(
       options.endpoint,
       options.allowedTestEndpoints,
@@ -373,12 +379,7 @@ export async function withExternalMcpSession<T>(
       listMaxPages: 4,
       jsonSchemaValidator: new SafeExternalSchemaValidator(),
       versionNegotiation: {
-        mode:
-          options.protocolMode === 'modern'
-            ? { pin: '2026-07-28' }
-            : options.protocolMode === 'legacy'
-              ? 'legacy'
-              : 'auto',
+        mode: { pin: '2026-07-28' },
         probe: { maxRetries: 0, timeoutMs: 10000 },
       },
       inputRequired: { autoFulfill: false, maxRounds: 0 },

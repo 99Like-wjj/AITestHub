@@ -157,13 +157,20 @@ async function uploadResource(
   return uploaded.file;
 }
 
-export async function fetchPrivateFile(fileId: string): Promise<Blob> {
+export async function fetchPrivateFile(
+  fileId: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
   const ownerEpoch = identityContextEpoch();
   let response: Response;
+  const timeout = AbortSignal.timeout(180_000);
   try {
     response = await fetch(
       `/api/v1/files/${encodeURIComponent(fileId)}/content`,
-      { credentials: 'same-origin', signal: AbortSignal.timeout(180_000) },
+      {
+        credentials: 'same-origin',
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+      },
     );
   } catch {
     throw new ApiError(

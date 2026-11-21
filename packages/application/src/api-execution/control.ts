@@ -7,9 +7,11 @@ import {
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { apiRequestVariableReferences } from '../../../contracts/src/api-variable-refs.js';
 import {
   apiCaseCompletionInputSchema,
   apiExecutionStatusSchema,
+  apiResultTraceSchema,
   apiAttemptDetailSchema,
   apiStopInputSchema,
   apiStopStatusSchema,
@@ -53,13 +55,13 @@ import {
   type TargetPolicy,
   targetPolicySchema,
 } from './gateway.js';
+import { contextVariables, nonEmpty, readPath } from './expressions.js';
 import {
-  contextVariables,
-  nonEmpty,
-  readPath,
-  templateReferences,
-} from './expressions.js';
-import { redact, redactResponse, redactWithPaths } from './redaction.js';
+  redact,
+  redactExtraction,
+  redactResponse,
+  validSensitiveExtraction,
+} from './redaction.js';
 import { ApiDebugService } from './debug.js';
 import { ApiRegressionService } from '../assets/api-regression.js';
 import { assertNewWorkAllowed } from '../recovery/maintenance.js';
@@ -1147,8 +1149,11 @@ export class ApiExecutionControlService {
           currentRequest,
           cleanupStep?.type === 'sql' ? cleanupStep.connectionId : undefined,
         );
+        const requestReferences = apiRequestVariableReferences(
+          currentRequest,
+        ).filter((reference) => /^(env|case|extract)\./.test(reference));
         const requiredReferences = [
-          ...templateReferences(currentRequest),
+          ...requestReferences,
           ...(cleanupStep?.type === 'sql'
             ? cleanupStep.parameters.map((parameter) => parameter.valueRef)
             : []),
@@ -1200,6 +1205,20 @@ export class ApiExecutionControlService {
             reason: '清理目标为空或缺失，未发送。',
           };
         }
+        const variableContext = contextVariables(
+          publicEnvironment(configuration),
+          variables,
+        );
+        if (
+          requestReferences.some(
+            (reference) => readPath(variableContext, reference) === undefined,
+          )
+        )
+          throw new DomainError(
+            'PRECONDITIONS_MISSING',
+            '本步骤引用的变量未取得，未发送登录或业务请求。',
+            422,
+          );
         let transport: WorkerTransport;
         let runtimeAssertions: SendPermit['assertions'];
         let authExtractor: SendPermit['authExtractor'];
@@ -1482,13 +1501,20 @@ export class ApiExecutionControlService {
             '回执含未声明提取变量。',
             400,
           );
-        const protectedExtraction = redactWithPaths(
+        if (extractor.sensitive && !validSensitiveExtraction(value))
+          throw new DomainError(
+            'VALIDATION_ERROR',
+            '敏感提取值须为非空文本，回执未受理。',
+            422,
+          );
+        const protectedExtraction = redactExtraction(
           value,
           protectedValues,
           `${name}.${extractor.path ?? ''}`,
+          extractor.sensitive,
         );
         const safe = protectedExtraction.value;
-        if (canonicalJson(safe) !== canonicalJson(value)) {
+        if (protectedExtraction.protectedPaths.length) {
           await this.remember(
             transaction,
             item.runItemId,
@@ -2168,6 +2194,62 @@ export class ApiExecutionControlService {
         })),
         attempts: attempts.rows,
       };
+    });
+  }
+  async resultTrace(
+    actor: ActorContext,
+    projectId: string,
+    runId: string,
+    runItemId: string,
+  ) {
+    return this.db.transaction(async (transaction) => {
+      await requireProject(transaction, actor, projectId, 'project.read');
+      const {
+        rows: [item],
+      } = await transaction.query<{ content: unknown }>(
+        `SELECT i.snapshot->'content' content FROM app.run_items i JOIN app.runs r ON r.id=i.run_id
+         WHERE i.id=$1 AND i.run_id=$2 AND i.project_id=$3 AND r.kind='API'`,
+        [runItemId, runId, projectId],
+      );
+      if (!item)
+        throw new DomainError('NOT_FOUND', '没有此项目接口执行项。', 404);
+      await this.assertVisible(transaction, runId);
+      const content = apiCaseContentSchema.parse(item.content);
+      const businessNames = new Map(
+        content.steps.map(({ stepId, name }) => [stepId, name]),
+      );
+      const cleanupNames = new Map(
+        content.cleanup.mode === 'none'
+          ? []
+          : content.cleanup.steps.flatMap((step) =>
+              step.type === 'http'
+                ? [[step.cleanupStepId, step.request.name] as const]
+                : [],
+            ),
+      );
+      const attempts = await transaction.query<{
+        phase: ApiPhase;
+        step_id: string;
+        send_intent_at: Date | null;
+      }>(
+        `SELECT id,phase,step_id,state,outcome,send_intent_at,side_effect_certainty,
+          response_safe->'status' status,response_safe->'elapsedMs' elapsed_ms,reason
+         FROM app.api_step_attempts WHERE project_id=$1 AND run_id=$2 AND run_item_id=$3
+         ORDER BY created_at,id LIMIT 1000`,
+        [projectId, runId, runItemId],
+      );
+      return apiResultTraceSchema.parse({
+        attempts: attempts.rows.map((attempt) => ({
+          ...attempt,
+          step_name:
+            (attempt.phase === 'business'
+              ? businessNames.get(attempt.step_id)
+              : attempt.phase === 'cleanupHttp'
+                ? cleanupNames.get(attempt.step_id)
+                : null) ?? null,
+          send_intent_at: attempt.send_intent_at?.toISOString() ?? null,
+        })),
+      });
     });
   }
   async attemptDetail(

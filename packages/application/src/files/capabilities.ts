@@ -104,8 +104,7 @@ export async function readFileResourceCapabilities(
       subject: query,
       policy: {
         source: policy.source,
-        revisionId:
-          policy.source === 'legacyDefault' ? null : policy.revisionId,
+        revisionId: policy.revisionId,
         digest: policy.digest,
       },
       limits: policy.policy.files,

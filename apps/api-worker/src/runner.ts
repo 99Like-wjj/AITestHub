@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
+  apiRecordedAssertionSchema,
   workerRunPackageSchema,
   type JsonValue,
   type RuntimeVariables,
@@ -12,14 +13,18 @@ import {
 } from '../../../packages/contracts/src/domain.js';
 import {
   evaluateAssertions,
+  extractionValue,
   extractVariables,
   nonEmpty,
   readPath,
   type RawObservation,
 } from '../../../packages/application/src/api-execution/expressions.js';
 import {
+  isSensitiveName,
   redact,
+  redactExtraction,
   redactWithPaths,
+  validSensitiveExtraction,
 } from '../../../packages/application/src/api-execution/redaction.js';
 import { runIsolatedScript, ScriptExecutionError } from './script-runtime.js';
 import { evaluateRegex } from './regex-runtime.js';
@@ -97,7 +102,7 @@ function stableCode(error: unknown): string {
 function safeResponse(
   raw: RawTransportResponse,
   values: string[],
-  authentication = false,
+  withheld?: 'authentication' | 'sensitive-extraction',
 ): SafeResponse {
   const filtered = redactWithPaths(
     { headers: raw.headers, body: raw.body },
@@ -108,8 +113,8 @@ function safeResponse(
     .parse(filtered);
   return {
     status: raw.status,
-    headers: authentication ? {} : parsed.headers,
-    body: authentication ? '[authentication response withheld]' : parsed.body,
+    headers: withheld ? {} : parsed.headers,
+    body: withheld ? `[${withheld} response withheld]` : parsed.body,
     elapsedMs: raw.elapsedMs,
     errorCode: raw.errorCode,
     redactionVersion: 'ath.api-redaction.v1',
@@ -128,15 +133,72 @@ function scriptRequest(step: z.infer<typeof apiRequestStepSchema>): JsonValue {
     body: step.body,
   };
 }
+type AssertionEvidence = z.infer<typeof apiRecordedAssertionSchema>;
+type EvaluatedAssertion = {
+  passed: boolean;
+  message: string;
+  check?: Assertion;
+};
+function comparisonFor(
+  check: Assertion,
+  safe: SafeResponse,
+  secrets: readonly string[],
+  passed: boolean,
+): AssertionEvidence['comparison'] {
+  if (check.source === 'variable') return undefined;
+  const path = check.path ?? '';
+  const observed =
+    check.source === 'status'
+      ? safe.status
+      : check.source === 'json'
+        ? readPath(safe.body, path)
+        : check.source === 'header'
+          ? safe.headers[path.toLowerCase()]
+          : safe.body;
+  const preview = (value: unknown) => {
+    if (isSensitiveName(path)) return '[REDACTED]';
+    if (value === undefined) return '未读取到';
+    if (
+      value === null ||
+      typeof value === 'number' ||
+      typeof value === 'boolean'
+    )
+      return value;
+    return typeof value === 'string'
+      ? String(redact(value, secrets, path)).slice(0, 512)
+      : '结构化值，见响应';
+  };
+  return {
+    id: String(redact(check.id, secrets)).slice(0, 200),
+    field: String(
+      redact(
+        path || (check.source === 'status' ? 'HTTP 状态' : '响应正文'),
+        secrets,
+      ),
+    ).slice(0, 2000),
+    operator: check.operator,
+    expected: check.operator === 'exists' ? '存在' : preview(check.expected),
+    actual:
+      check.operator === 'exists'
+        ? passed
+          ? '存在'
+          : '不存在'
+        : preview(observed),
+  };
+}
 async function assertionsFor(
   assertions: Assertion[],
   response: RawObservation,
   variables: RuntimeVariables,
-) {
-  const results = [];
+): Promise<EvaluatedAssertion[]> {
+  const results: EvaluatedAssertion[] = [];
   for (const assertion of assertions) {
     if (assertion.operator !== 'matches') {
-      results.push(...evaluateAssertions([assertion], response, variables));
+      results.push(
+        ...evaluateAssertions([assertion], response, variables).map(
+          (result) => ({ ...result, check: assertion }),
+        ),
+      );
       continue;
     }
     let actual: unknown;
@@ -161,6 +223,7 @@ async function assertionsFor(
     results.push({
       passed,
       message: `断言${assertion.id}${passed ? '通过' : '未满足'}。`,
+      check: assertion,
     });
   }
   return results;
@@ -325,7 +388,7 @@ export async function runAssigned(
         const recorded = receiptSchema.parse(
           await client.completeAttempt(grant, {
             intentId: permit.intentId,
-            response: safeResponse(raw, [...protectedValues], true),
+            response: safeResponse(raw, [...protectedValues], 'authentication'),
             passed: Boolean(authToken),
             reason: authToken
               ? '登录材料已按指定路径取得。'
@@ -386,9 +449,20 @@ export async function runAssigned(
         let reason = passed
           ? '请求返回并完成校验。'
           : '响应不可用，副作用可能未知，不重发。';
-        let assertions: { passed: boolean; message: string }[] = [];
+        let assertions: EvaluatedAssertion[] = [];
         const extracted: Record<string, JsonValue> = {};
-        if (step && raw.errorCode === null) {
+        let invalidSensitiveExtraction = false;
+        for (const extractor of step?.extractors ?? []) {
+          if (!extractor.sensitive) continue;
+          const value = extractionValue(extractor, raw);
+          if (validSensitiveExtraction(value)) protectedValues.add(value);
+          else if (value !== undefined && value !== null && value !== '')
+            invalidSensitiveExtraction = true;
+        }
+        if (invalidSensitiveExtraction) {
+          passed = false;
+          reason = 'SENSITIVE_EXTRACTION_NOT_TEXT';
+        } else if (step && raw.errorCode === null) {
           try {
             assertions = await assertionsFor(
               permit.assertions ?? step.assertions,
@@ -426,10 +500,11 @@ export async function runAssigned(
             const extractor = step.extractors.find(
               (entry) => entry.name === name,
             );
-            const protection = redactWithPaths(
+            const protection = redactExtraction(
               value,
               [...protectedValues],
               `${name}.${extractor?.path ?? ''}`,
+              extractor?.sensitive,
             );
             tentative[name] = protection.value;
             extractPaths.set(name, protection.protectedPaths);
@@ -450,22 +525,39 @@ export async function runAssigned(
             assertions.push({ passed: false, message: reason });
           }
         }
-        assertions = assertions.map((assertion) => ({
-          passed: assertion.passed,
-          message: String(
-            redact(assertion.message, [...protectedValues]),
-          ).slice(0, 200),
-        }));
+        const secrets = [...protectedValues];
+        const response = safeResponse(
+          raw,
+          secrets,
+          invalidSensitiveExtraction ? 'sensitive-extraction' : undefined,
+        );
+        const recordedAssertions: AssertionEvidence[] = assertions.map(
+          (assertion) => {
+            const comparison = assertion.check
+              ? comparisonFor(
+                  assertion.check,
+                  response,
+                  secrets,
+                  assertion.passed,
+                )
+              : undefined;
+            return {
+              passed: assertion.passed,
+              message: String(redact(assertion.message, secrets)).slice(0, 200),
+              ...(comparison ? { comparison } : {}),
+            };
+          },
+        );
         if (phase === 'business') responseAssertionCount += assertions.length;
         const receipt = receiptSchema.parse(
           await client.completeAttempt(grant, {
             intentId: permit.intentId,
-            response: safeResponse(raw, [...protectedValues]),
+            response,
             passed,
             reason,
             sideEffectCertainty: raw.sideEffectCertainty,
             extractions: extracted,
-            assertions,
+            assertions: recordedAssertions,
           }),
         );
         Object.assign(variables.extract, receipt.extractions);

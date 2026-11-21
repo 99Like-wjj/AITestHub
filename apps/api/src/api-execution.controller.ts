@@ -129,7 +129,7 @@ export class ApiExecutionController {
         ),
       );
     const route =
-      /^([^/]+)(?:\/(events|stream|stop|attempts|debug-result)(?:\/([^/]+))?)?$/.exec(
+      /^([^/]+)(?:\/(events|stream|stop|attempts|debug-result|trace)(?:\/([^/]+))?)?$/.exec(
         path,
       );
     const stopReceipt = /^([^/]+)\/stop-receipts\/([^/]+)$/.exec(path);
@@ -149,6 +149,15 @@ export class ApiExecutionController {
       if (route[2] === 'debug-result' && req.method === 'GET')
         return res.json(
           await this.service.debug.trace(actor, projectId, runId),
+        );
+      if (route[2] === 'trace' && !route[3] && req.method === 'GET')
+        return res.json(
+          await this.service.resultTrace(
+            actor,
+            projectId,
+            runId,
+            idSchema.parse(req.query.runItemId),
+          ),
         );
       if (route[2] === 'stop' && req.method === 'POST')
         return res.json(

@@ -368,7 +368,6 @@ function ServiceEditor({
     enabled: existing?.enabled ?? false,
     accessPolicy: existing?.accessPolicy ?? 'restricted',
     allowedUsers: existing?.allowedUserIds.join('\n') ?? '',
-    protocolMode: existing?.protocolMode ?? 'auto',
     tools: JSON.stringify(existing?.tools ?? [], null, 2),
   };
   const [draft, setDraft] = useState(initial),
@@ -403,7 +402,7 @@ function ServiceEditor({
           draft.accessPolicy === 'allActive'
             ? []
             : draft.allowedUsers.split(/[\s,，]+/).filter(Boolean),
-        protocolMode: draft.protocolMode,
+        protocolMode: 'modern',
         tools,
       };
       const body = existing
@@ -476,22 +475,7 @@ function ServiceEditor({
               <option value="allActive">所有有效注册账号</option>
             </select>
           </label>
-          <label className="field-label">
-            协议协商
-            <select
-              value={draft.protocolMode}
-              onChange={(event) =>
-                set(
-                  'protocolMode',
-                  event.target.value as 'auto' | 'modern' | 'legacy',
-                )
-              }
-            >
-              <option value="auto">自动核对（现代或旧版HTTP）</option>
-              <option value="modern">固定现代2026-07-28</option>
-              <option value="legacy">旧版HTTP</option>
-            </select>
-          </label>
+          <div className="caption">MCP 协议版本 2026-07-28</div>
         </div>
         <label className="checkrow mt">
           <input

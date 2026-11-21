@@ -109,11 +109,7 @@ export class ConversationsController {
       return res.json(await this.conversations.searchHistory(actor, req.body));
     if (path === 'requirement-groups/archived' && req.method === 'GET')
       return res.json(await this.conversations.archivedGroups(actor));
-    if (
-      (path === 'requirement-groups/candidates' ||
-        path === 'requirement-groups') &&
-      req.method === 'GET'
-    )
+    if (path === 'requirement-groups/candidates' && req.method === 'GET')
       return res.json(
         await this.conversations.groupCandidates(
           actor,

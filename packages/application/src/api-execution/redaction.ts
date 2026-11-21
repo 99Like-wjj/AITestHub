@@ -93,6 +93,25 @@ export class RedactionResult {
     return [...this.#discovered];
   }
 }
+
+export function validSensitiveExtraction(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= 16384
+  );
+}
+
+export function redactExtraction(
+  value: JsonValue,
+  protectedValues: readonly string[],
+  key: string,
+  sensitive?: boolean,
+) {
+  if (sensitive && validSensitiveExtraction(value))
+    return new RedactionResult('[REDACTED]', [''], [value]);
+  return redactWithPaths(value, protectedValues, key);
+}
 /** JSON Pointer paths refer only to changed scalar values, never unrelated sibling business IDs. */
 export function redactWithPaths(
   value: unknown,

@@ -11,17 +11,6 @@ import {
 import { api, describeError } from './api';
 import { currentIdentityOwner, identityContextEpoch } from './identity-context';
 
-function legacyWorkspaceAccess(ownerId: string): WorkspaceAccessMode | null {
-  try {
-    const saved = workspaceAccessModeSchema.safeParse(
-      window.localStorage.getItem(`aitesthub:workspace-access:${ownerId}`),
-    );
-    return saved.success ? saved.data : null;
-  } catch {
-    return null;
-  }
-}
-
 const accessPreferencePath = '/me/ai-preferences/workspace-access';
 
 interface WorkspaceAccessState {
@@ -55,11 +44,8 @@ export function useWorkspaceAccessPreference(ownerId: string) {
       try {
         let preference = change ?? (await read());
         if (!active()) return false;
-        const desiredMode =
-          change?.mode ??
-          (preference.mode === null ? legacyWorkspaceAccess(ownerId) : null);
         let error: string | undefined;
-        if (desiredMode !== null) {
+        if (change) {
           try {
             preference = await api(
               accessPreferencePath,
@@ -68,7 +54,7 @@ export function useWorkspaceAccessPreference(ownerId: string) {
                 signal,
                 body: {
                   commandId: crypto.randomUUID(),
-                  mode: desiredMode,
+                  mode: change.mode,
                   rowVersion: preference.rowVersion,
                 },
               },
@@ -77,8 +63,7 @@ export function useWorkspaceAccessPreference(ownerId: string) {
           } catch (saveError) {
             if (!active()) return false;
             preference = await read();
-            if (!change && preference.mode === null) throw saveError;
-            if (change && preference.mode !== desiredMode)
+            if (preference.mode !== change.mode)
               error = '访问模式未保存，已加载账号当前选择。';
           }
         }

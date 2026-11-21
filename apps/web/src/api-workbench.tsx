@@ -32,6 +32,7 @@ import type { Asset } from '../../../packages/contracts/src/assets';
 import { idSchema } from '../../../packages/contracts/src/base';
 import { api, describeError } from './api';
 import { ApiCaseFields } from './api-case-fields';
+import { ApiCaseComposition } from './api-case-composition';
 import { ApiCoverage } from './api-coverage';
 import { apiDraftFromContent, serializeApiDraft } from './api-draft';
 import type { ApiDraft } from './api-draft';
@@ -86,6 +87,7 @@ export function ApiWorkbenchPage({
   const preserveDraftOnLeave = useRef(false);
   const [editor, setEditor] = useState<AssetEditorTarget | null>(null);
   const [diagnostic, setDiagnostic] = useState<DiagnosticDraft | null>(null);
+  const [previewEnvironmentId, setPreviewEnvironmentId] = useState<string>();
   const [lookup, setLookup] = useState(hasRestoration);
   const [qualifications, setQualifications] = useState<Qualification[]>([]);
   const [caseView, setCaseView] = useState<'cases' | 'pending' | 'coverage'>(
@@ -428,6 +430,7 @@ export function ApiWorkbenchPage({
         sourceCaseId: active.id,
         sourceCaseRevisionId: active.revisionId,
         sourceCaseRowVersion: active.rowVersion,
+        ...(previewEnvironmentId ? { previewEnvironmentId } : {}),
       });
       setError(undefined);
     } catch (failure) {
@@ -878,9 +881,7 @@ export function ApiWorkbenchPage({
                   {activeQualification && (
                     <Tag color="success">
                       可回归 r{activeQualification.revisionNo}
-                      {activeQualification.source === 'legacyApproval'
-                        ? ' · 历史已审'
-                        : ' · 调试通过'}
+                      {' · 调试通过'}
                     </Tag>
                   )}
                 </div>
@@ -902,6 +903,27 @@ export function ApiWorkbenchPage({
                   showIcon
                 />
               )}
+              <ApiCaseComposition
+                key={`${active.id}:${active.revisionId}`}
+                value={draft.base}
+                cases={assets.filter(
+                  (asset) =>
+                    asset.targetType === 'case' && asset.id !== active.id,
+                )}
+                disabled={
+                  !tester ||
+                  command.pending ||
+                  command.uncertain ||
+                  Boolean(pendingReceipt)
+                }
+                onApply={(composition) => {
+                  setDraft({
+                    ...draft,
+                    base: { ...draft.base, ...composition },
+                  });
+                  setDirty(true);
+                }}
+              />
               <ApiCaseFields
                 projectId={project.id}
                 value={draft}
@@ -912,6 +934,8 @@ export function ApiWorkbenchPage({
                   Boolean(pendingReceipt)
                 }
                 presentation="workbench"
+                previewEnvironmentId={previewEnvironmentId}
+                onPreviewEnvironmentChange={setPreviewEnvironmentId}
                 onChange={(value) => {
                   setDraft(value);
                   setDirty(true);
@@ -1115,10 +1139,7 @@ export function ApiWorkbenchPage({
                         if (!available) return <Tag>待调试</Tag>;
                         return (
                           <Tag color="success">
-                            r{available.revisionNo} ·{' '}
-                            {available.source === 'legacyApproval'
-                              ? '历史已审'
-                              : '调试通过'}
+                            r{available.revisionNo} · 调试通过
                           </Tag>
                         );
                       },

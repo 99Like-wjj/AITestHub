@@ -5,6 +5,7 @@ import type { SqlExecutor } from '../../../persistence/src/database.js';
 import { semanticDigest } from '../ui-executions/service.js';
 import { evidenceIdsForReferences, linkEvidence } from './evidence.js';
 import { ensureFailedProblemInTransaction } from '../issues/problems.js';
+import { assertResultEvidenceScope } from './result-scope.js';
 
 export interface DeliveryHead {
   run_id: string;
@@ -123,6 +124,7 @@ export async function appendUiOriginal(
       code: 'LOCAL_RESULT_ID_CONFLICT',
       message: '此本地结果标识已经属于另一固定项。',
     };
+  await assertResultEvidenceScope(tx, projectId, runId, item);
   const evidenceIds = await evidenceIdsForReferences(
       tx,
       runId,

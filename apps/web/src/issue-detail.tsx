@@ -14,6 +14,8 @@ import {
   Typography,
 } from 'antd';
 import { z } from 'zod';
+import { idSchema } from '../../../packages/contracts/src/base';
+import { resultDetailSchema } from '../../../packages/contracts/src/ui-results';
 import {
   issueDetailSchema,
   problemDetailSchema,
@@ -32,8 +34,230 @@ import type { ActionTarget, EditorTarget, HandlingAction } from './issue-forms';
 import type { MergeTarget } from './issue-batch';
 import type { Project } from './types';
 import { outcomeLabels } from './result-detail';
+import { EvidenceGallery } from './evidence-gallery';
+import type { EvidenceType } from './evidence-gallery';
 
 export type IssueSelection = { kind: 'issue' | 'problem'; id: string };
+type IssueResultLink = { resultId: string; revisionId?: string };
+type IssueEvidence = z.infer<typeof issueDetailSchema>['evidence'];
+type ReviewedResult = z.infer<typeof resultDetailSchema>['result'];
+
+function resultLocation(
+  projectId: string,
+  link: IssueResultLink,
+  ordinal?: number,
+) {
+  const returnTo = window.location.hash;
+  const params = new URLSearchParams({
+    projectId,
+    resultId: link.resultId,
+    returnTo,
+  });
+  const issueId = idSchema.safeParse(
+    new URLSearchParams(returnTo.split('?')[1]).get('issueId'),
+  );
+  if (issueId.success) params.set('fromIssueId', issueId.data);
+  if (link.revisionId) params.set('resultRevisionId', link.revisionId);
+  if (ordinal !== undefined) params.set('step', String(ordinal));
+  return `#reports?${params}`;
+}
+
+function IssueDescription({
+  projectId,
+  text,
+}: {
+  projectId: string;
+  text: string;
+}) {
+  return (
+    <p className="preserve-lines">
+      {text.split(/(https?:\/\/[^\s<>"']+)/u).map((part, index) => {
+        if (index % 2 === 0) return part;
+        try {
+          const url = new URL(part);
+          if (
+            url.origin !== window.location.origin ||
+            !url.hash.startsWith('#reports?')
+          )
+            return part;
+          const query = new URLSearchParams(url.hash.slice('#reports?'.length));
+          const candidate = idSchema.safeParse(query.get('resultId'));
+          if (!candidate.success || query.get('projectId') !== projectId)
+            return part;
+          const revision = idSchema.safeParse(query.get('resultRevisionId'));
+          const link = {
+            resultId: candidate.data,
+            ...(revision.success ? { revisionId: revision.data } : {}),
+          };
+          return (
+            <a
+              key={`${index}:${candidate.data}`}
+              href={resultLocation(projectId, link)}
+              className="text-link-button"
+            >
+              打开关联测试结果
+            </a>
+          );
+        } catch {
+          return part;
+        }
+      })}
+    </p>
+  );
+}
+
+function LinkedResultEvidence({
+  projectId,
+  link,
+  items,
+  onOpen,
+}: {
+  projectId: string;
+  link: IssueResultLink | undefined;
+  items: IssueEvidence;
+  onOpen: (fileId: string, evidenceType?: EvidenceType) => void;
+}) {
+  const [detail, setDetail] = useState<ReviewedResult | null>(null);
+  const [loadError, setLoadError] = useState<string>();
+  const id = link?.resultId;
+  useEffect(() => {
+    setDetail(null);
+    setLoadError(undefined);
+    if (!id) return;
+    const abort = new AbortController();
+    void api(
+      `/projects/${projectId}/results/${id}`,
+      { signal: abort.signal },
+      resultDetailSchema,
+    )
+      .then(({ result }) => {
+        if (!abort.signal.aborted) setDetail(result);
+      })
+      .catch((error: unknown) => {
+        if (!abort.signal.aborted) setLoadError(describeError(error));
+      });
+    return () => abort.abort();
+  }, [id, projectId]);
+  const requested =
+    detail?.id === id && link?.revisionId
+      ? detail?.history.find((row) => row.id === link.revisionId)
+      : undefined;
+  const originalContent =
+    requested?.content ??
+    (detail?.id === id && !link?.revisionId ? detail?.content : undefined);
+  const scope = detail?.id === id ? detail?.scopeItem : undefined;
+  const observations = new Map(
+    originalContent?.stepObservations?.map((observation) => [
+      observation.ordinal,
+      observation,
+    ]),
+  );
+  const visibleCase = scope?.kind === 'UI' ? scope : undefined;
+  const gaps = originalContent?.evidenceGaps ?? [];
+  return (
+    <div className="issue-repro-evidence-grid">
+      <Card
+        size="small"
+        title="复现步骤"
+        extra={
+          link && <a href={resultLocation(projectId, link)}>打开关联结果 ↗</a>
+        }
+      >
+        {id && !detail && !loadError && (
+          <Skeleton active paragraph={{ rows: 2 }} />
+        )}
+        {loadError && <Alert type="warning" title={loadError} />}
+        {!id && (
+          <Typography.Text type="secondary">
+            暂无关联用例步骤，详见问题描述。
+          </Typography.Text>
+        )}
+        {requested && (
+          <div className="row wrap issue-review-snapshot">
+            <Tag>结果 r{requested.revisionNo}</Tag>
+            {visibleCase?.revisionNo && (
+              <Tag>用例 r{visibleCase.revisionNo}</Tag>
+            )}
+            <Tag
+              color={
+                originalContent?.originalOutcome === 'failed'
+                  ? 'red'
+                  : 'default'
+              }
+            >
+              {outcomeLabels[requested.content.originalOutcome]}
+            </Tag>
+          </div>
+        )}
+        {detail && link?.revisionId && !requested && (
+          <Alert type="warning" title="关联采集修订暂不可读取" />
+        )}
+        {visibleCase?.preconditions.length ? (
+          <p className="caption">
+            前置条件　{visibleCase.preconditions.join(' · ')}
+          </p>
+        ) : null}
+        {visibleCase &&
+          (visibleCase.steps.length ? (
+            <ol className="issue-repro-steps">
+              {visibleCase.steps.map((step, index) => {
+                const ordinal = index + 1;
+                const observed = observations.get(ordinal);
+                return (
+                  <li
+                    className={observed?.outcome === 'failed' ? 'failed' : ''}
+                    key={ordinal}
+                  >
+                    <strong>{step.action}</strong>
+                    <div>
+                      <span>预期</span> {step.expected ?? '原步骤未记录预期'}
+                    </div>
+                    <div>
+                      <span>实际</span> {observed?.actual ?? '此步骤无独立观察'}
+                    </div>
+                    {observed?.outcome === 'failed' && link && (
+                      <a href={resultLocation(projectId, link, ordinal)}>
+                        查看第 {ordinal} 步实测
+                      </a>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          ) : (
+            <Alert type="info" title="原版本未记录分步" />
+          ))}
+        {originalContent && !observations.size && (
+          <p className="preserve-lines mt">
+            {originalContent.actualObservations}
+          </p>
+        )}
+      </Card>
+      <Card size="small" title="证据预览">
+        <EvidenceGallery
+          items={items}
+          onOpen={(item) => onOpen(item.fileId, item.manifest.type)}
+          emptyText="此缺陷暂没有可查看的证据"
+        />
+        {gaps.map((gap, index) => (
+          <p className="issue-evidence-gap" key={`${gap.label}:${index}`}>
+            <strong>{gap.label}</strong> ·{' '}
+            {
+              {
+                notCaptured: '未采集',
+                pendingUpload: '已采集待上传',
+                uploadFailed: '上传失败',
+              }[gap.state]
+            }
+            <br />
+            {gap.reason}
+          </p>
+        ))}
+      </Card>
+    </div>
+  );
+}
+
 export function IssueDetailPanel({
   project,
   userId,
@@ -62,7 +286,7 @@ export function IssueDetailPanel({
   onUnmerge: (target: MergeTarget) => void;
   onRetest: (issues: Issue[]) => void;
   onResult: (id: string, revisionId: string) => void;
-  onEvidence: (id: string) => void;
+  onEvidence: (id: string, evidenceType?: EvidenceType) => void;
   onRegisterRefresh: (refresh: () => Promise<void>) => void;
 }) {
   const [issue, setIssue] = useState<z.infer<typeof issueDetailSchema> | null>(
@@ -183,7 +407,7 @@ export function IssueDetailPanel({
             : `待确认问题 · ${base.id.slice(0, 8)}`
           : '问题/缺陷详情'
       }
-      width={740}
+      width="min(1180px, 100vw)"
       className="issue-detail-drawer"
       footer={
         <div className="row" style={{ justifyContent: 'flex-end' }}>
@@ -262,9 +486,18 @@ export function IssueDetailPanel({
                 <span className="badge red">负责人权限失效，身份保留</span>
               )}
             </div>
+            <LinkedResultEvidence
+              projectId={project.id}
+              link={issue.resultLinks[0]}
+              items={issue.evidence}
+              onOpen={onEvidence}
+            />
             <div className="divider" />
             <h3>问题描述</h3>
-            <p className="preserve-lines">{activeIssue.description}</p>
+            <IssueDescription
+              projectId={project.id}
+              text={activeIssue.description}
+            />
             <div className="detail-grid mt">
               <div className="detail-block">
                 <label>原始判断</label>
@@ -291,11 +524,8 @@ export function IssueDetailPanel({
                     {link.resultId} · 关联采集修订 {link.revisionId}
                   </p>
                 </div>
-                <Button
-                  size="small"
-                  onClick={() => onResult(link.resultId, link.revisionId)}
-                >
-                  查看原始与人工结论
+                <Button size="small" href={resultLocation(project.id, link)}>
+                  打开关联结果
                 </Button>
               </div>
             ))}
@@ -640,7 +870,16 @@ export function IssueDetailPanel({
             </Space>
             <div className="divider" />
             <h3>问题描述</h3>
-            <p className="preserve-lines">{problem.problem.description}</p>
+            <IssueDescription
+              projectId={project.id}
+              text={problem.problem.description}
+            />
+            <LinkedResultEvidence
+              projectId={project.id}
+              link={problem.results[0]}
+              items={problem.evidence}
+              onOpen={onEvidence}
+            />
             <div className="divider" />
 
             <h3>处理操作</h3>
@@ -765,37 +1004,50 @@ export function IssueDetailPanel({
           </>
         )}
         {(issue || problem) && (
-          <Card size="small" title="关联证据（文件与采集语境分别核对）">
-            <Table
-              rowKey="evidenceId"
-              dataSource={issue?.evidence ?? problem?.evidence ?? []}
-              pagination={{ pageSize: 10 }}
-              scroll={{ x: 800 }}
-              columns={[
-                {
-                  title: '原件',
-                  render: (_, row) => (
-                    <Button type="link" onClick={() => onEvidence(row.fileId)}>
-                      {row.originalName}
-                    </Button>
-                  ),
-                },
-                { title: '字节状态', dataIndex: 'fileStatus' },
-                {
-                  title: '当前可用',
-                  render: (_, row) =>
-                    row.fileAvailable
-                      ? '可按当前权限读取'
-                      : '尚未验证/已不可用',
-                },
-                {
-                  title: '来源/完整性',
-                  render: (_, row) =>
-                    `${row.manifest.source} / ${row.manifest.captureCompleteness}`,
-                },
-              ]}
-            />
-          </Card>
+          <Collapse
+            items={[
+              {
+                key: 'all-evidence',
+                label: '证据文件明细',
+                children: (
+                  <Table
+                    rowKey="evidenceId"
+                    dataSource={issue?.evidence ?? problem?.evidence ?? []}
+                    pagination={{ pageSize: 10 }}
+                    scroll={{ x: 800 }}
+                    columns={[
+                      {
+                        title: '原件',
+                        render: (_, row) => (
+                          <Button
+                            type="link"
+                            onClick={() =>
+                              onEvidence(row.fileId, row.manifest.type)
+                            }
+                          >
+                            {row.originalName}
+                          </Button>
+                        ),
+                      },
+                      { title: '字节状态', dataIndex: 'fileStatus' },
+                      {
+                        title: '当前可用',
+                        render: (_, row) =>
+                          row.fileAvailable
+                            ? '可按当前权限读取'
+                            : '尚未验证/已不可用',
+                      },
+                      {
+                        title: '来源/完整性',
+                        render: (_, row) =>
+                          `${row.manifest.source} / ${row.manifest.captureCompleteness}`,
+                      },
+                    ]}
+                  />
+                ),
+              },
+            ]}
+          />
         )}
         {base && (
           <details className="caption mt">

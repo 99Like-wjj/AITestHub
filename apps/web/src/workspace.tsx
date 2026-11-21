@@ -225,6 +225,25 @@ function MessageText({
     />
   );
 }
+function userMessagePlainText(entry: ConversationMessage) {
+  const references = new Set(
+    entry.references.flatMap(({ reference }) =>
+      reference.kind === 'projectAccess' ? [] : [inlineReferenceKey(reference)],
+    ),
+  );
+  const tokens = parseInlineComposerTokens(entry.content, references).filter(
+    (token) => token.kind === 'reference' || token.raw.startsWith('[/'),
+  );
+  if (!tokens.length) return entry.content;
+  const pieces: string[] = [];
+  let offset = 0;
+  for (const token of tokens) {
+    pieces.push(entry.content.slice(offset, token.start));
+    offset = token.end;
+  }
+  pieces.push(entry.content.slice(offset));
+  return pieces.join('').trim();
+}
 function isInlineMessageReference(
   text: string,
   reference: ConversationMessage['references'][number]['reference'],
@@ -2674,6 +2693,29 @@ export function Workspace({
                     text={entry.content}
                     references={entry.references}
                   />
+                  {entry.role === 'user' &&
+                    userMessagePlainText(entry).trim() && (
+                      <div className="workspace-user-message-actions">
+                        <Button
+                          type="text"
+                          size="small"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(
+                                userMessagePlainText(entry),
+                              );
+                              void message.success('已复制文本');
+                            } catch {
+                              void message.error(
+                                '无法访问剪贴板，请在消息中选中文本复制。',
+                              );
+                            }
+                          }}
+                        >
+                          复制文本
+                        </Button>
+                      </div>
+                    )}
                 </article>
               );
             })}

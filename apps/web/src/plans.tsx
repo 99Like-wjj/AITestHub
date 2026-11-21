@@ -648,7 +648,7 @@ function PlanEditor({
                       {kind === 'UI'
                         ? reviewLabels[asset.reviewState]
                         : ready
-                          ? `可回归 r${ready.revisionNo}${ready.source === 'legacyApproval' ? '（历史已审）' : ''}`
+                          ? `可回归 r${ready.revisionNo}`
                           : '暂无可回归修订'}
                       {kind === 'UI' && !eligible && (
                         <span role="status">

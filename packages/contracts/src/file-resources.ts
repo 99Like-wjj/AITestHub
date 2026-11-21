@@ -42,7 +42,7 @@ export const fileResourceCapabilitiesSchema = z.strictObject({
   schemaVersion: z.literal('ath.file-capabilities.v1'),
   subject: resourceCapabilityQuerySchema,
   policy: z.strictObject({
-    source: z.enum(['active', 'accepted', 'legacyDefault']),
+    source: z.enum(['active', 'accepted']),
     revisionId: idSchema.nullable(),
     digest: sha256Schema,
   }),
