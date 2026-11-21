@@ -50,7 +50,7 @@ services:
       # Reserve slots for both the S3 bucket collection and filer system-log collection.
       # This is a volume-count ceiling, not preallocated disk space.
       - -volume.max=32
-      - -volume.minFreeSpace=10GiB
+      - -volume.minFreeSpace=2GiB
     secrets: [s3_iam]
     ports:
       - '127.0.0.1:${AITESTHUB_S3_PORT:-58333}:8333'

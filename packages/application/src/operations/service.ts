@@ -21,7 +21,7 @@ import {
   executionOperationStartsTask,
   recoveryFencesReady,
 } from '../recovery/fences.js';
-import { assertTaskCapacity } from '../recovery/capacity.js';
+import { capacityPolicies } from '../recovery/capacity-policy.js';
 import { sanitizeSourceLinkFields } from '../../../contracts/src/source-links.js';
 
 const operationSchema = z.string().regex(/^[a-z][a-z0-9.-]{0,127}$/);
@@ -225,7 +225,8 @@ export class OperationService {
         (await commandFenceHash(tx, actor.userId, closure, key))
       )
         throwClosedReceipt();
-      if (executionOperationStartsTask(operation)) await assertTaskCapacity(tx);
+      if (executionOperationStartsTask(operation))
+        await capacityPolicies.read(tx);
       const command = (
         await tx.query<{ id: string }>(
           'INSERT INTO app.commands(actor_id,operation,key,request_hash,project_id) VALUES($1,$2,$3,$4,$5) RETURNING id',

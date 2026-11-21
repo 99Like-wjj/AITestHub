@@ -1,17 +1,14 @@
 import { statfs } from 'node:fs/promises';
-import { operationNotAccepted } from '../../../contracts/src/base.js';
 import type {
   Database,
   SqlExecutor,
 } from '../../../persistence/src/database.js';
-import { DomainError } from '../errors.js';
 import { spawn } from 'node:child_process';
 import {
   capacityPolicies,
   type CapacityPolicies,
   type CapacityThresholds,
 } from './capacity-policy.js';
-import type { ResourcePolicySnapshot } from '../../../contracts/src/resource-policy.js';
 interface Sample {
   location: string;
   available_bytes: string | null;
@@ -20,7 +17,7 @@ interface Sample {
   error_code: string | null;
 }
 export interface CapacityStatus {
-  state: 'unknown' | 'healthy' | 'warning' | 'restricted';
+  state: 'unknown' | 'healthy' | 'warning';
   availableBytes: string | null;
   locations: Sample[];
 }
@@ -62,13 +59,11 @@ async function statusWithPolicy(
     null,
   );
   const state =
-    available !== null && available < BigInt(thresholds.restrictBelowBytes)
-      ? 'restricted'
-      : available !== null && available < BigInt(thresholds.warnBelowBytes)
-        ? 'warning'
-        : known.length === 3
-          ? 'healthy'
-          : 'unknown';
+    available !== null && available < BigInt(thresholds.warnBelowBytes)
+      ? 'warning'
+      : known.length === 3
+        ? 'healthy'
+        : 'unknown';
   return {
     state,
     availableBytes: available === null ? null : available.toString(),
@@ -83,42 +78,6 @@ export async function capacityStatus(
   if (database.transaction)
     return database.transaction((tx) => capacityStatus(tx, policies));
   return statusWithPolicy(db, await policies.read(db));
-}
-export async function assertTaskCapacity(
-  db: SqlExecutor,
-  policies: CapacityPolicies = capacityPolicies,
-) {
-  if ((await capacityStatus(db, policies)).state === 'restricted')
-    throw new DomainError(
-      'PRECONDITIONS_MISSING',
-      '本机剩余空间低于当前容量策略限制，未受理新的执行/AI任务；现有结果、证据与清理仍按原规则接收。',
-      503,
-      operationNotAccepted,
-    );
-}
-export async function assertUploadCapacity(
-  db: SqlExecutor,
-  bytes: bigint,
-  existingDelivery = false,
-  trustedAdmission?: ResourcePolicySnapshot,
-): Promise<void> {
-  if (existingDelivery) return;
-  const database = db as SqlExecutor & Partial<Pick<Database, 'transaction'>>;
-  if (database.transaction)
-    return database.transaction((tx) =>
-      assertUploadCapacity(tx, bytes, false, trustedAdmission),
-    );
-  const thresholds =
-    trustedAdmission?.policy.capacity ?? (await capacityPolicies.read(db));
-  if (
-    bytes >= BigInt(thresholds.largeUploadFromBytes) &&
-    (await statusWithPolicy(db, thresholds)).state === 'restricted'
-  )
-    throw new DomainError(
-      'PRECONDITIONS_MISSING',
-      '本机空间低于当前容量策略限制，暂不接收新的大文件；已受理执行的数据交付保留。',
-      503,
-    );
 }
 export class CapacityMonitor {
   constructor(

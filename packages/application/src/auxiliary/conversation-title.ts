@@ -31,7 +31,7 @@ import {
 import { assertConversationDataScope } from '../security/model-data-scope.js';
 import { assertSafeModelInput } from '../security/model-input.js';
 import { assertNewWorkAllowed } from '../recovery/maintenance.js';
-import { assertTaskCapacity } from '../recovery/capacity.js';
+import { capacityPolicies } from '../recovery/capacity-policy.js';
 import { canonicalJson } from '../operations/service.js';
 import { audit } from '../events.js';
 import { DomainError } from '../errors.js';
@@ -300,7 +300,7 @@ export async function enqueueConversationTitle(
     return source?.parentTaskId === parent.id ? existing.id : null;
   }
   await assertNewWorkAllowed(tx, true);
-  await assertTaskCapacity(tx);
+  await capacityPolicies.read(tx);
   const selected = await currentTitleModel(tx, configuration, context);
   const text = firstRoundTitleText(first);
   const payload = titleSourceSchema.parse({

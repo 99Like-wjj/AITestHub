@@ -12,7 +12,6 @@ import { currentUser, requireProject } from '../access/policy.js';
 import { DomainError } from '../errors.js';
 import { conversationRow } from '../conversations/common.js';
 import { audit } from '../events.js';
-import { assertUploadCapacity } from '../recovery/capacity.js';
 import { missingFileTransfers } from './preparation.js';
 import { readFileResourceCapabilities } from './capabilities.js';
 import {
@@ -313,13 +312,6 @@ export class FilesService {
           input.runId ?? null,
         ],
       );
-      if (inserted.rowCount)
-        await assertUploadCapacity(
-          transaction,
-          BigInt(input.bytes),
-          Boolean(input.runId),
-          admission,
-        );
       const file = (
         await transaction.query<FileRow>(
           `SELECT * FROM app.file_resources WHERE owner_user_id=$1 AND owner_scope=$2

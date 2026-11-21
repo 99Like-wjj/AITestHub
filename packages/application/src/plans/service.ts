@@ -34,7 +34,7 @@ import { audit } from '../events.js';
 import { DomainError, stale } from '../errors.js';
 import { canonicalJson, OperationService } from '../operations/service.js';
 import { TestConfigurationService } from '../test-configuration/service.js';
-import { assertTaskCapacity } from '../recovery/capacity.js';
+import { capacityPolicies } from '../recovery/capacity-policy.js';
 
 interface PlanRow extends QueryResultRow {
   id: string;
@@ -1085,13 +1085,13 @@ export class PlanService {
     if (plan.kind !== 'API')
       throw new DomainError('NOT_FOUND', '没有该API计划。', 404);
     try {
-      await assertTaskCapacity(transaction);
+      await capacityPolicies.read(transaction);
     } catch (error: unknown) {
       if (!(error instanceof DomainError)) throw error;
       return {
         accepted: false as const,
         reason: 'preconditionsMissing' as const,
-        details: { capacityRestricted: true, message: error.message },
+        details: { capacityPolicyUnavailable: true, message: error.message },
       };
     }
     const overlap = await this.overlap(transaction, projectId, id);

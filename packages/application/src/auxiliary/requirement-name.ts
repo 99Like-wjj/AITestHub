@@ -11,7 +11,7 @@ import type { ConfigurationService } from '../configuration/service.js';
 import { truncateConversationText } from '../conversations/title.js';
 import { DomainError } from '../errors.js';
 import { audit } from '../events.js';
-import { assertTaskCapacity } from '../recovery/capacity.js';
+import { capacityPolicies } from '../recovery/capacity-policy.js';
 import { assertNewWorkAllowed } from '../recovery/maintenance.js';
 import type { RequirementNameAdmission } from '../requirements/service.js';
 import { assertSafeModelInput } from '../security/model-input.js';
@@ -66,7 +66,7 @@ export function requirementNameAdmission(
     let model;
     try {
       await assertNewWorkAllowed(tx, true);
-      await assertTaskCapacity(tx);
+      await capacityPolicies.read(tx);
       const selection = await resolveNewAuxiliarySelection(
         configuration,
         tx,

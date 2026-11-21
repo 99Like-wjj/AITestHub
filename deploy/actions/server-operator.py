@@ -577,7 +577,12 @@ class Operator:
         destination = Path(self.cfg["releaseRoot"]) / ("actions-" + self.release["sourceCommit"][:12] + "-" + self.release["imageId"][7:19] + "-" + self.request["operationId"])
         require(not destination.exists(), "RELEASE_DIRECTORY_EXISTS_INSPECT_NO_REPLAY")
         available = os.statvfs(destination.parent).f_bavail * os.statvfs(destination.parent).f_frsize
-        require(available >= 2 * 1024**3, "STAGING_SPACE_REQUIRED")
+        if available < 2 * 1024**3:
+            self.persist(self.state["phase"], capacityWarning={
+                "code": "LOW_RELEASE_STAGING_SPACE",
+                "availableBytes": available,
+                "warningBelowBytes": 2 * 1024**3,
+            })
         destination.mkdir(mode=0o755)
         export = "aitesthub-actions-export-" + self.request["operationId"]
         self.docker(["create", "--network", "none", "--read-only", "--name", export, "--label", "aitesthub.actions-operation=" + self.request["operationId"], "--entrypoint", "/bin/true", self.candidate_daemon_id])
@@ -643,8 +648,27 @@ class Operator:
             mounts = lambda item: sorted((mount["Destination"], mount["Source"], mount.get("RW")) for mount in item["Mounts"])
             require(mounts(after[name]) == mounts(before[name]), "APPLICATION_MOUNTS_CHANGED")
 
-    def dropin(self, runtime):
-        return ("[Service]\nWorkingDirectory=" + str(runtime / "app") + "\nExecStart=\nExecStart=" + str(runtime / "node") + " --max-old-space-size=96 dist/scripts/operations-worker.js\n").encode()
+    def ops_argv(self, runtime, layout):
+        node = str(runtime / "node")
+        if layout == "bounded-relative":
+            return [node, "--max-old-space-size=96", "dist/scripts/operations-worker.js"]
+        if layout == "legacy-absolute":
+            return [node, str(runtime / "app" / "dist/scripts/operations-worker.js")]
+        raise Rejected("OPS_DROPIN_LAYOUT_REJECTED")
+
+    def dropin(self, runtime, layout="bounded-relative"):
+        return ("[Service]\nWorkingDirectory=" + str(runtime / "app") + "\nExecStart=\nExecStart=" + " ".join(self.ops_argv(runtime, layout)) + "\n").encode()
+
+    def existing_dropin_layout(self, runtime, raw):
+        for layout in ("bounded-relative", "legacy-absolute"):
+            if raw == self.dropin(runtime, layout):
+                return layout
+        raise Rejected("OPS_DROPIN_CHANGED")
+
+    def assert_effective_ops_argv(self, runtime, layout):
+        summary = self.system("show", self.cfg["opsUnit"], "-p", "ExecStart", "--value")
+        argv = re.search(r"argv\[\]=(.+?)(?:\s+;\s|$)", summary)
+        require(argv is not None and shlex.split(argv[1]) == self.ops_argv(runtime, layout), "OPS_EFFECTIVE_ARGV_CHANGED")
 
     def deploy(self):
         self.qualification(True)
@@ -658,7 +682,8 @@ class Operator:
         ordinary(env_path)
         ordinary(dropin_path)
         old_env, old_dropin = env_path.read_bytes(), dropin_path.read_bytes()
-        require(old_dropin == self.dropin(old_runtime), "OPS_DROPIN_CHANGED")
+        ops_layout = self.existing_dropin_layout(old_runtime, old_dropin)
+        self.assert_effective_ops_argv(old_runtime, ops_layout)
         compose_files = ",".join(self.cfg["composeFiles"])
         require(all(row["Config"]["Labels"].get("com.docker.compose.project.config_files") == compose_files for row in previous.values()), "COMPOSE_BINDING_CHANGED")
         require(len(re.findall(rb"^AITESTHUB_APP_IMAGE=.*$", old_env, re.M)) == 1, "IMAGE_SELECTION_REJECTED")
@@ -667,11 +692,12 @@ class Operator:
         self.operation.mkdir(mode=0o700)
         self.write(self.operation / "cloud.env.before", old_env, exclusive=True)
         self.write(self.operation / "ops-dropin.before", old_dropin, exclusive=True)
-        self.persist("preflight-safe", oldImageId=previous["api"]["Image"])
+        self.persist("preflight-safe", oldImageId=previous["api"]["Image"], opsDropinLayout=ops_layout)
         try:
             self.docker(["tag", previous["api"]["Image"], "aitesthub:actions-rollback-" + self.request["operationId"]])
             self.pull()
             destination = self.stage()
+            new_dropin = self.dropin(destination, ops_layout)
             self.persist("candidate-staged", daemonImageId=self.candidate_daemon_id)
             self.backup()
         except Exception:
@@ -710,11 +736,12 @@ class Operator:
             require(candidate["maintenance"]["operation_id"] == self.request["operationId"] and candidate["active"]["total"] == 0, "OWNED_FENCE_LOST")
             phase = "starting-ops-and-workers"
             self.persist(phase)
-            self.write(dropin_path, self.dropin(destination))
+            self.write(dropin_path, new_dropin)
             self.system("daemon-reload")
             self.compose(["apiWorker", "aiWorker"])
             self.system("start", self.cfg["opsUnit"])
             time.sleep(2)
+            self.assert_effective_ops_argv(destination, ops_layout)
             self.compare_roles(previous, self.roles(), self.candidate_daemon_id)
             require(self.tree_digest(private / "secrets") == secrets and self.tree_digest(private / "configuration") == configuration, "PRIVATE_CONFIGURATION_CHANGED")
             require(self.proxy_snapshot() == proxy, "PROXY_CHANGED")
@@ -738,7 +765,7 @@ class Operator:
                 if stopped or switched:
                     self.docker(["stop", "--time", "30", self.cfg["containers"]["apiWorker"], self.cfg["containers"]["aiWorker"]], 75)
                     self.system("stop", self.cfg["opsUnit"])
-                    require(env_path.read_bytes() in ([old_env, new_env] if new_env else [old_env]) and dropin_path.read_bytes() in [old_dropin, self.dropin(destination)], "ROLLBACK_CONFIGURATION_CHANGED")
+                    require(env_path.read_bytes() in ([old_env, new_env] if new_env else [old_env]) and dropin_path.read_bytes() in [old_dropin, new_dropin], "ROLLBACK_CONFIGURATION_CHANGED")
                     self.write(env_path, old_env)
                     self.write(dropin_path, old_dropin)
                     self.system("daemon-reload")
@@ -748,6 +775,7 @@ class Operator:
                     self.system("start", self.cfg["opsUnit"])
                     time.sleep(2)
                 self.runtime = old_runtime
+                self.assert_effective_ops_argv(old_runtime, ops_layout)
                 self.compare_roles(previous, self.roles(), previous["api"]["Image"])
                 recovered = self.snapshot()
                 require(recovered["migrations"] == before["migrations"] and recovered["modelDigest"] == before["modelDigest"], "ROLLBACK_STATE_CHANGED")

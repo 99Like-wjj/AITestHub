@@ -413,7 +413,7 @@ export async function createIsolatedTarget(options = {}) {
       '-s3.port.lance=0',
       '-master.volumeSizeLimitMB=1024',
       '-volume.max=32',
-      '-volume.minFreeSpace=10GiB',
+      '-volume.minFreeSpace=2GiB',
     ]);
     await required([
       'network',
