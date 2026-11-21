@@ -31,6 +31,11 @@ class Rejected(Exception):
     """An intentionally non-sensitive public error code."""
 
 
+ROLLBACK_TAG_PREFIX = "aitesthub:actions-rollback-"
+CANONICAL_UUID = r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}"
+IMAGE_ID = r"sha256:[a-f0-9]{64}"
+
+
 def require(condition, code):
     if not condition:
         raise Rejected(code)
@@ -552,15 +557,209 @@ class Operator:
         ready = self.http("/api/v1/health/ready") == 200
         return {"action": "plan", "readOnly": True, "qualified": qualified, "candidatePresent": present, "idle": self.idle(snapshot), "ready": ready, "migrationsMatched": True, "migrationCount": len(self.release["migrations"]), "canDeploy": qualified and self.idle(snapshot) and ready, "applicationChanged": False}
 
-    def compose(self, roles):
-        args = ["compose", "--env-file", self.cfg["cloudEnv"]]
+    def compose_args(self, profiles, environment_file=None):
+        args = ["compose", "--env-file", environment_file or self.cfg["cloudEnv"]]
         for path in self.cfg["composeFiles"]:
             args += ["-f", path]
-        for profile in self.cfg["composeProfiles"]:
+        for profile in profiles:
             args += ["--profile", profile]
+        return args
+
+    def compose(self, roles):
+        args = self.compose_args(self.cfg["composeProfiles"])
         args += ["up", "-d", "--no-build", "--no-deps"]
         args += [self.cfg["services"][role] for role in roles]
         self.docker(args, 120)
+
+    def rollback_history(self):
+        operations = self.state_root / "operations"
+        trusted(operations, True, True)
+        superseded = set()
+        references = {}
+        protected = set()
+        runtimes = {}
+        for directory in operations.iterdir():
+            if not re.fullmatch(CANONICAL_UUID, directory.name):
+                continue
+            trusted(directory, True, True)
+            path = directory / "state.json"
+            if not os.path.lexists(path):
+                # The operator persists preflight state before tagging an image.
+                continue
+            require(trusted(path, private=True).st_size <= 2 * 1024 * 1024, "ROLLBACK_HISTORY_REJECTED")
+            record = decode_json(path.read_bytes())
+            require(isinstance(record, dict) and record.get("operationId") == directory.name, "ROLLBACK_HISTORY_REJECTED")
+            retention = record.get("rollbackRetention")
+            if isinstance(retention, dict) and retention.get("status") in ("removal-intent", "needs-reconciliation"):
+                protected.add(match(retention.get("attemptingImageId"), IMAGE_ID, "ROLLBACK_HISTORY_REJECTED"))
+            phase = record.get("phase")
+            completed = phase == "complete" and record.get("released") is True and record.get("ready") is True
+            safely_failed = record.get("released") is False and (
+                (phase == "failed-before-application-switch" and record.get("applicationChanged") is False
+                 and record.get("backupResultUnknown") is False)
+                or (phase == "failed-safe-rollback" and type(record.get("rollbackPerformed")) is bool)
+            )
+            if record.get("requiresManualRecovery") is not False or not (completed or safely_failed):
+                for field in ("oldImageId", "daemonImageId"):
+                    if field in record:
+                        protected.add(match(record[field], IMAGE_ID, "ROLLBACK_HISTORY_REJECTED"))
+                continue
+
+            old_image = match(record.get("oldImageId"), IMAGE_ID, "ROLLBACK_HISTORY_REJECTED")
+            references.setdefault(old_image, set()).add(ROLLBACK_TAG_PREFIX + directory.name)
+            if completed:
+                superseded.add(old_image)
+                daemon_id = match(record.get("daemonImageId"), IMAGE_ID, "ROLLBACK_HISTORY_REJECTED")
+                runtime, image_refs = self.published_image_references(record)
+                runtimes.setdefault(daemon_id, set()).add(str(runtime))
+                references.setdefault(daemon_id, set()).update(image_refs)
+        return superseded, references, protected, runtimes
+
+    def published_image_references(self, record):
+        revision = match(record.get("sourceCommit"), r"[a-f0-9]{40}", "ROLLBACK_RELEASE_PROOF_REJECTED")
+        config = match(record.get("imageId"), IMAGE_ID, "ROLLBACK_RELEASE_PROOF_REJECTED")
+        release = Path(self.cfg["releaseRoot"]) / ("actions-" + revision[:12] + "-" + config[7:19] + "-" + record["operationId"])
+        manifest = release / "release.json"
+        if not os.path.lexists(manifest):
+            # A missing archive supplies no authority to remove a registry alias.
+            return release, ()
+        trusted(release, True)
+        require(trusted(manifest).st_size <= 2 * 1024 * 1024, "ROLLBACK_RELEASE_PROOF_REJECTED")
+        raw = manifest.read_bytes()
+        require(sha_bytes(raw) == record.get("releaseSha256"), "ROLLBACK_RELEASE_PROOF_REJECTED")
+        proof = decode_json(raw)
+        validate_release(proof)
+        require(proof["repository"] == self.cfg["repository"] and proof["sourceCommit"] == revision
+                and proof["imageId"] == config, "ROLLBACK_RELEASE_PROOF_REJECTED")
+        # Tagging can add the local repository's alias of the same verified manifest.
+        return release, (
+            proof["imageRef"],
+            "ghcr.io/" + proof["repository"].lower() + ":stage-" + proof["runId"],
+            "aitesthub@" + proof["imageRef"].rsplit("@", 1)[1],
+            "aitesthub@" + record["daemonImageId"],
+        )
+
+    def local_image_ids(self):
+        ids = self.docker(["image", "ls", "--all", "--no-trunc", "--format", "{{.ID}}"]).splitlines()
+        return {match(image_id, IMAGE_ID, "ROLLBACK_IMAGE_INSPECTION_REJECTED") for image_id in ids}
+
+    def local_image(self, reference):
+        row = decode_json(self.docker(["image", "inspect", "--format", "{{json .}}", reference]))
+        require(isinstance(row, dict), "ROLLBACK_IMAGE_INSPECTION_REJECTED")
+        match(row.get("Id"), IMAGE_ID, "ROLLBACK_IMAGE_INSPECTION_REJECTED")
+        return row
+
+    def local_image_aliases(self, image):
+        aliases = set()
+        for field in ("RepoTags", "RepoDigests"):
+            entries = image[field]
+            require(entries is None or (isinstance(entries, list) and all(isinstance(value, str) for value in entries)),
+                    "ROLLBACK_IMAGE_INSPECTION_REJECTED")
+            aliases.update(entries or ())
+        return aliases
+
+    def runtime_image_references(self):
+        references = set(self.docker(self.compose_args(["*"]) + ["config", "--images"]).splitlines())
+        require(references, "ROLLBACK_COMPOSE_REFERENCES_MISSING")
+        containers = self.docker(["container", "ls", "--all", "--quiet", "--no-trunc"]).splitlines()
+        require(containers, "ROLLBACK_CONTAINER_REFERENCES_MISSING")
+        # The broker creates execution containers on demand. Keep its configured image even while idle.
+        rows = self.docker(["container", "inspect", "--format", "{{json .Image}}\t{{json .Config.Image}}\t{{json .Config.Env}}"] + containers).splitlines()
+        require(len(rows) == len(containers), "ROLLBACK_CONTAINER_REFERENCES_INCOMPLETE")
+        for line in rows:
+            image_id, configured, environment = map(decode_json, line.split("\t"))
+            references.update((match(image_id, IMAGE_ID, "ROLLBACK_CONTAINER_IMAGE_REJECTED"), configured))
+            for item in environment or ():
+                name, separator, value = item.partition("=")
+                if separator and name in ("AITESTHUB_SANDBOX_IMAGE", "AITESTHUB_SANDBOX_BROKER_IMAGE") and value:
+                    references.add(value)
+        unit_sources = self.system("cat", self.cfg["opsUnit"])
+        effective = self.system("show", self.cfg["opsUnit"], "-p", "ExecStart", "-p", "WorkingDirectory", "--value")
+        require(unit_sources and effective, "ROLLBACK_OPS_REFERENCES_MISSING")
+        release_root = self.cfg["releaseRoot"] + "/"
+        for token in re.findall(r"[A-Za-z0-9_./@:+-]+", unit_sources + "\n" + effective):
+            references.add(token)
+            if token.startswith(release_root):
+                release_name = token[len(release_root):].split("/", 1)[0]
+                references.add(release_root + release_name)
+                # Legacy release directory names include the first 12 image ID digits.
+                for digest in re.findall(r"(?:^|-)([a-f0-9]{12,64})(?=-|$)", release_name):
+                    references.add(digest[:12])
+        return {reference.removeprefix("docker.io/library/").removeprefix("library/") for reference in references}
+
+    def remove_rollback_reference(self, removal, reference, image_id, allowed_aliases, image_references, previous_images):
+        removal["attemptingReference"] = reference
+        removal["attemptingImageId"] = image_id
+        self.persist("complete", rollbackRetention={**removal, "status": "removal-intent"})
+        target = self.local_image(reference)
+        aliases = self.local_image_aliases(target)
+        require(target["Id"] == image_id and aliases <= allowed_aliases, "ROLLBACK_REFERENCE_CHANGED")
+        require(not (image_references | aliases) & (previous_images | self.runtime_image_references()),
+                "ROLLBACK_RUNTIME_REFERENCE_CHANGED")
+        self.docker(["image", "rm", "--no-prune", reference])
+        if image_id in self.local_image_ids():
+            require(reference != image_id and reference not in self.local_image_aliases(self.local_image(image_id)),
+                    "ROLLBACK_IMAGE_REMOVAL_UNCONFIRMED")
+        del removal["attemptingReference"]
+        del removal["attemptingImageId"]
+        removal["removedReferences"].append(reference)
+
+    def retire_old_rollbacks(self, previous_image, previous_reference, previous_runtime, runtime):
+        if previous_image == self.candidate_daemon_id:
+            return {"status": "unchanged", "reason": "SAME_APPLICATION_IMAGE"}
+        removal = {"status": "complete", "keptImageIds": [self.candidate_daemon_id, previous_image],
+                   "removedReferences": [], "skippedImages": []}
+        previous_tag = ROLLBACK_TAG_PREFIX + self.request["operationId"]
+        try:
+            require(self.http("/api/v1/health/ready") == 200 and self.system("is-active", self.cfg["opsUnit"]) == "active"
+                    and self.active_runtime() == runtime, "ROLLBACK_RETENTION_BASELINE_CHANGED")
+            require(self.roles()["api"]["Image"] == self.candidate_daemon_id, "ROLLBACK_RETENTION_BASELINE_CHANGED")
+            require(self.local_image(previous_tag)["Id"] == previous_image
+                    and self.local_image(previous_reference)["Id"] == previous_image, "PREVIOUS_RELEASE_IMAGE_UNAVAILABLE")
+            trusted(previous_runtime, True)
+            trusted(previous_runtime / "app", True)
+            trusted(previous_runtime / "node")
+            old_dropin = self.operation / "ops-dropin.before"
+            trusted(old_dropin, private=True)
+            self.existing_dropin_layout(previous_runtime, old_dropin.read_bytes())
+            previous_environment = self.operation / "cloud.env.before"
+            trusted(previous_environment, private=True)
+            previous_images = set(self.docker(self.compose_args(["*"], str(previous_environment)) + ["config", "--images"]).splitlines())
+            require(previous_reference in previous_images, "PREVIOUS_RELEASE_REFERENCE_CHANGED")
+            superseded, references, protected, runtimes = self.rollback_history()
+            for image_id in sorted((superseded & self.local_image_ids()) - set(removal["keptImageIds"])):
+                if image_id in protected:
+                    removal["skippedImages"].append({"imageId": image_id, "reason": "UNRESOLVED_OPERATION_REFERENCE"})
+                    continue
+                aliases = self.local_image_aliases(self.local_image(image_id))
+                if aliases - references[image_id]:
+                    removal["skippedImages"].append({"imageId": image_id, "reason": "UNMANAGED_IMAGE_REFERENCES"})
+                    continue
+                image_references = {image_id, image_id[7:], image_id[7:19], *aliases, *runtimes.get(image_id, ())}
+                if image_references & (previous_images | self.runtime_image_references()):
+                    removal["skippedImages"].append({"imageId": image_id, "reason": "RUNTIME_IMAGE_REFERENCE"})
+                    continue
+
+                # Drop rollback aliases before registry references. Docker may
+                # drop coupled references when it unpins a manifest.
+                for reference in sorted(aliases, key=lambda value: (not value.startswith(ROLLBACK_TAG_PREFIX), value)):
+                    if image_id not in self.local_image_ids():
+                        break
+                    current = self.local_image_aliases(self.local_image(image_id))
+                    require(current <= references[image_id], "ROLLBACK_IMAGE_REFERENCES_CHANGED")
+                    if reference not in current:
+                        continue
+                    self.remove_rollback_reference(removal, reference, image_id, references[image_id], image_references, previous_images)
+
+                if image_id in self.local_image_ids():
+                    require(not self.local_image_aliases(self.local_image(image_id)), "ROLLBACK_IMAGE_REFERENCES_CHANGED")
+                    self.remove_rollback_reference(removal, image_id, image_id, set(), image_references, previous_images)
+            if removal["skippedImages"]:
+                removal["status"] = "complete-with-protected"
+        except Exception as error:
+            removal["status"] = "needs-reconciliation" if "attemptingReference" in removal else "deferred"
+            removal["error"] = str(error) if isinstance(error, Rejected) else "ROLLBACK_RETENTION_UNVERIFIED"
+        return removal
 
     def pull(self):
         if self.image(self.release["imageRef"], True) is not None:
@@ -694,8 +893,9 @@ class Operator:
         self.write(self.operation / "ops-dropin.before", old_dropin, exclusive=True)
         self.persist("preflight-safe", oldImageId=previous["api"]["Image"], opsDropinLayout=ops_layout)
         try:
-            self.docker(["tag", previous["api"]["Image"], "aitesthub:actions-rollback-" + self.request["operationId"]])
             self.pull()
+            if self.candidate_daemon_id != previous["api"]["Image"]:
+                self.docker(["tag", previous["api"]["Image"], ROLLBACK_TAG_PREFIX + self.request["operationId"]])
             destination = self.stage()
             new_dropin = self.dropin(destination, ops_layout)
             self.persist("candidate-staged", daemonImageId=self.candidate_daemon_id)
@@ -789,6 +989,12 @@ class Operator:
             if restored:
                 self.persist("failed-safe-rollback", failedPhase=phase, released=False, rollbackPerformed=stopped or switched, requiresManualRecovery=False)
             return self.state
+        retention = self.retire_old_rollbacks(previous["api"]["Image"], previous["api"]["Config"]["Image"],
+                                              old_runtime, destination)
+        try:
+            self.persist("complete", rollbackRetention=retention)
+        except (OSError, Rejected):
+            self.state["rollbackRetentionReceipt"] = "write-unconfirmed"
         return self.state
 
     def status(self):

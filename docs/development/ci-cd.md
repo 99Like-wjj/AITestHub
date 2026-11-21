@@ -42,6 +42,14 @@ node deploy/actions/client.mjs --action status --operation-id <original-operatio
 
 部署与查询使用独立并发分组，服务器另外持有发布锁。连接中断、超时或结果未知时，读取原 operationId；不要重新运行 deploy 猜测结果。每次云操作的安全回执在 Actions Summary 和独立制品中保留，包含实际阶段、是否发布、是否回退和是否需要恢复。
 
+### 云端回滚镜像保留
+
+每次成功切换应用镜像后，服务器保留当前运行镜像和切换前实际运行的一版应用镜像。再次部署同一镜像时保留原前驱。操作器在本次发布锁内确认就绪、三个应用角色、Ops 运行目录和上一版 Compose 配置，再按受信操作回执轮换更早的回滚镜像。回执和认证发布摘要均能对上的旧 GHCR 本机摘要引用、预拉取标签及本机别名也随之退役。
+
+容器引用包括停用容器，同时检查当前和上一版 Compose、Ops 单元及按需沙箱镜像的引用。存在意外标签、运行依赖或待恢复操作的镜像保留。镜像删除按精确引用执行，不强制删除。轮换结果单列在 `rollbackRetention`。回收失败或结果不明时核对原 operationId，保留待核对的镜像和精确删除意图。已通过就绪的发布不会因此回滚。
+
+此规则仅处理云端本机可确认归属的应用镜像。源码及运行包、产品备份、GitHub Actions JSON 制品和 GHCR 远端保留期各自管理。
+
 ## 云端一次性接线
 
 安装审核后的 `server-operator.py` 到源码树外、root 所有的版本化位置，建立 `server-config.example.json` 对应的库外配置并固定其摘要。预建 root 所有的 stateRoot、operations、qualifications 与 operator.lock。实例字段只来自该配置；配置并不授权重建平台、替换控制密钥或重跑迁移。
