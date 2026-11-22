@@ -61,6 +61,11 @@ function requestTemplateFields(request: Request) {
         path: ['body', 'fields', index, 'value'],
       }),
     );
+  else if (request.body.format === 'multipart')
+    request.body.parts.forEach((entry, index) => {
+      if (entry.kind === 'text')
+        fields.push({ value: entry.value, path: ['body', 'parts', index, 'value'] });
+    });
   request.assertions.forEach((entry, index) =>
     fields.push({
       value: entry.expected,

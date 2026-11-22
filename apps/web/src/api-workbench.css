@@ -1,0 +1,123 @@
+.api-immersive-content {
+  padding: 18px 20px 24px;
+}
+
+.api-immersive-content .api-editor-card {
+  padding: 16px;
+  min-width: 0;
+}
+
+.api-workbench-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(330px, 32%);
+  align-items: start;
+  gap: 14px;
+}
+
+.api-workbench-editor,
+.api-workbench-evidence,
+.api-immersive-content .api-inline-fields {
+  min-width: 0;
+}
+
+.api-workbench-evidence > .ant-card-body {
+  overflow-wrap: anywhere;
+}
+
+.api-immersive-content .api-inline-fields.ant-space {
+  display: grid;
+  grid-template-columns: clamp(146px, 22%, 214px) minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.api-immersive-content .api-inline-fields > .ant-space-item {
+  grid-column: 2;
+  min-width: 0;
+}
+
+.api-immersive-content
+  .api-inline-fields
+  > .ant-space-item:has(> .request-steps) {
+  grid-column: 1;
+  grid-row: 1 / span 6;
+  overflow: visible;
+}
+
+.api-immersive-content .request-steps {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
+}
+
+.api-immersive-content .request-steps .ant-btn {
+  justify-content: flex-start;
+  text-align: left;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  height: auto;
+  min-height: 34px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.api-attempt-list > .ant-list-item {
+  padding-inline: 0;
+}
+
+.api-workbench-evidence .message-code {
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.api-evidence-rules {
+  margin-block: 0;
+  padding-inline-start: 18px;
+}
+
+.api-evidence-rules > li {
+  margin-block-end: 8px;
+}
+
+@media (max-width: 1120px) {
+  .api-workbench-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .api-immersive-content {
+    padding: 8px;
+  }
+
+  .api-immersive-content .api-editor-card {
+    padding: 9px;
+  }
+
+  .api-immersive-content .api-inline-fields.ant-space {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .api-immersive-content .api-inline-fields > .ant-space-item,
+  .api-immersive-content
+    .api-inline-fields
+    > .ant-space-item:has(> .request-steps) {
+    grid-column: 1;
+    grid-row: auto;
+  }
+}
+.api-new-case-inputs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 640px) {
+  .api-new-case-inputs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

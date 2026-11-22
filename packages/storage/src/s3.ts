@@ -84,10 +84,11 @@ export class S3Storage implements StoragePort {
     }
   }
 
-  async get(key: string): Promise<Readable> {
+  async get(key: string, signal?: AbortSignal): Promise<Readable> {
     try {
       const result = await this.client.send(
         new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+        signal ? { abortSignal: signal } : undefined,
       );
       if (!(result.Body instanceof Readable))
         throw new StorageUnavailableError();

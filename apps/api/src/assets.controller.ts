@@ -11,6 +11,8 @@ import {
   commandIdSchema,
 } from '../../../packages/contracts/src/base.js';
 import { AssetService } from '../../../packages/application/src/assets/service.js';
+import { CoverageCheckpointService } from '../../../packages/application/src/assets/coverage-checkpoints.js';
+import { readCaseSupplementOrigin } from '../../../packages/application/src/assets/supplement-origin.js';
 import { ReviewService } from '../../../packages/application/src/assets/reviews.js';
 import { UiReviewService } from '../../../packages/application/src/assets/ui-review.js';
 import { IdentityService } from '../../../packages/application/src/identity/service.js';
@@ -49,6 +51,33 @@ export class AssetsController {
     );
     if (actor.entrypoint !== 'web')
       throw new DomainError('FORBIDDEN', '个人Key请使用官方MCP。', 403);
+    if (path === 'coverage-checkpoints' && req.method === 'GET')
+      return res.json(
+        await new CoverageCheckpointService(this.assets.db).list(
+          actor,
+          projectId,
+          req.query,
+        ),
+      );
+    if (path === 'coverage-checkpoints' && req.method === 'POST')
+      return res.json(
+        await new CoverageCheckpointService(this.assets.db).save(
+          actor,
+          projectId,
+          req.body,
+        ),
+      );
+    const coverageReceipt = /^coverage-checkpoints\/receipts\/([^/]+)$/.exec(
+      path,
+    );
+    if (coverageReceipt?.[1] && req.method === 'GET')
+      return res.json(
+        await new CoverageCheckpointService(this.assets.db).receipt(
+          actor,
+          projectId,
+          commandIdSchema.parse(decodeURIComponent(coverageReceipt[1])),
+        ),
+      );
     if (path === '' && req.method === 'GET')
       return res.json(
         await this.assets.list(
@@ -93,6 +122,10 @@ export class AssetsController {
       return res
         .status(201)
         .json(await this.assets.createScenario(actor, projectId, req.body));
+    if (path === 'scoped-cases' && req.method === 'POST')
+      return res
+        .status(201)
+        .json(await this.assets.createScopedCase(actor, projectId, req.body));
     if (path === 'cases' && req.method === 'POST')
       return res
         .status(201)
@@ -101,14 +134,37 @@ export class AssetsController {
       return res.json(await this.assets.submit(actor, projectId, req.body));
     if (path === 'approval-previews' && req.method === 'POST')
       return res.json(await this.reviews.preview(actor, projectId, req.body));
+    const approvalReceipt = /^approval-receipts\/([^/]+)$/.exec(path);
+    if (approvalReceipt?.[1] && req.method === 'GET') {
+      const result = await this.reviews.operations.get(actor, {
+        operation: 'reviews.approve',
+        key: commandIdSchema.parse(decodeURIComponent(approvalReceipt[1])),
+      });
+      if (result.command.projectId !== projectId)
+        throw new DomainError('NOT_FOUND', '此范围内没有该批准回执。', 404);
+      return res.json({
+        status: result.command.status,
+        response: result.command.response ?? null,
+      });
+    }
     if (path === 'approve' && req.method === 'POST')
       return res.json(await this.reviews.commit(actor, projectId, req.body));
+    if (path === 'ui-case-review-stages' && req.method === 'GET')
+      return res.json(
+        await new UiReviewService(this.assets.db).stages(
+          actor,
+          projectId,
+          idSchema.parse(req.query.requirementVersionId),
+        ),
+      );
     if (path === 'ui-review-meetings' && req.method === 'GET')
       return res.json(
         await new UiReviewService(this.assets.db).list(
           actor,
           projectId,
           idSchema.parse(req.query.requirementVersionId),
+          idSchema.optional().parse(req.query.caseId),
+          booleanQueryValue(false).parse(req.query.archived),
         ),
       );
     if (path === 'ui-review-meetings' && req.method === 'POST')
@@ -154,11 +210,22 @@ export class AssetsController {
             projectId,
             id,
             idSchema.optional().parse(req.query.caseId),
+            booleanQueryValue(false).parse(req.query.archived),
           ),
         );
       if (req.method === 'POST')
         return res.json(await review.update(actor, projectId, id, req.body));
     }
+    const origin = /^([^/]+)\/supplement-origin$/.exec(path);
+    if (origin?.[1] && req.method === 'GET')
+      return res.json(
+        await readCaseSupplementOrigin(
+          this.assets.db,
+          actor,
+          projectId,
+          idSchema.parse(origin[1]),
+        ),
+      );
     const target =
       /^([^/]+)(?:\/(opinions|optimization-notes|latest-approved)(?:\/([^/]+))?)?$/.exec(
         path,

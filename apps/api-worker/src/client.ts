@@ -12,19 +12,20 @@ export class WorkerClient {
     private readonly baseUrl: string,
     private readonly bootstrap: string,
   ) {}
-  private async call(
+  private async request(
     path: string,
     body: unknown,
     credential: string,
-  ): Promise<unknown> {
-    let response: Response;
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const timeout = AbortSignal.timeout(15000);
     try {
-      response = await fetch(
+      return await fetch(
         `${this.baseUrl.replace(/\/$/, '')}/api/internal/api-worker/${path}`,
         {
           method: 'POST',
           redirect: 'error',
-          signal: AbortSignal.timeout(15000),
+          signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
           headers: {
             authorization: `Bearer ${credential}`,
             'content-type': 'application/json',
@@ -35,6 +36,13 @@ export class WorkerClient {
     } catch {
       throw new WorkerProtocolError('CONTROL_UNAVAILABLE');
     }
+  }
+  private async call(
+    path: string,
+    body: unknown,
+    credential: string,
+  ): Promise<unknown> {
+    const response = await this.request(path, body, credential);
     let value: unknown;
     try {
       value = await response.json();
@@ -88,6 +96,45 @@ export class WorkerClient {
   }
   authorize(grant: string, body: unknown) {
     return this.call('authorize', body, grant);
+  }
+  async multipartFile(
+    grant: string,
+    intentId: string,
+    fileResourceId: string,
+    expectedBytes: number,
+    signal?: AbortSignal,
+  ) {
+    const response = await this.request(
+      'multipart-file',
+      { intentId, fileResourceId },
+      grant,
+      signal,
+    );
+    const unavailable = () =>
+      new WorkerProtocolError('REQUEST_FILE_UNAVAILABLE', response.status);
+    if (!response.ok || !response.body) {
+      await response.body?.cancel().catch(() => {});
+      throw unavailable();
+    }
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      for (;;) {
+        const result = await reader.read();
+        if (result.done) break;
+        size += result.value.byteLength;
+        if (size > expectedBytes) throw unavailable();
+        chunks.push(result.value);
+      }
+      if (size !== expectedBytes) throw unavailable();
+      return Buffer.concat(chunks, size);
+    } catch {
+      await reader.cancel().catch(() => {});
+      throw unavailable();
+    } finally {
+      reader.releaseLock();
+    }
   }
   completeAttempt(grant: string, body: unknown) {
     return this.call('response', body, grant);

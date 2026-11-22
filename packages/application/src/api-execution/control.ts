@@ -7,6 +7,8 @@ import {
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { multipartFileInputSchema } from '../../../contracts/src/api-multipart.js';
+import type { ApiMultipartFiles } from '../files/api-multipart.js';
 import { apiRequestVariableReferences } from '../../../contracts/src/api-variable-refs.js';
 import {
   apiCaseCompletionInputSchema,
@@ -196,6 +198,7 @@ export class ApiExecutionControlService {
     readonly leaseMs = 30000,
     debugRetentionDays = 7,
     private readonly admission: ApiRunAdmissionPort = new ApiRunAdmission(),
+    private readonly multipartFiles?: ApiMultipartFiles,
   ) {
     this.gateway = new ExecutionGateway(plans.configurations, secrets, policy);
     this.operations = new OperationService(db);
@@ -350,6 +353,7 @@ export class ApiExecutionControlService {
     plans: PlanService,
     secrets: SecretBroker,
     environment: NodeJS.ProcessEnv = process.env,
+    multipartFiles?: ApiMultipartFiles,
   ) {
     const root =
       environment.AITESTHUB_LOCAL_ROOT ??
@@ -400,6 +404,7 @@ export class ApiExecutionControlService {
       new ApiRunAdmission(() =>
         resourcePolicyReaderFromEnvironment(environment),
       ),
+      multipartFiles,
     );
     await control.debug.cleanupExpired();
     return control;
@@ -531,8 +536,9 @@ export class ApiExecutionControlService {
     run: ExecutionRunRow,
     configuration: FrozenConfiguration,
     requiredReferences: readonly string[],
-  ): Promise<RuntimeVariables> {
+  ): Promise<{ variables: RuntimeVariables; fromMultipartFile: boolean }> {
     const extracts: Record<string, JsonValue> = {};
+    let fromMultipartFile = false;
     const attempts = await transaction.query<{ extractions_safe: unknown }>(
       "SELECT extractions_safe FROM app.api_step_attempts WHERE run_item_id=$1 AND state='completed' ORDER BY created_at,id",
       [itemId],
@@ -553,7 +559,8 @@ export class ApiExecutionControlService {
       const references = requiredReferences.filter(
         (reference) =>
           reference === `extract.${entry.name}` ||
-          reference.startsWith(`extract.${entry.name}.`),
+          reference.startsWith(`extract.${entry.name}.`) ||
+          reference.startsWith(`extract.${entry.name}[`),
       );
       if (!references.length) continue;
       const raw: unknown = JSON.parse(
@@ -568,6 +575,7 @@ export class ApiExecutionControlService {
           value: z.json(),
           sourceIntentId: z.uuid(),
           protectedPaths: z.array(z.string()),
+          fromMultipartFile: z.literal(true).optional(),
         })
         .safeParse(raw);
       if (!parsed.success)
@@ -580,6 +588,7 @@ export class ApiExecutionControlService {
       const pointers = references.map((reference) =>
         reference
           .slice(`extract.${entry.name}`.length)
+          .replace(/\[(\d+)\]/g, '.$1')
           .split('.')
           .filter(Boolean)
           .map((part) => `/${part.replace(/~/g, '~0').replace(/\//g, '~1')}`)
@@ -621,6 +630,7 @@ export class ApiExecutionControlService {
         this.gateway.actionConfiguration(configuration, original),
       );
       extracts[entry.name] = envelope.value;
+      if (envelope.fromMultipartFile) fromMultipartFile = true;
     }
     for (const name of Object.keys(input.case))
       if (['__proto__', 'prototype', 'constructor'].includes(name))
@@ -629,7 +639,10 @@ export class ApiExecutionControlService {
           '变量名称不符合隔离约束。',
           400,
         );
-    return { case: input.case, extract: extracts };
+    return {
+      variables: { case: input.case, extract: extracts },
+      fromMultipartFile,
+    };
   }
   async claim(raw: unknown) {
     const input = workerInstanceInputSchema.parse(raw);
@@ -1000,6 +1013,77 @@ export class ApiExecutionControlService {
       return { recorded: true };
     });
   }
+  private requestFiles() {
+    if (!this.multipartFiles)
+      throw new DomainError(
+        'DEPENDENCY_UNAVAILABLE',
+        '本实例未开放请求文件读取，未发送。',
+        503,
+      );
+    return this.multipartFiles;
+  }
+
+  async multipartFile(token: string, raw: unknown) {
+    const input = multipartFileInputSchema.parse(raw);
+    const files = this.requestFiles();
+    const authorizeFile = () =>
+      this.db.transaction(async (transaction) => {
+        const run = await this.grant(transaction, token);
+        const attempt = (
+          await transaction.query<{
+            run_item_id: string;
+            phase: 'business' | 'cleanupHttp';
+            step_id: string;
+          }>(
+            `SELECT run_item_id,phase,step_id FROM app.api_step_attempts
+             WHERE id=$1 AND run_id=$2 AND worker_instance_id=$3 AND fence=$4
+               AND state='intent' AND phase IN ('business','cleanupHttp')`,
+            [input.intentId, run.id, run.worker_instance_id, run.fence],
+          )
+        ).rows[0];
+        if (!attempt)
+          throw new DomainError('NOT_FOUND', '原步骤未授权读取请求文件。', 404);
+        const item = this.item(run, attempt.run_item_id);
+        await this.ensureActiveItem(transaction, run, item.runItemId);
+        if (!(await this.available(transaction, run)))
+          throw new DomainError('FORBIDDEN', '原步骤的发起权限已失效。', 403);
+        const { body } = requestFor(
+          apiCaseContentSchema.parse(item.content),
+          attempt.phase,
+          attempt.step_id,
+        );
+        if (
+          body.format !== 'multipart' ||
+          !body.parts.some(
+            (part) =>
+              part.kind === 'file' &&
+              part.fileResourceId === input.fileResourceId,
+          )
+        )
+          throw new DomainError('NOT_FOUND', '原步骤未授权读取请求文件。', 404);
+        return files.describe(
+          transaction,
+          runActor(run),
+          run.project_id,
+          input.fileResourceId,
+        );
+      });
+    const file = await authorizeFile();
+    const bytes = await files.read(file);
+    const current = await authorizeFile();
+    if (
+      current.storageKey !== file.storageKey ||
+      current.attachment.sha256 !== file.attachment.sha256 ||
+      current.attachment.bytes !== file.attachment.bytes
+    )
+      throw new DomainError(
+        'FILE_NOT_READY',
+        '原请求文件已变化，未发送。',
+        422,
+      );
+    return bytes;
+  }
+
   async authorize(
     token: string,
     raw: unknown,
@@ -1159,7 +1243,7 @@ export class ApiExecutionControlService {
             : []),
           ...(cleanupStep?.requiredTargets ?? []),
         ];
-        const variables = await this.variables(
+        const { variables, fromMultipartFile } = await this.variables(
           transaction,
           item.runItemId,
           input.variables,
@@ -1230,6 +1314,16 @@ export class ApiExecutionControlService {
               400,
             );
           const step = requestFor(content, relatedPhase, relatedId);
+          if (step.body.format === 'multipart') {
+            for (const part of step.body.parts)
+              if (part.kind === 'file')
+                await this.requestFiles().describe(
+                  transaction,
+                  runActor(run),
+                  run.project_id,
+                  part.fileResourceId,
+                );
+          }
           const selected = profileFor(configuration, step);
           if (!selected.cacheKey || selected.cacheKey !== input.stepId)
             throw new DomainError(
@@ -1286,6 +1380,15 @@ export class ApiExecutionControlService {
             variables,
             authToken,
             transaction,
+            async (fileId) =>
+              (
+                await this.requestFiles().describe(
+                  transaction,
+                  runActor(run),
+                  run.project_id,
+                  fileId,
+                )
+              ).attachment,
           );
           runtimeAssertions = await this.gateway.runtimeAssertions(
             configuration,
@@ -1302,8 +1405,20 @@ export class ApiExecutionControlService {
         );
         const values = await this.protection(transaction, item.runItemId);
         const intentId = randomUUID();
+        const responseMetadataOnly =
+          fromMultipartFile ||
+          (transport.type === 'http' &&
+            transport.multipart?.parts.some((part) => part.kind === 'file') ===
+              true);
         let requestSafe: JsonValue;
-        if (transport.type === 'http') {
+        if (fromMultipartFile) {
+          requestSafe = {
+            type: transport.type,
+            ...(transport.type === 'http' ? { method: transport.method } : {}),
+            responseMetadataOnly: true,
+            note: '请求使用来自文件上传响应的受保护提取值，详情已省略。',
+          };
+        } else if (transport.type === 'http') {
           let body: unknown = transport.body;
           try {
             if (typeof body === 'string') body = JSON.parse(body) as unknown;
@@ -1313,8 +1428,22 @@ export class ApiExecutionControlService {
               type: transport.type,
               url: transport.url,
               method: transport.method,
-              headers: transport.headers,
-              body,
+              headers: transport.multipart
+                ? {
+                    ...transport.headers,
+                    'content-type': 'multipart/form-data',
+                  }
+                : transport.headers,
+              body: transport.multipart
+                ? {
+                    format: 'multipart',
+                    partCount: transport.multipart.parts.length,
+                    fileCount: transport.multipart.parts.filter(
+                      (part) => part.kind === 'file',
+                    ).length,
+                  }
+                : body,
+              ...(responseMetadataOnly ? { responseMetadataOnly: true } : {}),
             },
             values,
           );
@@ -1367,6 +1496,7 @@ export class ApiExecutionControlService {
           intentId,
           transport,
           protectedValues: values,
+          ...(responseMetadataOnly ? { responseMetadataOnly: true } : {}),
           ...(runtimeAssertions ? { assertions: runtimeAssertions } : {}),
           ...(authExtractor ? { authExtractor } : {}),
         };
@@ -1489,6 +1619,12 @@ export class ApiExecutionControlService {
       // The send gate retained exactly this action's protected values before dispatch.
       let protectedValues = await this.protection(transaction, item.runItemId);
       const extractions: Record<string, JsonValue> = {};
+      const requestProof = attempt.request_safe;
+      const responseMetadataOnly =
+        requestProof !== null &&
+        typeof requestProof === 'object' &&
+        'responseMetadataOnly' in requestProof &&
+        requestProof.responseMetadataOnly === true;
       const step =
         attempt.phase === 'business' || attempt.phase === 'cleanupHttp'
           ? requestFor(content, attempt.phase, attempt.step_id)
@@ -1513,19 +1649,25 @@ export class ApiExecutionControlService {
           `${name}.${extractor.path ?? ''}`,
           extractor.sensitive,
         );
-        const safe = protectedExtraction.value;
-        if (protectedExtraction.protectedPaths.length) {
-          await this.remember(
-            transaction,
-            item.runItemId,
-            protectedExtraction.protectedValues(),
-          );
+        const safe = responseMetadataOnly
+          ? '[REDACTED]'
+          : protectedExtraction.value;
+        if (responseMetadataOnly || protectedExtraction.protectedPaths.length) {
+          if (!responseMetadataOnly)
+            await this.remember(
+              transaction,
+              item.runItemId,
+              protectedExtraction.protectedValues(),
+            );
           const reference = await this.secrets.store(
             transaction,
             JSON.stringify({
               value,
               sourceIntentId: input.intentId,
-              protectedPaths: protectedExtraction.protectedPaths,
+              protectedPaths: responseMetadataOnly
+                ? ['']
+                : protectedExtraction.protectedPaths,
+              ...(responseMetadataOnly ? { fromMultipartFile: true } : {}),
             }),
             taintedBinding(item.runItemId),
           );
@@ -1574,8 +1716,30 @@ export class ApiExecutionControlService {
           headers: {},
           body: '[authentication response withheld]',
         };
-      const reason = String(redact(input.reason, protectedValues));
-      const assertions = redact(input.assertions, protectedValues);
+      const notDispatched =
+        response.status === null &&
+        response.errorCode?.startsWith('REQUEST_NOT_DISPATCHED_') === true;
+      if (responseMetadataOnly)
+        response = {
+          ...response,
+          headers: {},
+          body: notDispatched
+            ? { dispatchCertainty: 'notDispatched' }
+            : '[multipart file response withheld]',
+        };
+      const reason = responseMetadataOnly
+        ? notDispatched
+          ? '本步未发送，被测目标未收到此请求。'
+          : passed
+            ? '响应已用于校验，详情已省略。'
+            : '本步未通过，受保护响应详情已省略。'
+        : String(redact(input.reason, protectedValues));
+      const assertions = responseMetadataOnly
+        ? input.assertions.map(({ passed }) => ({
+            passed,
+            message: passed ? '断言通过' : '断言未通过',
+          }))
+        : redact(input.assertions, protectedValues);
       await transaction.query(
         `UPDATE app.api_step_attempts SET state='completed',outcome=$2,side_effect_certainty=$3,response_safe=$4,receipt_digest=$5,
         extractions_safe=$6,assertions_safe=$7,reason=$8,finished_at=clock_timestamp() WHERE id=$1`,

@@ -156,6 +156,10 @@ a:focus-visible {
   background: var(--page-bg);
   min-width: 0;
 }
+.standalone-workspace-container {
+  min-width: 0;
+  background: var(--bg);
+}
 .page-content > .ant-empty {
   padding: 80px 16px;
 }

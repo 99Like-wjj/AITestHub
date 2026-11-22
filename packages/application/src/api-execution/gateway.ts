@@ -7,6 +7,11 @@ import type {
   SqlTransport,
 } from '../../../contracts/src/api-execution.js';
 import {
+  multipartMaxPayloadBytes,
+  type MultipartAttachment,
+  type MultipartTransport,
+} from '../../../contracts/src/api-multipart.js';
+import {
   apiCaseContentSchema,
   apiRequestStepSchema,
   cleanupSqlStepSchema,
@@ -389,6 +394,7 @@ export class ExecutionGateway {
     variables: RuntimeVariables,
     token?: string,
     transaction?: SqlExecutor,
+    resolveMultipartFile?: (id: string) => Promise<MultipartAttachment>,
   ): Promise<HttpTransport> {
     const context = await this.runtimeContext(
       configuration,
@@ -476,6 +482,7 @@ export class ExecutionGateway {
       else headers[auth.destination.name.toLowerCase()] = injected;
     }
     let body: string | null = null;
+    let multipart: MultipartTransport | undefined;
     if (step.body.format === 'json') {
       body = JSON.stringify(interpolate(step.body.value, context));
       headers['content-type'] ??= 'application/json';
@@ -488,8 +495,48 @@ export class ExecutionGateway {
         fields.append(field.name, scalar(interpolate(field.value, context)));
       body = fields.toString();
       headers['content-type'] ??= 'application/x-www-form-urlencoded';
+    } else if (step.body.format === 'multipart') {
+      if (headers['content-type'] !== undefined)
+        throw new DomainError(
+          'VALIDATION_ERROR',
+          'multipart 的 Content-Type 由执行器生成，不能手工覆盖。',
+          400,
+        );
+      const parts: MultipartTransport['parts'] = [];
+      for (const part of step.body.parts) {
+        if (part.kind === 'text') {
+          parts.push({
+            ...part,
+            value: scalar(interpolate(part.value, context)),
+          });
+          continue;
+        }
+        if (!resolveMultipartFile)
+          throw new DomainError(
+            'DEPENDENCY_UNAVAILABLE',
+            '本实例未开放请求文件读取，未发送。',
+            503,
+          );
+        parts.push({
+          ...part,
+          ...(await resolveMultipartFile(part.fileResourceId)),
+        });
+      }
+      const payloadBytes = parts.reduce(
+        (sum, part) =>
+          sum +
+          (part.kind === 'text' ? Buffer.byteLength(part.value) : part.bytes),
+        0,
+      );
+      if (payloadBytes > multipartMaxPayloadBytes)
+        throw new DomainError(
+          'PRECONDITIONS_MISSING',
+          'multipart 文本与文件总量超出 4 MiB，未发送。',
+          422,
+        );
+      multipart = { parts };
     }
-    if (['GET', 'HEAD'].includes(step.method) && body !== null)
+    if (['GET', 'HEAD'].includes(step.method) && (body !== null || multipart))
       throw new DomainError(
         'VALIDATION_ERROR',
         'GET/HEAD不能携带此传输body。',
@@ -501,6 +548,7 @@ export class ExecutionGateway {
       method: step.method,
       headers,
       body,
+      ...(multipart ? { multipart } : {}),
       timeoutMs: step.timeoutMs ?? 30000,
     };
   }

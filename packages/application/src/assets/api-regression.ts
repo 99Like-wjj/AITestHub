@@ -261,6 +261,10 @@ export class ApiRegressionService {
         )
           stale();
         const scope = debugExecutionScopeSchema.parse(debug.scope_snapshot);
+        if (scope.diagnosticStepId !== undefined)
+          unavailable(
+            '单步诊断只用于定位问题，须使用完整用例调试回执建立回归资格。',
+          );
         const item = scope.items[0];
         if (!item || debug.state !== 'completed')
           unavailable('原调试尚未完整结束，请查看原轮次。');

@@ -8,6 +8,8 @@ import {
 import {
   assetListQuerySchema,
   createCaseInputSchema,
+  createScopedCaseInputSchema,
+  type CreateScopedCaseInput,
   createScenarioInputSchema,
   createSetInputSchema,
   removeAssetInputSchema,
@@ -37,6 +39,13 @@ import {
   lockSet,
   type AssetRow,
 } from './repository.js';
+
+import {
+  linkCaseToCheckpoint,
+  requireWritableAssetVersion,
+} from './coverage-checkpoints.js';
+
+import { recordCaseSupplementOrigin } from './supplement-origin.js';
 
 export class AssetService {
   readonly operations: OperationService;
@@ -310,6 +319,135 @@ export class AssetService {
       projectId,
     );
   }
+  async createScopedCase(actor: ActorContext, projectId: string, raw: unknown) {
+    const input = createScopedCaseInputSchema.parse(raw);
+    return this.operations.execute(
+      actor,
+      'assets.create-scoped-case',
+      input.commandId,
+      input,
+      async (tx) => {
+        await requireProject(tx, actor, projectId, 'assets.write');
+      },
+      async (tx) => {
+        const parent = await this.scopedScenario(tx, actor, projectId, input);
+        const asset = await this.insert(
+          tx,
+          actor,
+          projectId,
+          input.kind,
+          input.requirementVersionId,
+          'case',
+          { ...input.content, scenarioId: parent.id },
+          parent,
+        );
+        if (input.checkpoint)
+          await linkCaseToCheckpoint(tx, actor, asset, input.checkpoint);
+        if (input.supplementOrigin)
+          await recordCaseSupplementOrigin(
+            tx,
+            actor,
+            asset,
+            input.supplementOrigin,
+          );
+        return { asset: assetDto(asset) };
+      },
+      projectId,
+    );
+  }
+
+  private async scopedScenario(
+    tx: SqlExecutor,
+    actor: ActorContext,
+    projectId: string,
+    input: CreateScopedCaseInput,
+  ) {
+    const scope = [projectId, input.requirementVersionId, input.kind];
+    const select = input.scenario;
+    if ('scenarioId' in select) {
+      const preliminary = await getAsset(tx, projectId, select.scenarioId);
+      await lockSet(tx, projectId, preliminary.set_id);
+      const current = await getAsset(tx, projectId, select.scenarioId);
+      if (
+        current.target_type !== 'scenario' ||
+        current.kind !== input.kind ||
+        current.requirement_version_id !== input.requirementVersionId
+      )
+        throw new DomainError(
+          'VALIDATION_ERROR',
+          '场景须属于所选需求版本和资产类型。',
+          400,
+        );
+      await requireWritableAssetVersion(
+        tx,
+        projectId,
+        input.requirementVersionId,
+      );
+      return current;
+    }
+
+    const scopeLock =
+      projectId + '/' + input.requirementVersionId + '/' + input.kind;
+    await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+      scopeLock,
+    ]);
+    const readSets = () =>
+      tx.query<{ id: string }>(
+        `SELECT id FROM app.test_assets
+       WHERE project_id=$1 AND requirement_version_id=$2 AND kind=$3
+         AND target_type='set' AND removed_at IS NULL AND ($4::uuid IS NULL OR id=$4)
+       ORDER BY id LIMIT 2`,
+        [...scope, select.setId ?? null],
+      );
+    const { rows } = await readSets();
+    if (select.setId && !rows.length)
+      throw new DomainError('NOT_FOUND', '所选历史归属不在此需求版本。', 404);
+    if (rows.length > 1)
+      throw new DomainError(
+        'PRECONDITIONS_MISSING',
+        '此版本有多个历史归属，请明确新场景的归属。',
+        422,
+      );
+    const current = rows[0];
+    if (current) await lockSet(tx, projectId, current.id);
+    await requireWritableAssetVersion(
+      tx,
+      projectId,
+      input.requirementVersionId,
+    );
+    if (!current && (await readSets()).rows.length) stale();
+    const set = current
+      ? await getAsset(tx, projectId, current.id)
+      : await this.insert(
+          tx,
+          actor,
+          projectId,
+          input.kind,
+          input.requirementVersionId,
+          'set',
+          { title: '默认测试集', basisRefs: [] },
+          null,
+        );
+    return this.insert(
+      tx,
+      actor,
+      projectId,
+      input.kind,
+      input.requirementVersionId,
+      'scenario',
+      {
+        kind: input.kind,
+        requirementVersionId: input.requirementVersionId,
+        setId: set.id,
+        title: select.title,
+        objective: select.objective,
+        sharedPreconditions: select.sharedPreconditions,
+        basisRefs: select.basisRefs,
+      },
+      set,
+    );
+  }
+
   async revise(
     actor: ActorContext,
     projectId: string,

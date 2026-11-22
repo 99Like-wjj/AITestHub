@@ -39,8 +39,11 @@ import type {
   Asset,
   AssetContent,
 } from '../../../packages/contracts/src/assets';
-import { precisePreviewSchema } from '../../../packages/contracts/src/domain';
-import { api, describeError } from './api';
+import {
+  precisePreviewSchema,
+  type requestBodySchema,
+} from '../../../packages/contracts/src/domain';
+import { api, describeError, isUncertainMutationError } from './api';
 import { AssetEditor, targetTypeLabels } from './asset-editor';
 import type { AssetEditorTarget } from './asset-editor';
 import { AssetReviewPanel } from './asset-review-panel';
@@ -58,12 +61,76 @@ import {
 import './assets-layout.css';
 import { UiCaseText, UiReviewWorkspace } from './ui-review-workspace';
 import { AssetCoverage } from './asset-coverage';
+import { UiCaseWorkbench, UiReviewHistory } from './ui-case-workbench';
+import { StandaloneWorkbenchHeader } from './standalone-workbench-header';
+import { UiCaseActionDialog, type UiSupplementSource } from './ui-case-actions';
+import { UiCoverageCheck } from './ui-coverage-check';
+import {
+  assertApprovalReceipt,
+  forgetApproval,
+  readApprovalRecovery,
+  recoveredApprovalSchema,
+  rememberApproval,
+  type ApprovalRecovery,
+} from './ui-case-approval';
+import type { CoverageCheckpoint } from '../../../packages/contracts/src/coverage-checkpoints';
 
+function assetRequestBodyText(body: z.infer<typeof requestBodySchema>) {
+  switch (body.format) {
+    case 'none':
+      return '';
+    case 'json':
+      return JSON.stringify(body.value, null, 2);
+    case 'text':
+      return body.value;
+    case 'multipart':
+      return body.parts
+        .map(
+          (part) =>
+            part.name +
+            ': ' +
+            (part.kind === 'file'
+              ? '文件引用 ' + part.fileResourceId
+              : '文本字段'),
+        )
+        .join('\n');
+    case 'form':
+      return body.fields
+        .map((part) => part.name + ': ' + part.value)
+        .join('\n');
+  }
+}
 type Navigation = z.infer<typeof assetNavigationSchema>;
 type Detail = z.infer<typeof assetDetailSchema>;
 type Preview = z.infer<typeof precisePreviewSchema>;
 type ApprovalReceipt = z.infer<typeof approvalCommitReceiptSchema>;
 type Approved = z.infer<typeof latestApprovedResponseSchema>;
+
+function caseWorkbenchRoute() {
+  const query = new URLSearchParams(window.location.hash.split('?')[1]);
+  const view = query.get('view');
+  const ids = z
+    .object({
+      caseId: z.uuid().optional(),
+      revisionId: z.uuid().optional(),
+      meetingId: z.uuid().optional(),
+    })
+    .safeParse({
+      caseId: query.get('caseId') ?? undefined,
+      revisionId: query.get('assetRevisionId') ?? undefined,
+      meetingId: query.get('meetingId') ?? undefined,
+    });
+  return {
+    mode: view === 'meeting' || view === 'workbench' ? view : null,
+    archived: query.get('archived') === '1',
+    history: query.get('history') === '1',
+    caseId: ids.success ? ids.data.caseId : undefined,
+    revisionId: ids.success ? ids.data.revisionId : undefined,
+    meetingId: ids.success ? ids.data.meetingId : undefined,
+    invalid:
+      !ids.success || (query.get('history') === '1' && !ids.data?.meetingId),
+  };
+}
 function reviewFromUrl() {
   const value = new URLSearchParams(window.location.hash.split('?')[1]).get(
     'review',
@@ -210,13 +277,7 @@ function ContentView({ content }: { content: AssetContent }) {
                 )}
                 {step.body.format !== 'none' && (
                   <pre className="material-text-preview">
-                    {step.body.format === 'json'
-                      ? JSON.stringify(step.body.value, null, 2)
-                      : step.body.format === 'text'
-                        ? step.body.value
-                        : step.body.fields
-                            .map((field) => `${field.name}: ${field.value}`)
-                            .join('\n')}
+                    {assetRequestBodyText(step.body)}
                   </pre>
                 )}
                 {!!step.extractors.length && (
@@ -328,16 +389,7 @@ function ContentView({ content }: { content: AssetContent }) {
                         </Typography.Paragraph>
                         {step.request.body.format !== 'none' && (
                           <pre className="material-text-preview">
-                            {step.request.body.format === 'json'
-                              ? JSON.stringify(step.request.body.value, null, 2)
-                              : step.request.body.format === 'text'
-                                ? step.request.body.value
-                                : step.request.body.fields
-                                    .map(
-                                      (field) =>
-                                        `${field.name}: ${field.value}`,
-                                    )
-                                    .join('\n')}
+                            {assetRequestBodyText(step.request.body)}
                           </pre>
                         )}
                         {step.request.preScript && (
@@ -377,11 +429,28 @@ export function AssetsPage({
   const { modal, message } = App.useApp();
   const [localKind, setLocalKind] = useState<'UI' | 'API'>(kindFromUrl);
   const [coverage, setCoverage] = useState(false);
-  const [reviewWorkspace, setReviewWorkspace] = useState(
-    new URLSearchParams(window.location.hash.split('?')[1]).get('view') ===
-      'meeting',
+  const [caseRoute, setCaseRoute] = useState(caseWorkbenchRoute);
+  const [reviewHistory, setReviewHistory] = useState(false);
+  const [sceneScope, setSceneScope] = useState<{
+    id: string;
+    versionId: string;
+  }>();
+  const [collapsedScenes, setCollapsedScenes] = useState<Set<string>>(
+    new Set(),
   );
+  const [caseAction, setCaseAction] = useState<{
+    kind: 'new' | 'import' | 'generate' | 'supplement';
+    source?: UiSupplementSource;
+    checkpoint?: CoverageCheckpoint;
+  }>();
+  const recentCase = useRef(new Map<string, string>());
+  const inlineDrafts = useRef(new Map<string, string>());
+  const libraryScroll = useRef(0);
+  const reviewWorkspace = caseRoute.mode === 'meeting';
+  const readerWorkspace = caseRoute.mode === 'workbench';
   const kind = scope?.kind ?? localKind;
+  const immersive =
+    kind === 'UI' && Boolean(scope) && (reviewWorkspace || readerWorkspace);
   const [navigation, setNavigation] = useState<Navigation>({
     requirements: [],
   });
@@ -394,7 +463,7 @@ export function AssetsPage({
   const [reviewFilter, setReviewFilter] = useState<string>(reviewFromUrl);
   const [includeRemoved, setIncludeRemoved] = useState(false);
   const [includeArchivedRequirements, setIncludeArchivedRequirements] =
-    useState(false);
+    useState(() => caseWorkbenchRoute().archived);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -410,6 +479,10 @@ export function AssetsPage({
   const [commitError, setCommitError] = useState<string>();
   const [committing, setCommitting] = useState(false);
   const commitCommand = useRef(crypto.randomUUID());
+  const approvalKey = project
+    ? 'aitesthub:asset-approval:' + userId + ':' + project.id + ':' + kind
+    : '';
+  const [approvalRecovery, setApprovalRecovery] = useState<ApprovalRecovery>();
   const loadEpoch = useRef(0);
   const detailEpoch = useRef(0);
   const browseContext = useRef<string | null>(null);
@@ -419,6 +492,11 @@ export function AssetsPage({
   const selectedRequirement = navigation.requirements.find(
     (requirement) => requirement.id === scope?.requirementId,
   );
+  const sceneId =
+    sceneScope?.versionId === scope?.requirementVersionId
+      ? sceneScope?.id
+      : undefined;
+  const canWrite = tester && !selectedRequirement?.archived;
   const scopeExists =
     scope === null ||
     Boolean(
@@ -426,21 +504,27 @@ export function AssetsPage({
         (version) => version.id === scope.requirementVersionId,
       ),
     );
-  const visibleAssets = assets.filter(
-    (asset) => batchId === 'all' || asset.setId === batchId,
-  );
+  const visibleAssets =
+    kind === 'UI'
+      ? assets
+      : assets.filter((asset) => batchId === 'all' || asset.setId === batchId);
   const scenarios = visibleAssets.filter(
+    (asset) =>
+      asset.targetType === 'scenario' && (!sceneId || asset.id === sceneId),
+  );
+  const scopeScenarios = assets.filter(
     (asset) => asset.targetType === 'scenario',
   );
   const keyword = search.trim().toLocaleLowerCase();
   const cases = visibleAssets.filter(
     (asset) =>
       asset.targetType === 'case' &&
+      (!sceneId || asset.parentId === sceneId) &&
       (reviewFilter === 'all' ||
         (reviewFilter === 'unapproved'
           ? asset.reviewState !== 'approved'
           : asset.reviewState === reviewFilter)) &&
-      `${asset.title} ${'testPoint' in asset.content ? asset.content.testPoint : ''} ${assets.find((parent) => parent.id === asset.parentId)?.title ?? ''}`
+      `${asset.id} ${asset.title} ${'testPoint' in asset.content ? asset.content.testPoint : ''} ${assets.find((parent) => parent.id === asset.parentId)?.title ?? ''}`
         .toLocaleLowerCase()
         .includes(keyword),
   );
@@ -532,6 +616,14 @@ export function AssetsPage({
     }
   }
   useEffect(() => {
+    if (!approvalKey) return;
+    try {
+      setApprovalRecovery(readApprovalRecovery(approvalKey));
+    } catch (failure) {
+      setCommitError('无法读取原批准操作记录。' + describeError(failure));
+    }
+  }, [approvalKey]);
+  useEffect(() => {
     const controller = new AbortController();
     const context = `${project?.id}:${kind}:${scope?.requirementVersionId}:${includeRemoved}`;
     const changedContext = browseContext.current !== context;
@@ -559,10 +651,9 @@ export function AssetsPage({
     const update = () => {
       setReviewFilter(reviewFromUrl());
       setLocalKind(kindFromUrl());
-      setReviewWorkspace(
-        new URLSearchParams(window.location.hash.split('?')[1]).get('view') ===
-          'meeting',
-      );
+      const route = caseWorkbenchRoute();
+      setCaseRoute(route);
+      if (route.archived) setIncludeArchivedRequirements(true);
     };
     window.addEventListener('hashchange', update);
     return () => window.removeEventListener('hashchange', update);
@@ -641,6 +732,8 @@ export function AssetsPage({
   }
   function changeScope(next: CaseScope | null) {
     setCoverage(false);
+    setReviewHistory(false);
+    setSceneScope(undefined);
     onScopeChange(next);
     const query = new URLSearchParams(window.location.hash.split('?')[1]);
     query.set('kind', next?.kind ?? kind);
@@ -650,30 +743,122 @@ export function AssetsPage({
     query.delete('assetRevisionId');
     window.location.hash = `cases?${query}`;
   }
+  function updateCaseLink(
+    change: (query: URLSearchParams) => void,
+    replace = false,
+  ) {
+    const query = new URLSearchParams(window.location.hash.split('?')[1]);
+    change(query);
+    const hash = 'cases' + (query.size ? '?' + query.toString() : '');
+    if (replace) window.history.replaceState(null, '', '#' + hash);
+    else window.location.hash = hash;
+    setCaseRoute(caseWorkbenchRoute());
+  }
+  function openWorkspace(
+    next: CaseScope,
+    mode: 'workbench' | 'meeting',
+    caseId?: string,
+    meetingId?: string,
+  ) {
+    if (!immersive) libraryScroll.current = window.scrollY;
+    if (
+      scope?.requirementVersionId !== next.requirementVersionId ||
+      scope.kind !== next.kind
+    )
+      onScopeChange(next);
+    setSelectedId(null);
+    setReviewHistory(false);
+    updateCaseLink((query) => {
+      query.delete('assetId');
+      query.delete('assetRevisionId');
+      query.delete('meetingId');
+      query.delete('caseId');
+      query.delete('history');
+      query.set('view', mode);
+      query.set('kind', 'UI');
+      query.set('projectId', next.projectId);
+      query.set('requirementId', next.requirementId);
+      query.set('title', next.title);
+      query.set('versionId', next.requirementVersionId);
+      query.set('versionNo', String(next.versionNo));
+      if (includeArchivedRequirements) query.set('archived', '1');
+      if (caseId) query.set('caseId', caseId);
+      if (meetingId) {
+        query.set('meetingId', meetingId);
+        query.set('history', '1');
+      }
+    });
+    requestAnimationFrame(() => window.scrollTo(0, 0));
+  }
+  function returnToLibrary() {
+    updateCaseLink((query) => {
+      for (const name of [
+        'view',
+        'caseId',
+        'assetRevisionId',
+        'meetingId',
+        'history',
+      ])
+        query.delete(name);
+    });
+    requestAnimationFrame(() => window.scrollTo(0, libraryScroll.current));
+  }
   function setMeeting(open: boolean) {
-    if (open && !scope) {
-      void message.info('请先选择明确的需求版本。');
+    if (open && scope) openWorkspace(scope, 'meeting');
+    else returnToLibrary();
+  }
+  function browseCase(id: string) {
+    if (scope && !caseRoute.history)
+      recentCase.current.set(scope.requirementVersionId, id);
+    updateCaseLink((query) => {
+      query.set('caseId', id);
+      query.delete('assetRevisionId');
+    }, true);
+  }
+  function scopeOf(asset: Asset): CaseScope | null {
+    if (!project) return null;
+    const requirement = navigation.requirements.find((item) =>
+      item.versions.some(
+        (version) => version.id === asset.requirementVersionId,
+      ),
+    );
+    const version = requirement?.versions.find(
+      (item) => item.id === asset.requirementVersionId,
+    );
+    if (!requirement || !version) return null;
+    return {
+      projectId: project.id,
+      requirementId: requirement.id,
+      requirementVersionId: version.id,
+      title: requirement.title,
+      versionNo: version.versionNo,
+      kind: asset.kind,
+    };
+  }
+  function openCase(asset: Asset) {
+    if (asset.kind !== 'UI' || asset.targetType !== 'case' || asset.removedAt) {
+      selectAsset(asset);
       return;
     }
-    const query = new URLSearchParams(window.location.hash.split('?')[1]);
-    if (open) {
-      query.set('view', 'meeting');
-      query.delete('assetId');
-      setSelectedId(null);
+    const next = scopeOf(asset);
+    if (!next) {
+      void message.warning('此用例所属需求版本未在当前目录取得。');
+      return;
     }
-    if (scope) {
-      query.set('projectId', scope.projectId);
-      query.set('requirementId', scope.requirementId);
-      query.set('versionId', scope.requirementVersionId);
-      query.set('title', scope.title);
-      query.set('versionNo', String(scope.versionNo));
-      query.set('kind', 'UI');
-    } else {
-      query.delete('view');
-      query.delete('meetingId');
+    recentCase.current.set(next.requirementVersionId, asset.id);
+    openWorkspace(next, 'workbench', asset.id);
+  }
+  function selectDirectoryAsset(asset: Asset) {
+    if (asset.kind !== 'UI' || asset.targetType !== 'scenario') {
+      openCase(asset);
+      return;
     }
-    window.history.replaceState(null, '', '#cases?' + query.toString());
-    setReviewWorkspace(open);
+    const next = scopeOf(asset);
+    if (!next) return;
+    if (scope?.requirementVersionId !== next.requirementVersionId)
+      changeScope(next);
+    setSceneScope({ id: asset.id, versionId: next.requirementVersionId });
+    setSelectedKeys([]);
   }
   function selectAsset(asset: Asset) {
     if (asset.setId !== batchId) setSelectedKeys([]);
@@ -759,7 +944,17 @@ export function AssetsPage({
     });
   }
   async function startPreview(objectIds: string[]) {
-    if (!project) return;
+    if (!project || !approvalKey || committing) return;
+    try {
+      const original = readApprovalRecovery(approvalKey);
+      if (original) {
+        setApprovalRecovery(original);
+        return;
+      }
+    } catch (failure) {
+      setError('无法读取原批准操作记录。' + describeError(failure));
+      return;
+    }
     const targets = assets.filter(
       (asset) => objectIds.includes(asset.id) && !asset.removedAt,
     );
@@ -788,41 +983,79 @@ export function AssetsPage({
       setPreviewLoading(false);
     }
   }
+  async function adoptApproval(
+    record: ApprovalRecovery,
+    result: ApprovalReceipt,
+  ) {
+    assertApprovalReceipt(record, result);
+    forgetApproval(approvalKey);
+    setApprovalRecovery(undefined);
+    setReceipt(result);
+    setCommitError(undefined);
+    await changed();
+    setSelectedKeys([]);
+  }
   async function approve() {
-    if (!project || !preview) return;
+    if (!project || !preview || !approvalKey || committing || approvalRecovery)
+      return;
+    const record = {
+      commandId: commitCommand.current,
+      scopeDigest: preview.scopeDigest,
+      objectIds: preview.items.map((item) => item.id),
+    };
+    setCommitting(true);
+    setCommitError(undefined);
+    try {
+      rememberApproval(approvalKey, userId, record);
+      let result;
+      try {
+        result = await api(
+          '/projects/' + project.id + '/assets/approve',
+          { method: 'POST', body: { ...record, previewId: preview.previewId } },
+          approvalCommitReceiptSchema,
+        );
+      } catch (failure) {
+        if (isUncertainMutationError(failure)) setApprovalRecovery(record);
+        else forgetApproval(approvalKey);
+        throw failure;
+      }
+      try {
+        await adoptApproval(record, result);
+      } catch (failure) {
+        setApprovalRecovery(record);
+        throw failure;
+      }
+    } catch (failure) {
+      setCommitError(describeError(failure));
+    } finally {
+      setCommitting(false);
+    }
+  }
+  async function recoverApproval() {
+    if (!project || !approvalRecovery || !approvalKey || committing) return;
     setCommitting(true);
     setCommitError(undefined);
     try {
       const result = await api(
-        `/projects/${project.id}/assets/approve`,
-        {
-          method: 'POST',
-          body: {
-            commandId: commitCommand.current,
-            previewId: preview.previewId,
-            scopeDigest: preview.scopeDigest,
-            objectIds: preview.items.map((item) => item.id),
-          },
-        },
-        approvalCommitReceiptSchema,
+        '/projects/' +
+          project.id +
+          '/assets/approval-receipts/' +
+          approvalRecovery.commandId,
+        {},
+        recoveredApprovalSchema,
       );
-      if (
-        result.scopeDigest !== preview.scopeDigest ||
-        result.results.length !== preview.items.length ||
-        new Set(result.results.map((item) => item.id)).size !==
-          preview.items.length ||
-        !preview.items.every((item) =>
-          result.results.some((row) => row.id === item.id),
-        )
-      )
-        throw new Error(
-          '批准回执范围不完整，结果需核对；请保留当前提交标识查询原回执。',
-        );
-      setReceipt(result);
-      await changed();
-      setSelectedKeys([]);
-    } catch (err) {
-      setCommitError(describeError(err));
+      if (result.status === 'completed' && result.response) {
+        await adoptApproval(approvalRecovery, result.response);
+      } else if (result.status === 'failed') {
+        forgetApproval(approvalKey);
+        setApprovalRecovery(undefined);
+        setCommitError('已确认原批准失败，请重新核对范围。');
+        setPreview(null);
+      } else {
+        setCommitError('原批准结果尚未确认。保留原提交标识，稍后核对。');
+      }
+    } catch (error) {
+      setCommitError(describeError(error));
     } finally {
       setCommitting(false);
     }
@@ -841,7 +1074,7 @@ export function AssetsPage({
             requirement.versions.some(
               (version) => version.id === asset.requirementVersionId,
             ) &&
-            (batchId === 'all' || asset.setId === batchId),
+            (kind === 'UI' || batchId === 'all' || asset.setId === batchId),
         )
         .flatMap((scenario) => {
           const scenarioMatches =
@@ -852,14 +1085,19 @@ export function AssetsPage({
               asset.targetType === 'case' &&
               asset.parentId === scenario.id &&
               (scenarioMatches ||
-                asset.title.toLocaleLowerCase().includes(keyword)),
+                (asset.title + ' ' + asset.id)
+                  .toLocaleLowerCase()
+                  .includes(keyword)),
           );
           if (!scenarioMatches && !cases.length) return [];
           const version = requirement.versions.find(
             (item) => item.id === scenario.requirementVersionId,
           );
           const set = assets.find((item) => item.id === scenario.setId);
-          const detail = [version && `v${version.versionNo}`, set?.title]
+          const detail = [
+            version && `v${version.versionNo}`,
+            kind === 'API' ? set?.title : undefined,
+          ]
             .filter(Boolean)
             .join(' · ');
           return [
@@ -894,7 +1132,7 @@ export function AssetsPage({
         },
       ];
     });
-  }, [navigation, assets, batchId, directorySearch]);
+  }, [navigation, assets, batchId, directorySearch, kind]);
   if (!project)
     return (
       <Card>
@@ -906,59 +1144,221 @@ export function AssetsPage({
     : [];
   return (
     <>
-      {reviewWorkspace && scope && kind === 'UI' && (
-        <UiReviewWorkspace
+      {readerWorkspace && scope && kind === 'UI' && (
+        <UiCaseWorkbench
           key={project.id + ':' + scope.requirementVersionId}
+          scope={{ ...scope, title: selectedRequirement?.title ?? scope.title }}
+          projectName={project.name}
           userId={userId}
-          projectId={project.id}
-          requirementVersionId={scope.requirementVersionId}
-          requirementTitle={scope.title}
-          versionNo={scope.versionNo}
-          assets={cases.filter(
-            (asset) =>
-              !asset.removedAt &&
-              asset.requirementVersionId === scope.requirementVersionId,
-          )}
-          scenarioTitles={
-            new Map(scenarios.map((asset) => [asset.id, asset.title]))
+          assets={assets}
+          requestedCase={caseRoute.caseId}
+          requestedRevision={caseRoute.revisionId}
+          meetingId={caseRoute.history ? caseRoute.meetingId : undefined}
+          archived={Boolean(selectedRequirement?.archived)}
+          available={scopeExists && !caseRoute.invalid}
+          loading={loading}
+          error={caseRoute.invalid ? '用例工作台链接无效。' : error}
+          tester={canWrite}
+          onBack={returnToLibrary}
+          onCase={browseCase}
+          onRevision={(id) =>
+            updateCaseLink((query) => {
+              if (id) query.set('assetRevisionId', id);
+              else query.delete('assetRevisionId');
+            }, true)
           }
-          initialCases={selectedKeys}
-          tester={tester}
-          onReturn={() => setMeeting(false)}
           onApprove={startPreview}
-          updated={changed}
+          onEdit={edit}
+          onDetails={selectAsset}
+          onSupplement={(asset, origin) => {
+            setCaseAction({
+              kind: 'supplement',
+              source: {
+                caseId: asset.id,
+                revisionId: asset.revisionId,
+                title: asset.title,
+                scenarioId: asset.parentId,
+                ...(origin ? { origin } : {}),
+              },
+            });
+          }}
+          onChanged={changed}
+          inlineDrafts={inlineDrafts.current}
         />
       )}
-      <div hidden={reviewWorkspace && Boolean(scope) && kind === 'UI'}>
+      {reviewWorkspace && scope && kind === 'UI' && (
+        <>
+          <StandaloneWorkbenchHeader
+            title="UI 用例评审"
+            projectName={project.name}
+            backLabel="返回 UI 用例管理"
+            onBack={returnToLibrary}
+          />
+          <main className="ui-case-workbench-main">
+            <UiReviewWorkspace
+              key={project.id + ':' + scope.requirementVersionId}
+              userId={userId}
+              projectId={project.id}
+              requirementVersionId={scope.requirementVersionId}
+              requirementTitle={scope.title}
+              versionNo={scope.versionNo}
+              assets={assets.filter(
+                (asset) =>
+                  !asset.removedAt &&
+                  asset.targetType === 'case' &&
+                  asset.requirementVersionId === scope.requirementVersionId,
+              )}
+              scenarioTitles={
+                new Map(scopeScenarios.map((asset) => [asset.id, asset.title]))
+              }
+              initialCases={selectedKeys}
+              tester={canWrite}
+              onReturn={() => setMeeting(false)}
+              onApprove={startPreview}
+              updated={changed}
+            />
+          </main>
+        </>
+      )}
+      {scope && kind === 'UI' && (
+        <>
+          <UiReviewHistory
+            projectId={project.id}
+            requirementVersionId={scope.requirementVersionId}
+            title={
+              (selectedRequirement?.title ?? scope.title) +
+              ' · v' +
+              scope.versionNo
+            }
+            open={reviewHistory}
+            onClose={() => setReviewHistory(false)}
+            onSelect={(id) => openWorkspace(scope, 'workbench', undefined, id)}
+          />
+          <UiCoverageCheck
+            scope={scope}
+            userId={userId}
+            assets={assets}
+            scenarioId={sceneId}
+            open={coverage}
+            tester={canWrite}
+            onClose={() => setCoverage(false)}
+            onCase={(asset) => {
+              setCoverage(false);
+              openCase(asset);
+            }}
+            onSupplement={(checkpoint) => {
+              setCoverage(false);
+              setCaseAction({ kind: 'new', checkpoint });
+            }}
+          />
+          {caseAction && canWrite && scopeExists && (
+            <UiCaseActionDialog
+              scope={scope}
+              userId={userId}
+              action={caseAction.kind}
+              assets={assets}
+              scenarioId={sceneId}
+              source={caseAction.source}
+              checkpoint={caseAction.checkpoint}
+              onClose={() => setCaseAction(undefined)}
+              onChanged={async () => {
+                await changed();
+                setCaseAction(undefined);
+                if (caseAction.checkpoint) setCoverage(true);
+              }}
+            />
+          )}
+        </>
+      )}
+      <div hidden={immersive}>
         <PageHeading
           eyebrow="TEST ASSETS"
-          title="UI 用例管理"
+          title={kind === 'UI' ? 'UI 用例管理' : '接口用例管理'}
           description="按需求、版本与场景维护文字用例，逐条评审和批准。"
           actions={
             <>
               {scope && (
-                <Button onClick={() => setCoverage((value) => !value)}>
-                  {coverage ? '返回用例库' : '覆盖矩阵'}
+                <Button
+                  disabled={!scopeExists || loading}
+                  onClick={() => setCoverage((value) => !value)}
+                >
+                  {kind === 'UI'
+                    ? '用例覆盖检查'
+                    : coverage
+                      ? '返回用例库'
+                      : '覆盖矩阵'}
                 </Button>
               )}
               {scope && kind === 'UI' && (
-                <Button onClick={() => setMeeting(true)}>进入用例评审</Button>
+                <>
+                  <Button
+                    disabled={loading || !scopeExists}
+                    onClick={() => setReviewHistory(true)}
+                  >
+                    评审历史
+                  </Button>
+                  <Button
+                    disabled={
+                      loading ||
+                      !scopeExists ||
+                      !assets.some(
+                        (row) => row.targetType === 'case' && !row.removedAt,
+                      )
+                    }
+                    onClick={() => {
+                      const previous = recentCase.current.get(
+                        scope.requirementVersionId,
+                      );
+                      const inScene = assets.find(
+                        (row) =>
+                          row.targetType === 'case' &&
+                          !row.removedAt &&
+                          row.parentId === sceneId,
+                      );
+                      const availablePrevious = assets.some(
+                        (row) =>
+                          row.id === previous &&
+                          !row.removedAt &&
+                          (!sceneId || row.parentId === sceneId),
+                      );
+                      openWorkspace(
+                        scope,
+                        'workbench',
+                        (availablePrevious ? previous : undefined) ??
+                          inScene?.id,
+                      );
+                    }}
+                  >
+                    打开工作台
+                  </Button>
+                  <Button
+                    disabled={loading || !scopeExists}
+                    onClick={() => setMeeting(true)}
+                  >
+                    团队评审
+                  </Button>
+                </>
               )}
-              <Button
-                icon={<PlusOutlined />}
-                disabled={
-                  !tester || !scope || !batch || Boolean(batch.removedAt)
-                }
-                onClick={() => openEditor('scenario')}
-              >
-                新增场景
-              </Button>
+              {kind === 'API' && (
+                <Button
+                  icon={<PlusOutlined />}
+                  disabled={
+                    !tester || !scope || !batch || Boolean(batch.removedAt)
+                  }
+                  onClick={() => openEditor('scenario')}
+                >
+                  新增场景
+                </Button>
+              )}
               <Button
                 type="primary"
                 icon={<AppIcon name="spark" />}
-                disabled={!tester}
+                disabled={
+                  kind === 'API' ? !tester : !canWrite || !scope || !scopeExists
+                }
                 onClick={() => {
-                  window.location.hash = 'workspace';
+                  if (kind === 'API') window.location.hash = 'workspace';
+                  else setCaseAction({ kind: 'generate' });
                 }}
               >
                 生成用例
@@ -984,7 +1384,7 @@ export function AssetsPage({
             className="section-alert"
           />
         )}
-        {coverage && scope && (
+        {coverage && scope && kind === 'API' && (
           <AssetCoverage
             projectId={project.id}
             versionId={scope.requirementVersionId}
@@ -994,7 +1394,7 @@ export function AssetsPage({
             onCase={selectAsset}
           />
         )}
-        <div hidden={coverage && Boolean(scope)}>
+        <div hidden={coverage && Boolean(scope) && kind === 'API'}>
           <div className="asset-workspace live-asset-workspace requirement-directory-layout">
             <RequirementDirectory
               includeArchived={includeArchivedRequirements}
@@ -1012,6 +1412,10 @@ export function AssetsPage({
                 setSelectedKeys([]);
                 setLoading(true);
                 setIncludeArchivedRequirements(value);
+                updateCaseLink((query) => {
+                  if (value) query.set('archived', '1');
+                  else query.delete('archived');
+                }, true);
               }}
               search={directorySearch}
               onSearchChange={setDirectorySearch}
@@ -1041,9 +1445,11 @@ export function AssetsPage({
                       ? [
                           `${assets.find((asset) => asset.id === selectedId)?.targetType ?? 'case'}:${selectedId}`,
                         ]
-                      : scope
-                        ? [`requirement:${scope.requirementId}`]
-                        : []
+                      : sceneId
+                        ? [`scenario:${sceneId}`]
+                        : scope
+                          ? [`requirement:${scope.requirementId}`]
+                          : []
                   }
                   onSelect={([key]) => {
                     if (typeof key !== 'string') return;
@@ -1053,7 +1459,7 @@ export function AssetsPage({
                       const asset = assets.find(
                         (item) => item.id === key.split(':')[1],
                       );
-                      if (asset) selectAsset(asset);
+                      if (asset) selectDirectoryAsset(asset);
                     }
                   }}
                 />
@@ -1092,7 +1498,7 @@ export function AssetsPage({
                   />
                   {scope && (
                     <Select
-                      aria-label="用例需求版本"
+                      aria-label="需求版本"
                       value={scopeExists ? scope.requirementVersionId : null}
                       placeholder="版本未在浏览目录中"
                       disabled={!selectedRequirement}
@@ -1100,29 +1506,31 @@ export function AssetsPage({
                       options={(selectedRequirement?.versions ?? []).map(
                         (v) => ({
                           value: v.id,
-                          label: `v${v.versionNo} · ${v.caseCount} 条用例`,
+                          label: `v${v.versionNo}（${v.versionNo === Math.max(...(selectedRequirement?.versions ?? []).map((entry) => entry.versionNo)) ? '当前' : '历史'}） · ${v.caseCount} 条用例`,
                         }),
                       )}
                       style={{ width: 130 }}
                     />
                   )}
-                  <Select
-                    aria-label="生成批次"
-                    value={batchId}
-                    onChange={(id) => {
-                      setBatchId(id);
-                      setSelectedKeys([]);
-                      setSelectedId(null);
-                    }}
-                    options={[
-                      { value: 'all', label: '全部批次' },
-                      ...batches.map((b) => ({
-                        value: b.id,
-                        label: b.title + (b.removedAt ? '（已移除）' : ''),
-                      })),
-                    ]}
-                    style={{ width: 170 }}
-                  />
+                  {kind === 'API' && (
+                    <Select
+                      aria-label="生成批次"
+                      value={batchId}
+                      onChange={(id) => {
+                        setBatchId(id);
+                        setSelectedKeys([]);
+                        setSelectedId(null);
+                      }}
+                      options={[
+                        { value: 'all', label: '全部批次' },
+                        ...batches.map((b) => ({
+                          value: b.id,
+                          label: b.title + (b.removedAt ? '（已移除）' : ''),
+                        })),
+                      ]}
+                      style={{ width: 170 }}
+                    />
+                  )}
                   <Button
                     size="small"
                     icon={<ReloadOutlined />}
@@ -1130,7 +1538,7 @@ export function AssetsPage({
                     onClick={() => void load()}
                     aria-label="刷新资产"
                   />
-                  {tester && (
+                  {tester && kind === 'API' && (
                     <Button
                       size="small"
                       disabled={!scope || !scopeExists}
@@ -1141,7 +1549,7 @@ export function AssetsPage({
                   )}
                 </div>
               </div>
-              {tester && scope && !batch && (
+              {tester && kind === 'API' && scope && !batch && (
                 <Alert
                   type="info"
                   showIcon
@@ -1190,13 +1598,31 @@ export function AssetsPage({
                   style={{ minWidth: 128 }}
                 />
                 <span className="grow" />
-                <Button
-                  size="small"
-                  disabled={!batch}
-                  onClick={() => batch && setSelectedId(batch.id)}
-                >
-                  测试集意见
-                </Button>
+                {kind === 'API' && (
+                  <Button
+                    size="small"
+                    disabled={!batch}
+                    onClick={() => batch && setSelectedId(batch.id)}
+                  >
+                    测试集意见
+                  </Button>
+                )}
+                {kind === 'UI' && scope && canWrite && scopeExists && (
+                  <Space>
+                    <Button
+                      size="small"
+                      onClick={() => setCaseAction({ kind: 'new' })}
+                    >
+                      新增用例
+                    </Button>
+                    <Button
+                      size="small"
+                      onClick={() => setCaseAction({ kind: 'import' })}
+                    >
+                      导入用例
+                    </Button>
+                  </Space>
+                )}
                 <Button
                   size="small"
                   type="primary"
@@ -1207,7 +1633,7 @@ export function AssetsPage({
                   预览通过已选 {selectedKeys.length} 项
                 </Button>
               </div>
-              {batch && (
+              {kind === 'API' && batch && (
                 <div className="batch-note mb">
                   <div className="between">
                     <div>
@@ -1272,12 +1698,37 @@ export function AssetsPage({
                           <div className="scene-summary">
                             <AppIcon name="folder-closed" />
                             <div className="grow">
-                              <h3>{scene.title}</h3>
+                              <h3>
+                                <button
+                                  type="button"
+                                  className="ui-case-scene-toggle"
+                                  aria-expanded={!collapsedScenes.has(scene.id)}
+                                  onClick={() =>
+                                    setCollapsedScenes((before) => {
+                                      const next = new Set(before);
+                                      if (next.has(scene.id))
+                                        next.delete(scene.id);
+                                      else next.add(scene.id);
+                                      return next;
+                                    })
+                                  }
+                                >
+                                  {scene.title}
+                                </button>
+                              </h3>
                               <p>
                                 {requirement?.title ?? '原需求未取得'} ·{' '}
-                                {batches.find((b) => b.id === scene.setId)
-                                  ?.title ?? '原批次'}{' '}
-                                · {rows.length} 条当前筛选用例
+                                {kind === 'API'
+                                  ? (batches.find((b) => b.id === scene.setId)
+                                      ?.title ?? '原批次') + ' · '
+                                  : 'v' +
+                                    (requirement?.versions.find(
+                                      (version) =>
+                                        version.id ===
+                                        scene.requirementVersionId,
+                                    )?.versionNo ?? '—') +
+                                    ' · '}
+                                {rows.length} 条当前筛选用例
                               </p>
                             </div>
                             <ReviewStateTag state={scene.reviewState} />
@@ -1287,7 +1738,7 @@ export function AssetsPage({
                             >
                               场景意见
                             </Button>
-                            {tester && (
+                            {canWrite && (
                               <Button
                                 size="small"
                                 disabled={!scope || Boolean(scene.removedAt)}
@@ -1297,52 +1748,57 @@ export function AssetsPage({
                               </Button>
                             )}
                           </div>
-                          {rows.map((asset) => (
-                            <div className="case-row" key={asset.id}>
-                              <Checkbox
-                                aria-label={`选择${asset.title}`}
-                                disabled={!tester || Boolean(asset.removedAt)}
-                                checked={selectedKeys.includes(asset.id)}
-                                onChange={(e) =>
-                                  setSelectedKeys((keys) =>
-                                    e.target.checked
-                                      ? [...keys, asset.id]
-                                      : keys.filter((id) => id !== asset.id),
-                                  )
-                                }
-                              />
-                              <div className="grow">
-                                <h3>{asset.title}</h3>
-                                <p>
-                                  {asset.id} · 编辑 r{asset.revisionNo}
-                                  {'dslVersion' in asset.content
-                                    ? ` · ${asset.content.steps.length} 个请求`
-                                    : ''}
-                                  {asset.removedAt ? ' · 已移除，历史保留' : ''}
-                                </p>
+                          {!collapsedScenes.has(scene.id) &&
+                            rows.map((asset) => (
+                              <div className="case-row" key={asset.id}>
+                                <Checkbox
+                                  aria-label={`选择${asset.title}`}
+                                  disabled={!tester || Boolean(asset.removedAt)}
+                                  checked={selectedKeys.includes(asset.id)}
+                                  onChange={(e) =>
+                                    setSelectedKeys((keys) =>
+                                      e.target.checked
+                                        ? [...keys, asset.id]
+                                        : keys.filter((id) => id !== asset.id),
+                                    )
+                                  }
+                                />
+                                <div className="grow">
+                                  <h3>{asset.title}</h3>
+                                  <p>
+                                    {asset.id} · 编辑 r{asset.revisionNo}
+                                    {'dslVersion' in asset.content
+                                      ? ` · ${asset.content.steps.length} 个请求`
+                                      : ''}
+                                    {asset.removedAt
+                                      ? ' · 已移除，历史保留'
+                                      : ''}
+                                  </p>
+                                </div>
+                                <ReviewStateTag state={asset.reviewState} />
+                                <Button
+                                  size="small"
+                                  onClick={() => openCase(asset)}
+                                >
+                                  {kind === 'UI' && !asset.removedAt
+                                    ? '打开用例'
+                                    : '查看'}
+                                </Button>
+                                {canWrite &&
+                                  asset.reviewState !== 'approved' &&
+                                  !asset.removedAt && (
+                                    <Button
+                                      size="small"
+                                      onClick={() =>
+                                        void startPreview([asset.id])
+                                      }
+                                    >
+                                      通过
+                                    </Button>
+                                  )}
                               </div>
-                              <ReviewStateTag state={asset.reviewState} />
-                              <Button
-                                size="small"
-                                onClick={() => selectAsset(asset)}
-                              >
-                                查看
-                              </Button>
-                              {tester &&
-                                asset.reviewState !== 'approved' &&
-                                !asset.removedAt && (
-                                  <Button
-                                    size="small"
-                                    onClick={() =>
-                                      void startPreview([asset.id])
-                                    }
-                                  >
-                                    通过
-                                  </Button>
-                                )}
-                            </div>
-                          ))}
-                          {!rows.length && (
+                            ))}
+                          {!collapsedScenes.has(scene.id) && !rows.length && (
                             <div className="case-row">
                               <p className="caption">
                                 此场景在当前筛选下暂无具体用例，场景本身仍独立保留。
@@ -1373,7 +1829,7 @@ export function AssetsPage({
               <div className="between mt">
                 <p className="caption">
                   当前 {cases.length} 条 · 已选择 {selectedKeys.length}{' '}
-                  条。不同批次独立评审；生成入口进入真实 AI 工作台后明确范围。
+                  条。生成和维护按所选需求版本办理。
                 </p>
                 <Checkbox
                   checked={includeRemoved}
@@ -1459,7 +1915,7 @@ export function AssetsPage({
             >
               <ContentView content={revision.content} />
             </Card>
-            {tester && !detail.asset.removedAt && (
+            {canWrite && !detail.asset.removedAt && (
               <Space wrap>
                 <Button
                   icon={<EditOutlined />}
@@ -1500,7 +1956,7 @@ export function AssetsPage({
               projectId={project.id}
               asset={detail.asset}
               revisionId={revision.id}
-              tester={tester && !detail.asset.removedAt}
+              tester={canWrite && !detail.asset.removedAt}
               onChanged={changed}
             />
           </Space>
@@ -1515,27 +1971,47 @@ export function AssetsPage({
       />
       <Modal
         title="人工批准 · 精确范围预览"
-        open={preview !== null}
+        open={preview !== null || Boolean(approvalRecovery) || receipt !== null}
         width={1050}
         onCancel={() => {
-          if (!committing) setPreview(null);
+          if (committing || approvalRecovery) return;
+          setPreview(null);
+          setReceipt(null);
         }}
-        closable={!committing}
-        maskClosable={!committing}
+        closable={!committing && !approvalRecovery}
+        maskClosable={!committing && !approvalRecovery}
+        keyboard={!committing && !approvalRecovery}
         footer={
           <Space>
-            <Button disabled={committing} onClick={() => setPreview(null)}>
+            <Button
+              disabled={committing || Boolean(approvalRecovery)}
+              onClick={() => {
+                setPreview(null);
+                setReceipt(null);
+              }}
+            >
               {receipt ? '关闭回执' : '取消'}
             </Button>
-            {!receipt && (
+            {approvalRecovery ? (
               <Button
                 type="primary"
                 loading={committing}
-                disabled={!preview?.items.some((item) => item.eligible)}
-                onClick={() => void approve()}
+                onClick={() => void recoverApproval()}
               >
-                确认批准预览中的精确对象
+                查询原批准回执
               </Button>
+            ) : (
+              !receipt &&
+              preview && (
+                <Button
+                  type="primary"
+                  loading={committing}
+                  disabled={!preview.items.some((item) => item.eligible)}
+                  onClick={() => void approve()}
+                >
+                  确认批准预览中的精确对象
+                </Button>
+              )
             )}
           </Space>
         }
@@ -1545,13 +2021,28 @@ export function AssetsPage({
           确认绑定下列
           ID、修订、基准和摘要，不重新扩大筛选。逐项冲突或上层阻塞会独立返回；没有可批准项时不能确认。
         </Typography.Paragraph>
-        {commitError && (
+        {(commitError || approvalRecovery) && (
           <Alert
-            type="error"
-            title={commitError}
+            type={approvalRecovery ? 'warning' : 'error'}
+            title={commitError ?? '有原批准操作等待核对。'}
+            description={approvalRecovery?.commandId}
             showIcon
             className="section-alert"
           />
+        )}
+        {!preview && receipt && (
+          <ul>
+            {receipt.results.map((entry) => (
+              <li key={entry.id}>
+                {entry.id} ·{' '}
+                {entry.status === 'approved'
+                  ? '已批准'
+                  : entry.status === 'conflict'
+                    ? '编辑基准已变化'
+                    : entry.reasons.join('；')}
+              </li>
+            ))}
+          </ul>
         )}
         {preview && (
           <>

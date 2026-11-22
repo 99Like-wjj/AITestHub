@@ -33,6 +33,7 @@ import {
   createSetInputSchema,
   createScenarioInputSchema,
   createCaseInputSchema,
+  createScopedCaseInputSchema,
 } from '../../../contracts/src/assets.js';
 import {
   createPlanInputSchema,
@@ -51,6 +52,11 @@ import {
 import type { Database } from '../../../persistence/src/database.js';
 import { requireProject } from '../access/policy.js';
 import { AssetService } from '../assets/service.js';
+import { CoverageCheckpointService } from '../assets/coverage-checkpoints.js';
+import {
+  coverageCheckpointScopeSchema,
+  saveCoverageCheckpointInputSchema,
+} from '../../../contracts/src/coverage-checkpoints.js';
 import { ReviewService } from '../assets/reviews.js';
 import { UiReviewService } from '../assets/ui-review.js';
 import { uiReviewReplySchema } from '../../../contracts/src/ui-reviews.js';
@@ -226,6 +232,11 @@ export function createBusinessRegistry(
       assets.createScenario.bind(assets),
     ],
     ['create-case', createCaseInputSchema, assets.createCase.bind(assets)],
+    [
+      'create-scoped-case',
+      createScopedCaseInputSchema,
+      assets.createScopedCase.bind(assets),
+    ],
   ] as const)
     add(
       'ath_assets',
@@ -235,6 +246,25 @@ export function createBusinessRegistry(
       'write',
       (a, i) => method(a, i.projectId, i.input),
     );
+  const checkpoints = new CoverageCheckpointService(assets.db);
+  add(
+    'ath_assets',
+    assetDescription,
+    'list-coverage-checkpoints',
+    shape('list-coverage-checkpoints', coverageCheckpointScopeSchema),
+    'read',
+    (actor, request) =>
+      checkpoints.list(actor, request.projectId, request.input),
+  );
+  add(
+    'ath_assets',
+    assetDescription,
+    'save-coverage-checkpoint',
+    shape('save-coverage-checkpoint', saveCoverageCheckpointInputSchema),
+    'write',
+    (actor, request) =>
+      checkpoints.save(actor, request.projectId, request.input),
+  );
   add(
     'ath_assets',
     assetDescription,

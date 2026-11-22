@@ -8,12 +8,14 @@ import type {
   JsonValue,
   WorkerTransport,
 } from '../../../packages/contracts/src/api-execution.js';
+import { encodeMultipart, type MultipartFileLoader } from './multipart-body.js';
 
 export interface RawTransportResponse {
   status: number | null;
   headers: Record<string, string>;
   body: JsonValue;
   elapsedMs: number;
+  receivedBytes?: number;
   errorCode: string | null;
   sideEffectCertainty: 'known' | 'unknown';
 }
@@ -42,10 +44,45 @@ function captureBody(bytes: Buffer): JsonValue {
 async function requestHttp(
   transport: Extract<WorkerTransport, { type: 'http' }>,
   signal?: AbortSignal,
+  loadMultipartFile?: MultipartFileLoader,
 ): Promise<RawTransportResponse> {
   const started = performance.now();
-  const body =
+  const notSent = (errorCode: string): RawTransportResponse => ({
+    status: null,
+    headers: {},
+    body: { dispatchCertainty: 'notDispatched' },
+    elapsedMs: Math.max(0, Math.round(performance.now() - started)),
+    errorCode,
+    sideEffectCertainty: 'known',
+  });
+  let body =
     transport.body === null ? null : Buffer.from(transport.body, 'utf8');
+  let multipartContentType: string | undefined;
+  if (transport.multipart) {
+    if (
+      body !== null ||
+      ['GET', 'HEAD'].includes(transport.method.toUpperCase()) ||
+      Object.keys(transport.headers).some(
+        (name) => name.toLowerCase() === 'content-type',
+      )
+    )
+      return notSent('REQUEST_NOT_DISPATCHED_HEADER_CONFLICT');
+    try {
+      const encoded = await encodeMultipart(
+        transport.multipart,
+        loadMultipartFile,
+        signal,
+      );
+      body = encoded.body;
+      multipartContentType = encoded.contentType;
+    } catch {
+      return notSent(
+        signal?.aborted
+          ? 'REQUEST_NOT_DISPATCHED_INTERRUPTED'
+          : 'REQUEST_NOT_DISPATCHED_FILE_UNAVAILABLE',
+      );
+    }
+  }
   const length = body?.length ?? 0;
   const suppliedLengths = Object.entries(transport.headers).filter(
     ([name]) => name.toLowerCase() === 'content-length',
@@ -59,14 +96,7 @@ async function requestHttp(
   ) {
     // The control plane already rejects these DSL headers. Refuse an inconsistent
     // transport envelope before creating a ClientRequest; no permit is replayed.
-    return {
-      status: null,
-      headers: {},
-      body: { dispatchCertainty: 'notDispatched' },
-      elapsedMs: Math.max(0, Math.round(performance.now() - started)),
-      errorCode: 'REQUEST_NOT_DISPATCHED_HEADER_CONFLICT',
-      sideEffectCertainty: 'known',
-    };
+    return notSent('REQUEST_NOT_DISPATCHED_HEADER_CONFLICT');
   }
   const headers = Object.fromEntries(
     Object.entries(transport.headers).filter(
@@ -76,6 +106,7 @@ async function requestHttp(
   // Node does not enable chunked bodies automatically for DELETE. Frame the
   // actual encoded bytes for every non-null body, including an empty string.
   if (body !== null) headers['content-length'] = String(length);
+  if (multipartContentType) headers['content-type'] = multipartContentType;
   return new Promise((resolve) => {
     let finished = false;
     const settle = (response: Omit<RawTransportResponse, 'elapsedMs'>) => {
@@ -122,6 +153,7 @@ async function requestHttp(
               status: response.statusCode ?? null,
               headers,
               body: captureBody(Buffer.concat(chunks)),
+              receivedBytes: size,
               errorCode: null,
               sideEffectCertainty: 'known',
             });
@@ -252,8 +284,9 @@ async function requestSql(
 export async function performTransport(
   transport: WorkerTransport,
   signal?: AbortSignal,
+  loadMultipartFile?: MultipartFileLoader,
 ): Promise<RawTransportResponse> {
   return transport.type === 'http'
-    ? requestHttp(transport, signal)
+    ? requestHttp(transport, signal, loadMultipartFile)
     : requestSql(transport);
 }

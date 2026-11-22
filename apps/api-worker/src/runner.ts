@@ -7,6 +7,7 @@ import {
   type RuntimeVariables,
   type SafeResponse,
 } from '../../../packages/contracts/src/api-execution.js';
+import { multipartTransportSchema } from '../../../packages/contracts/src/api-multipart.js';
 import {
   apiRequestStepSchema,
   assertionSchema,
@@ -37,6 +38,7 @@ const permitSchema = z.discriminatedUnion('send', [
     intentId: z.uuid(),
     transport: z.unknown(),
     protectedValues: z.array(z.string()),
+    responseMetadataOnly: z.boolean().optional(),
     assertions: z.array(assertionSchema).optional(),
     authExtractor: z
       .strictObject({
@@ -57,6 +59,7 @@ const httpSchema = z.strictObject({
   method: z.string(),
   headers: z.record(z.string(), z.string()),
   body: z.string().nullable(),
+  multipart: multipartTransportSchema.optional(),
   timeoutMs: z.number().int().min(1).max(120000),
 });
 const sqlSchema = z.strictObject({
@@ -102,8 +105,20 @@ function stableCode(error: unknown): string {
 function safeResponse(
   raw: RawTransportResponse,
   values: string[],
-  withheld?: 'authentication' | 'sensitive-extraction',
+  withheld?: 'authentication' | 'sensitive-extraction' | 'multipart file',
 ): SafeResponse {
+  if (withheld)
+    return {
+      status: raw.status,
+      headers: {},
+      body: `[${withheld} response withheld]`,
+      elapsedMs: raw.elapsedMs,
+      ...(raw.receivedBytes === undefined
+        ? {}
+        : { receivedBytes: raw.receivedBytes }),
+      errorCode: raw.errorCode,
+      redactionVersion: 'ath.api-redaction.v1',
+    };
   const filtered = redactWithPaths(
     { headers: raw.headers, body: raw.body },
     values,
@@ -113,9 +128,12 @@ function safeResponse(
     .parse(filtered);
   return {
     status: raw.status,
-    headers: withheld ? {} : parsed.headers,
-    body: withheld ? `[${withheld} response withheld]` : parsed.body,
+    headers: parsed.headers,
+    body: parsed.body,
     elapsedMs: raw.elapsedMs,
+    ...(raw.receivedBytes === undefined
+      ? {}
+      : { receivedBytes: raw.receivedBytes }),
     errorCode: raw.errorCode,
     redactionVersion: 'ath.api-redaction.v1',
   };
@@ -311,6 +329,7 @@ export async function runAssigned(
         step: z.infer<typeof apiRequestStepSchema>,
         response?: RawTransportResponse,
         tentative: Record<string, JsonValue> = {},
+        responseMetadataOnly = false,
       ) => {
         if (!script) return { variables: {}, assertions: [] };
         const extractionShadow = { ...variables.extract, ...tentative };
@@ -323,8 +342,8 @@ export async function runAssigned(
             ? {
                 response: {
                   status: response.status,
-                  headers: response.headers,
-                  body: response.body,
+                  headers: responseMetadataOnly ? {} : response.headers,
+                  body: responseMetadataOnly ? '[REDACTED]' : response.body,
                 },
               }
             : {}),
@@ -334,7 +353,15 @@ export async function runAssigned(
           paths.map((path) => `/extract/${pointer(name)}${path}`),
         );
         return runIsolatedScript(script, safe.value, {
-          protectedPaths: [...new Set([...safe.protectedPaths, ...inherited])],
+          protectedPaths: [
+            ...new Set([
+              ...safe.protectedPaths,
+              ...inherited,
+              ...(responseMetadataOnly
+                ? ['/response/headers', '/response/body']
+                : []),
+            ]),
+          ],
           ...(options.signal ? { signal: options.signal } : {}),
         });
       };
@@ -441,22 +468,34 @@ export async function runAssigned(
         }
         for (const value of permit.protectedValues) protectedValues.add(value);
         assertLive();
+        const responseMetadataOnly = permit.responseMetadataOnly === true;
         const raw = await performTransport(
           transportSchema.parse(permit.transport),
           options.signal,
+          (file) =>
+            client.multipartFile(
+              grant,
+              permit.intentId,
+              file.fileResourceId,
+              file.bytes,
+              options.signal,
+            ),
         );
         let passed = raw.errorCode === null;
         let reason = passed
           ? '请求返回并完成校验。'
-          : '响应不可用，副作用可能未知，不重发。';
+          : raw.errorCode?.startsWith('REQUEST_NOT_DISPATCHED_')
+            ? '本步未发送，被测目标未收到此请求。'
+            : '响应不可用，副作用可能未知，不重发。';
         let assertions: EvaluatedAssertion[] = [];
         const extracted: Record<string, JsonValue> = {};
         let invalidSensitiveExtraction = false;
         for (const extractor of step?.extractors ?? []) {
           if (!extractor.sensitive) continue;
           const value = extractionValue(extractor, raw);
-          if (validSensitiveExtraction(value)) protectedValues.add(value);
-          else if (value !== undefined && value !== null && value !== '')
+          if (validSensitiveExtraction(value)) {
+            if (!responseMetadataOnly) protectedValues.add(value);
+          } else if (value !== undefined && value !== null && value !== '')
             invalidSensitiveExtraction = true;
         }
         if (invalidSensitiveExtraction) {
@@ -488,15 +527,22 @@ export async function runAssigned(
               reason = 'REQUIRED_EXTRACTION_MISSING';
             }
           }
-          const responseProtection = redactWithPaths(
-            { headers: raw.headers, body: raw.body },
-            [...protectedValues],
-          );
-          for (const value of responseProtection.protectedValues())
-            protectedValues.add(value);
+          if (!responseMetadataOnly) {
+            const responseProtection = redactWithPaths(
+              { headers: raw.headers, body: raw.body },
+              [...protectedValues],
+            );
+            for (const value of responseProtection.protectedValues())
+              protectedValues.add(value);
+          }
           const tentative: Record<string, JsonValue> = {};
           for (const [name, value] of Object.entries(extracted)) {
             rawExtracts[name] = value;
+            if (responseMetadataOnly) {
+              tentative[name] = '[REDACTED]';
+              extractPaths.set(name, ['']);
+              continue;
+            }
             const extractor = step.extractors.find(
               (entry) => entry.name === name,
             );
@@ -512,7 +558,13 @@ export async function runAssigned(
               protectedValues.add(value);
           }
           try {
-            const post = await scripts(step.postScript, step, raw, tentative);
+            const post = await scripts(
+              step.postScript,
+              step,
+              raw,
+              tentative,
+              responseMetadataOnly,
+            );
             mergeVariables(post.variables);
             assertions.push(...post.assertions);
             if (post.assertions.some((assertion) => !assertion.passed)) {
@@ -529,10 +581,19 @@ export async function runAssigned(
         const response = safeResponse(
           raw,
           secrets,
-          invalidSensitiveExtraction ? 'sensitive-extraction' : undefined,
+          responseMetadataOnly && raw.status !== null
+            ? 'multipart file'
+            : invalidSensitiveExtraction
+              ? 'sensitive-extraction'
+              : undefined,
         );
         const recordedAssertions: AssertionEvidence[] = assertions.map(
           (assertion) => {
+            if (responseMetadataOnly)
+              return {
+                passed: assertion.passed,
+                message: assertion.passed ? '断言通过' : '断言未通过',
+              };
             const comparison = assertion.check
               ? comparisonFor(
                   assertion.check,

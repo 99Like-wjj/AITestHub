@@ -1,0 +1,41 @@
+.standalone-workbench-header {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px clamp(12px, 2vw, 32px);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.standalone-workbench-header-left {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.standalone-workbench-header-left img {
+  width: 106px;
+  height: auto;
+}
+
+:root[data-theme='dark'] .standalone-workbench-header-left img {
+  filter: grayscale(1) brightness(0) invert(1);
+}
+
+.standalone-workbench-project {
+  min-width: 0;
+  max-width: 44%;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 650px) {
+  .standalone-workbench-header-left img {
+    display: none;
+  }
+}

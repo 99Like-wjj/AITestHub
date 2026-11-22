@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { MultipartTransport } from './api-multipart.js';
 import { idSchema,commandIdSchema,sha256Schema, persistedRowVersionSchema } from './base.js';
 import { assetSchema } from './assets.js';
 import {
@@ -39,6 +40,7 @@ export const safeResponseSchema = z.strictObject({
   headers: z.record(z.string(), z.string()),
   body: jsonSchema,
   elapsedMs: z.number().int().min(0),
+  receivedBytes: z.number().int().min(0).max(512 * 1024).optional(),
   errorCode: z.string().max(100).nullable(),
   redactionVersion: z.literal('ath.api-redaction.v1'),
 });
@@ -100,6 +102,7 @@ export interface HttpTransport {
   method: string;
   headers: Record<string, string>;
   body: string | null;
+  multipart?: MultipartTransport | undefined;
   timeoutMs: number;
 }
 export interface SqlTransport {
@@ -122,6 +125,7 @@ export const debugScopeItemSchema = scopeItemSchema.extend({
   approvalSnapshotId: z.null(),
   content: apiCaseContentSchema,
 });
+const diagnosticStepIdSchema = apiCaseContentSchema.shape.steps.element.shape.stepId;
 export const debugExecutionScopeSchema = z.strictObject({
   ...executionScopeSchema.shape,
   schemaVersion: z.literal('ath.debug-execution-scope.v1'),
@@ -129,8 +133,22 @@ export const debugExecutionScopeSchema = z.strictObject({
   sourceType: z.literal('debug'),
   items: z.array(debugScopeItemSchema).min(1).max(1),
   draftHash: sha256Schema,
+  diagnosticStepId: diagnosticStepIdSchema.optional(),
   cleanupApprovalSnapshotId: idSchema.nullable(),
-});
+  }).superRefine((scope, context) => {
+    if (scope.diagnosticStepId === undefined) return;
+    const item = scope.items[0];
+    if (
+      item?.content.steps.length !== 1 ||
+      item.content.steps[0]?.stepId !== scope.diagnosticStepId ||
+      item.content.cleanup.mode !== 'none' ||
+      item.preparationSources?.length ||
+      item.content.preparations?.length ||
+      scope.cleanupApprovalSnapshotId !== null
+    )
+      context.addIssue({ code: 'custom', path: ['diagnosticStepId'], message: '单步诊断须固定选定步骤，不能携带准备、清理或清理批准。' });
+  });
+
 export const apiExecutionScopeSchema = z.discriminatedUnion('schemaVersion', [
   executionScopeSchema,
   debugExecutionScopeSchema,
@@ -148,6 +166,7 @@ export const startDebugInputSchema = z
     sourceCaseId: idSchema.nullable(),
     sourceCaseRevisionId: idSchema.nullable(),
     scenarioRevisionId: idSchema.optional(),
+    stepId: diagnosticStepIdSchema.optional(),
     content: apiCaseContentSchema,
   })
   .refine(
@@ -173,6 +192,7 @@ export const debugStartReceiptSchema = z.strictObject({
   state: z.literal('prepared'),
   draftHash: sha256Schema,
   sourceChanged: z.boolean(),
+  diagnosticStepId: diagnosticStepIdSchema.optional(),
   formal: z.literal(false),
   approvalSnapshotId: z.null(),
   cleanupApprovalSnapshotId: idSchema.nullable(),
@@ -182,6 +202,18 @@ export const debugReceiptLookupSchema = z.strictObject({
   commandId: commandIdSchema,
   status: z.enum(['accepted', 'pending', 'failed', 'unknown']),
   receipt: debugStartReceiptSchema.nullable(),
+});
+export const debugHistorySchema = z.strictObject({
+  rounds: z.array(z.strictObject({
+    runId: idSchema,
+    environmentId: idSchema,
+    diagnosticStepId: diagnosticStepIdSchema.optional(),
+    sourceRevisionNo: z.number().int().positive().nullable(),
+    state: runStateSchema,
+    createdAt: z.iso.datetime(),
+    expiresAt: z.iso.datetime(),
+    qualificationRetained: z.boolean(),
+  })).max(50),
 });
 export const apiRegressionQualificationSchema = z.strictObject({
   snapshotId: idSchema,
@@ -303,6 +335,7 @@ export interface SendPermit {
   intentId: string;
   transport: WorkerTransport;
   protectedValues: string[];
+  responseMetadataOnly?: boolean;
   assertions?: z.infer<typeof assertionSchema>[];
   authExtractor?: { source: 'json' | 'header' | 'body'; path: string };
 }

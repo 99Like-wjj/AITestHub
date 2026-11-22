@@ -54,12 +54,30 @@ const workItem = z.strictObject({
   }).optional(),
 });
 
+export const uiCaseAssessmentOutcomeSchema = z.enum([
+  'resolved',
+  'needsRework',
+  'inconclusive',
+]);
+
+const uiCaseAssessmentSchema = z.strictObject({
+  caseId: idSchema,
+  revisionId: idSchema,
+  round: roundNo,
+  outcome: uiCaseAssessmentOutcomeSchema,
+  note: opinionBody,
+  instruction: opinionBody.optional(),
+  actorId: idSchema,
+  time: timestampSchema,
+});
+
 export const uiReviewMeetingStateSchema = z.strictObject({
   scope: z.array(basis),
   draftOpinions: z.array(opinion),
   noChange: z.array(basis),
   opinions: z.array(opinion),
   items: z.array(workItem),
+  assessments: z.array(uiCaseAssessmentSchema).optional(),
   finalized: z.boolean(),
 });
 export type UiReviewMeetingState = z.infer<typeof uiReviewMeetingStateSchema>;
@@ -118,6 +136,16 @@ export const uiReviewUpdateSchema = z.discriminatedUnion('action', [
     decision: z.enum(['resolve', 'return']),
     instruction: opinionBody.optional(),
   }),
+  z.strictObject({
+    commandId: commandIdSchema,
+    action: z.literal('assess-case'),
+    rowVersion,
+    caseId: idSchema,
+    revisionId: idSchema,
+    outcome: uiCaseAssessmentOutcomeSchema,
+    note: opinionBody,
+    instruction: opinionBody.optional(),
+  }),
 ]);
 export const uiReviewRoomSummarySchema = z.strictObject({
   id: idSchema,
@@ -128,6 +156,16 @@ export const uiReviewRoomSummarySchema = z.strictObject({
   caseCount: z.number().int().nonnegative(),
   finalized: z.boolean(),
 });
+export const uiCaseReviewStageListSchema = z.strictObject({
+  items: z.array(
+    z.strictObject({
+      caseId: idSchema,
+      revisionId: idSchema,
+      stage: z.enum(['pending', 'needsOptimization', 'waitingHuman', 'approved']),
+    }),
+  ),
+});
+
 export const uiReviewMeetingListSchema = z.strictObject({ meetings: z.array(uiReviewRoomSummarySchema) });
 export const uiReviewMeetingMutationSchema = z.strictObject({ meeting: uiReviewRoomSummarySchema });
 export const uiReviewMeetingDetailSchema = uiReviewMeetingMutationSchema.extend({

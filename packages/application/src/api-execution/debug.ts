@@ -6,6 +6,7 @@ import {
   debugStartReceiptSchema,
   debugTraceSchema,
   debugReceiptLookupSchema,
+  debugHistorySchema,
 } from '../../../contracts/src/api-execution.js';
 import {
   apiCaseContentSchema,
@@ -67,6 +68,24 @@ export class ApiDebugService {
   }
   async start(actor: ActorContext, projectId: string, raw: unknown) {
     const input = startDebugInputSchema.parse(raw);
+    const stepId = input.stepId;
+    const selectedStep = input.content.steps.find(
+      (step) => step.stepId === stepId,
+    );
+    if (stepId !== undefined && !selectedStep)
+      throw new DomainError(
+        'PRECONDITIONS_MISSING',
+        '此草稿没有所选诊断步骤。',
+        422,
+      );
+    const diagnosticContent = selectedStep
+      ? apiCaseContentSchema.parse({
+          ...input.content,
+          steps: [selectedStep],
+          cleanup: { mode: 'none' },
+          preparations: undefined,
+        })
+      : input.content;
     try {
       assertSafeModelInput(input.content);
     } catch {
@@ -135,33 +154,35 @@ export class ApiDebugService {
           )
             throw new DomainError('NOT_FOUND', '没有该来源用例修订。', 404);
           sourceChanged = source.current_revision_id !== sourceRevisionId;
-          try {
-            const approved = await latestApiRegressionInTransaction(
-              transaction,
-              projectId,
-              source.id,
-            );
-            // Cleanup inputs include its data-producing steps/variables, not merely an equal SQL string.
-            if (
-              canonicalJson(
-                executable(
-                  apiCaseContentSchema.parse(approved.snapshot.case.content),
-                ),
-              ) === canonicalJson(executable(input.content))
-            )
-              cleanupApprovalId = approved.approval.id;
-          } catch (error: unknown) {
-            if (!(
-              error instanceof DomainError &&
-              ['PRECONDITIONS_MISSING', 'NOT_FOUND'].includes(error.code)
-            ))
-              throw error;
+          if (stepId === undefined) {
+            try {
+              const approved = await latestApiRegressionInTransaction(
+                transaction,
+                projectId,
+                source.id,
+              );
+              // Cleanup inputs include its data-producing steps/variables, not merely an equal SQL string.
+              if (
+                canonicalJson(
+                  executable(
+                    apiCaseContentSchema.parse(approved.snapshot.case.content),
+                  ),
+                ) === canonicalJson(executable(input.content))
+              )
+                cleanupApprovalId = approved.approval.id;
+            } catch (error: unknown) {
+              if (!(
+                error instanceof DomainError &&
+                ['PRECONDITIONS_MISSING', 'NOT_FOUND'].includes(error.code)
+              ))
+                throw error;
+            }
           }
         }
         const composition = await freezeApiCaseComposition(
           transaction,
           projectId,
-          input.content,
+          diagnosticContent,
         );
         const variants = materializedApiRows(composition);
         const chosen = input.dataRowId
@@ -244,6 +265,7 @@ export class ApiDebugService {
           environmentRevisionId: configuration.environment.revisionId,
           productBuild: input.productBuild,
           content: input.content,
+          ...(stepId !== undefined ? { diagnosticStepId: stepId } : {}),
           ...(chosen.dataRow ? { dataRowId: chosen.dataRow.id } : {}),
         });
         const base = {
@@ -257,6 +279,7 @@ export class ApiDebugService {
           environmentRevisionId: configuration.environment.revisionId,
           productBuild: input.productBuild,
           draftHash,
+          ...(stepId !== undefined ? { diagnosticStepId: stepId } : {}),
           cleanupApprovalSnapshotId: cleanupApprovalId,
           items: [
             {
@@ -310,7 +333,7 @@ export class ApiDebugService {
             runId,
             input.sourceCaseId,
             JSON.stringify(scope.items[0]),
-            input.content.cleanup.mode === 'none' ? 'notConfigured' : 'pending',
+            effective.cleanup.mode === 'none' ? 'notConfigured' : 'pending',
           ],
         );
         await transaction.query(
@@ -345,6 +368,7 @@ export class ApiDebugService {
             draftHash,
             sourceCaseId: input.sourceCaseId,
             formalApproval: false,
+            ...(stepId !== undefined ? { diagnosticStepId: stepId } : {}),
           },
         );
         return debugStartReceiptSchema.parse({
@@ -352,6 +376,7 @@ export class ApiDebugService {
           state: 'prepared',
           draftHash,
           sourceChanged,
+          ...(stepId !== undefined ? { diagnosticStepId: stepId } : {}),
           formal: false,
           approvalSnapshotId: null,
           cleanupApprovalSnapshotId: cleanupApprovalId,
@@ -468,6 +493,51 @@ export class ApiDebugService {
           : null,
     });
   }
+  async history(actor: ActorContext, projectId: string, caseId: string) {
+    return this.db.transaction(async (transaction) => {
+      await requireProject(transaction, actor, projectId, 'project.read');
+      const asset = await getAsset(transaction, projectId, caseId, true);
+      if (asset.kind !== 'API' || asset.target_type !== 'case')
+        throw new DomainError('NOT_FOUND', '此项目没有该接口用例。', 404);
+      const rows = await transaction.query<{
+        run_id: string;
+        environment_id: string;
+        diagnostic_step_id: string | null;
+        source_revision_no: number | null;
+        state: string;
+        created_at: Date;
+        expires_at: Date;
+        retained: boolean;
+      }>(
+        `SELECT d.run_id,r.environment_id,r.scope_snapshot->>'diagnosticStepId' diagnostic_step_id,
+            v.revision_no source_revision_no,r.state,d.created_at,d.expires_at,
+            q.snapshot_id IS NOT NULL retained
+          FROM app.api_debug_drafts d
+          JOIN app.runs r ON r.id=d.run_id AND r.project_id=d.project_id AND r.source='debug'
+          LEFT JOIN app.asset_revisions v ON v.id=d.source_case_revision_id AND v.project_id=d.project_id
+          LEFT JOIN app.api_regression_qualifications q ON q.debug_run_id=d.run_id AND q.project_id=d.project_id
+          WHERE d.project_id=$1 AND d.source_case_id=$2
+            AND (d.expires_at>clock_timestamp() OR q.snapshot_id IS NOT NULL)
+          ORDER BY d.created_at DESC,d.run_id DESC LIMIT 50`,
+        [projectId, caseId],
+      );
+      return debugHistorySchema.parse({
+        rounds: rows.rows.map((row) => ({
+          runId: row.run_id,
+          environmentId: row.environment_id,
+          ...(row.diagnostic_step_id
+            ? { diagnosticStepId: row.diagnostic_step_id }
+            : {}),
+          sourceRevisionNo: row.source_revision_no,
+          state: row.state,
+          createdAt: row.created_at.toISOString(),
+          expiresAt: row.expires_at.toISOString(),
+          qualificationRetained: row.retained,
+        })),
+      });
+    });
+  }
+
   async trace(actor: ActorContext, projectId: string, runId: string) {
     return this.db.transaction(async (transaction) => {
       await requireProject(transaction, actor, projectId, 'project.read');

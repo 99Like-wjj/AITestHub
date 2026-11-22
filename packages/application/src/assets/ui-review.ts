@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  uiCaseReviewStageListSchema,
   uiReviewMeetingStateSchema,
   uiReviewReplySchema,
   uiReviewStartSchema,
@@ -48,6 +49,70 @@ function meetingSummary(row: Room, state: UiReviewMeetingState) {
     createdAt: row.created_at.toISOString(),
     caseCount: row.case_ids.length,
     finalized: state.finalized,
+  };
+}
+
+async function readArchivedReview(
+  tx: SqlExecutor,
+  projectId: string,
+  room: Room,
+  state: UiReviewMeetingState,
+  assets: AssetRow[],
+  caseId?: string,
+) {
+  if (!state.finalized)
+    throw new DomainError(
+      'PRECONDITIONS_MISSING',
+      '这份评审尚未定稿，请从当前评审入口查看。',
+      422,
+    );
+  if (caseId && !room.case_ids.includes(caseId))
+    throw new DomainError('NOT_FOUND', '此用例不在原评审范围。', 404);
+  const recorded = new Set(state.scope.map((basis) => basis.revisionId));
+  for (const assessment of state.assessments ?? [])
+    recorded.add(assessment.revisionId);
+  for (const item of state.items) {
+    recorded.add(item.basis.revisionId);
+    if (item.reply) recorded.add(item.reply.revisionId);
+  }
+  const { rows } = await tx.query<{
+    id: string;
+    asset_id: string;
+    revision_no: number;
+    content: unknown;
+  }>(
+    `SELECT id,asset_id,revision_no,content FROM app.asset_revisions
+     WHERE project_id=$1 AND asset_id=ANY($2::uuid[]) AND id=ANY($3::uuid[])
+     ORDER BY asset_id,revision_no`,
+    [projectId, room.case_ids, [...recorded]],
+  );
+  const frozenByCase = new Map(rows.map((row) => [row.asset_id, row]));
+  return {
+    meeting: meetingSummary(room, state),
+    state,
+    cases: assets.map((asset) => {
+      const frozen = frozenByCase.get(asset.id);
+      if (!frozen)
+        throw new DomainError(
+          'PRECONDITIONS_MISSING',
+          '原评审的用例修订不可读取。',
+          422,
+        );
+      return assetDto({
+        ...asset,
+        current_revision_id: frozen.id,
+        revision_no: frozen.revision_no,
+        content: frozen.content,
+        review_state: 'pending',
+      });
+    }),
+    revisions: rows
+      .filter((row) => row.asset_id === caseId)
+      .map((row) => ({
+        id: row.id,
+        revisionNo: row.revision_no,
+        content: uiCaseContentSchema.parse(row.content),
+      })),
   };
 }
 
@@ -117,6 +182,12 @@ export async function uiMeetingGate(
   for (const room of rooms) {
     const state = uiReviewMeetingStateSchema.parse(room.state);
     if (!state.finalized) continue;
+    const assessment = state.assessments?.findLast(
+      (entry) =>
+        entry.caseId === asset.id && entry.revisionId === current.revisionId,
+    );
+    if (assessment?.outcome === 'inconclusive')
+      reasons.push('当前修订的人工复审结论为无法确认。');
     for (const item of latestUiReviewItems(state).filter(
       (value) => value.basis.caseId === asset.id,
     )) {
@@ -156,17 +227,98 @@ export class UiReviewService {
     this.operations = new OperationService(db);
   }
 
-  async list(
+  async stages(
     actor: ActorContext,
     projectId: string,
     requirementVersionId: string,
   ) {
     return this.db.transaction(async (tx) => {
       await requireProject(tx, actor, projectId, 'project.read');
+      const cases = (
+        await tx.query<
+          Pick<AssetRow, 'id' | 'current_revision_id' | 'review_state'>
+        >(
+          `SELECT id,current_revision_id,review_state FROM app.test_assets
+           WHERE project_id=$1 AND requirement_version_id=$2 AND kind='UI'
+             AND target_type='case' AND removed_at IS NULL
+           ORDER BY created_at,id LIMIT 10000`,
+          [projectId, requirementVersionId],
+        )
+      ).rows;
+      if (!cases.length) return { items: [] };
+      const revisions = new Map(
+        cases.map((asset) => [asset.id, asset.current_revision_id]),
+      );
+      const waiting = new Set<string>();
+      const human = new Set<string>();
+      const uncertain = new Set<string>();
+      const states = (
+        await tx.query<{ state: unknown }>(
+          `SELECT state FROM app.ui_review_meetings
+           WHERE project_id=$1 AND requirement_version_id=$2 AND state->>'finalized'='true'`,
+          [projectId, requirementVersionId],
+        )
+      ).rows;
+      for (const row of states) {
+        const state = uiReviewMeetingStateSchema.parse(row.state);
+        for (const basis of state.noChange)
+          if (revisions.get(basis.caseId) === basis.revisionId)
+            human.add(basis.caseId);
+        for (const entry of latestUiReviewItems(state)) {
+          const revisionId = revisions.get(entry.basis.caseId);
+          if (
+            entry.state === 'waiting' &&
+            revisionId === entry.basis.revisionId
+          )
+            waiting.add(entry.basis.caseId);
+          if (
+            entry.state === 'returned' &&
+            revisionId === entry.reply?.revisionId
+          )
+            human.add(entry.basis.caseId);
+        }
+        const assessed = new Map<string, string>();
+        for (const entry of state.assessments ?? [])
+          if (entry.revisionId === revisions.get(entry.caseId))
+            assessed.set(entry.caseId, entry.outcome);
+        for (const [caseId, outcome] of assessed)
+          if (outcome === 'inconclusive') uncertain.add(caseId);
+      }
+      return uiCaseReviewStageListSchema.parse({
+        items: cases.map((asset) => ({
+          caseId: asset.id,
+          revisionId: asset.current_revision_id,
+          stage:
+            waiting.has(asset.id) || asset.review_state === 'needsOptimization'
+              ? 'needsOptimization'
+              : uncertain.has(asset.id)
+                ? 'waitingHuman'
+                : asset.review_state === 'approved'
+                  ? 'approved'
+                  : human.has(asset.id) || asset.review_state === 'aiOptimized'
+                    ? 'waitingHuman'
+                    : 'pending',
+        })),
+      });
+    });
+  }
+
+  async list(
+    actor: ActorContext,
+    projectId: string,
+    requirementVersionId: string,
+    caseId?: string,
+    archivedOnly = false,
+  ) {
+    return this.db.transaction(async (tx) => {
+      await requireProject(tx, actor, projectId, 'project.read');
       const rows = (
         await tx.query<Room>(
-          'SELECT * FROM app.ui_review_meetings WHERE project_id=$1 AND requirement_version_id=$2 ORDER BY created_at DESC,id DESC LIMIT 100',
-          [projectId, requirementVersionId],
+          `SELECT * FROM app.ui_review_meetings WHERE project_id=$1 AND requirement_version_id=$2
+             AND ($3::uuid IS NULL OR case_ids @> ARRAY[$3]::uuid[])
+             AND (NOT $4 OR state->>'finalized'='true')
+           ORDER BY created_at DESC,id DESC LIMIT 100`,
+          [projectId, requirementVersionId, caseId ?? null, archivedOnly],
         )
       ).rows;
       return {
@@ -182,6 +334,7 @@ export class UiReviewService {
     projectId: string,
     id: string,
     caseId?: string,
+    archived = false,
   ) {
     return this.db.transaction(async (tx) => {
       await requireProject(tx, actor, projectId, 'project.read');
@@ -194,6 +347,8 @@ export class UiReviewService {
         room.requirement_version_id,
         true,
       );
+      if (archived)
+        return readArchivedReview(tx, projectId, room, state, assets, caseId);
       const revisions =
         caseId && room.case_ids.includes(caseId)
           ? await tx.query<{
@@ -421,6 +576,76 @@ export class UiReviewService {
               entry.caseIds,
               'needsOptimization',
             );
+            break;
+          }
+          case 'assess-case': {
+            if (!state.finalized) conflict('请先完成会议定稿。');
+            const current = await this.basis(tx, projectId, room, input.caseId);
+            if (current.revisionId !== input.revisionId) stale();
+            const unresolved = latestUiReviewItems(state).filter(
+              (item) =>
+                item.basis.caseId === input.caseId && item.state === 'waiting',
+            );
+            if (unresolved.length)
+              conflict(
+                '此用例仍有等待 AI 回传的意见。回传后可保存人工复审结论。',
+              );
+            const round = state.items.reduce(
+              (maximum, item) =>
+                item.basis.caseId === input.caseId
+                  ? Math.max(maximum, item.round)
+                  : maximum,
+              1,
+            );
+            const time = new Date().toISOString();
+            if (input.outcome === 'needsRework') {
+              if (!input.instruction)
+                throw new DomainError(
+                  'VALIDATION_ERROR',
+                  '请填写本轮补改要求。',
+                  400,
+                );
+              const entry = await this.opinion(
+                tx,
+                projectId,
+                room,
+                {
+                  target: 'case',
+                  targetId: input.caseId,
+                  caseIds: [input.caseId],
+                  body: input.instruction,
+                },
+                actor.userId,
+              );
+              state.opinions.push(entry);
+              state.items.push({
+                opinionId: entry.id,
+                basis: current,
+                round:
+                  1 +
+                  state.items.reduce(
+                    (maximum, item) => Math.max(maximum, item.round),
+                    0,
+                  ),
+                state: 'waiting',
+              });
+              await this.markCases(
+                tx,
+                projectId,
+                [input.caseId],
+                'needsOptimization',
+              );
+            }
+            (state.assessments ??= []).push({
+              caseId: input.caseId,
+              revisionId: current.revisionId,
+              round,
+              outcome: input.outcome,
+              note: input.note,
+              ...(input.instruction ? { instruction: input.instruction } : {}),
+              actorId: actor.userId,
+              time,
+            });
             break;
           }
           case 'decide': {

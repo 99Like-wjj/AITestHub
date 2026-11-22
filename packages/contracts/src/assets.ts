@@ -43,6 +43,41 @@ export const createCaseInputSchema = z.strictObject({
   scenarioId: idSchema,
   content: caseContentSchema,
 });
+export const caseSupplementOriginSchema = z.strictObject({
+  caseId: idSchema,
+  revisionId: idSchema,
+  meetingId: idSchema.optional(),
+  opinionId: idSchema.optional(),
+  round: persistedRowVersionSchema.optional(),
+  note: z.string().trim().min(1).max(4000),
+}).refine(
+  (origin) => origin.meetingId !== undefined || (origin.opinionId === undefined && origin.round === undefined),
+  '意见或轮次需要明确的评审会话。',
+);
+
+export const caseSupplementOriginResultSchema = z.strictObject({
+  origin: caseSupplementOriginSchema.nullable(),
+});
+
+export const createScopedCaseInputSchema = z.strictObject({
+  commandId: commandIdSchema,
+  kind: kindSchema,
+  requirementVersionId: idSchema,
+  scenario: z.union([
+    z.strictObject({ scenarioId: idSchema }),
+    scenarioContentSchema
+      .omit({ kind: true, requirementVersionId: true, setId: true })
+      .extend({ setId: idSchema.optional() }),
+  ]),
+  content: z.record(z.string(), z.json()),
+  supplementOrigin: caseSupplementOriginSchema.optional(),
+  checkpoint: z
+    .strictObject({ id: idSchema, rowVersion: persistedRowVersionSchema })
+    .optional(),
+});
+
+export type CreateScopedCaseInput = z.infer<typeof createScopedCaseInputSchema>;
+
 export const reviseAssetInputSchema = z.strictObject({
   commandId: commandIdSchema,
   baseRevisionId: idSchema,
@@ -148,6 +183,7 @@ export const assetReceiptOperationSchema = z.enum([
   'assets.create-set',
   'assets.create-scenario',
   'assets.create-case',
+  'assets.create-scoped-case',
   'assets.revise',
   'assets.explicit-remove',
 ]);

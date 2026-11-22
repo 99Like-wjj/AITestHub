@@ -604,30 +604,19 @@ export function RequirementsPage({
           title="需求管理"
           description="集中管理资料版本与协作范围，并进入对应需求的测试资产。"
           actions={
-            <>
-              <Button
-                className="btn"
-                icon={<ReloadOutlined />}
-                loading={loading}
-                onClick={() => void load()}
-                aria-label="刷新需求列表"
-              >
-                刷新
-              </Button>
-              <Button
-                className="btn primary"
-                type="primary"
-                icon={<PlusOutlined />}
-                disabled={!tester}
-                title={!tester ? '测试角色可新增需求' : undefined}
-                onClick={() => {
-                  setComposerRequirement(null);
-                  setComposerOpen(true);
-                }}
-              >
-                新增需求
-              </Button>
-            </>
+            <Button
+              className="btn primary"
+              type="primary"
+              icon={<PlusOutlined />}
+              disabled={!tester}
+              title={!tester ? '测试角色可新增需求' : undefined}
+              onClick={() => {
+                setComposerRequirement(null);
+                setComposerOpen(true);
+              }}
+            >
+              新增需求
+            </Button>
           }
         />
         {tester && pendingDeletions.error && (

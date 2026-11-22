@@ -12,6 +12,7 @@ type DraftAssertion = Omit<Assertion, 'expected'> & { expectedText: string };
 export type DraftRequest = Omit<Request, 'assertions'> & {
   bodyText: string;
   assertions: DraftAssertion[];
+  disabledQuery?: { index: number; field: Request['query'][number] }[];
 };
 type CleanupStep = Exclude<
   ApiCase['cleanup'],
@@ -111,7 +112,12 @@ export function serializeRequest(
   request: DraftRequest,
   label: string,
 ): Request {
-  const { bodyText, assertions, ...step } = request;
+  const {
+    bodyText,
+    assertions,
+    disabledQuery: _disabledQuery,
+    ...step
+  } = request;
   let body = step.body;
   if (body.format === 'json') {
     try {

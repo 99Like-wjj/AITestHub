@@ -47,6 +47,7 @@ import { UiDeliveryController } from './ui-delivery.controller.js';
 import { ReportService } from '../../../packages/application/src/reports/service.js';
 import { ResultsController } from './results.controller.js';
 import { ApiExecutionControlService } from '../../../packages/application/src/api-execution/control.js';
+import { ApiMultipartFiles } from '../../../packages/application/src/files/api-multipart.js';
 import {
   ApiWorkerController,
   ApiExecutionController,
@@ -394,10 +395,13 @@ export async function createApp(db: Database) {
   const broker = await SecretBroker.fromEnvironment(db);
   const testConfiguration = new TestConfigurationService(db, broker);
   const plans = new PlanService(db, testConfiguration);
+  const storage = await createStorageFromEnvironment();
   const apiExecution = await ApiExecutionControlService.fromEnvironment(
     db,
     plans,
     broker,
+    process.env,
+    new ApiMultipartFiles(storage),
   );
   const schedules = new ScheduleService(db, plans);
   const configuration = new ConfigurationService(db, broker, {
@@ -406,7 +410,6 @@ export async function createApp(db: Database) {
   });
   const externalMcp = new ExternalMcpService(db, broker);
   const externalInvocations = new ExternalMcpInvocations(db, externalMcp);
-  const storage = await createStorageFromEnvironment();
   const fileService = new FilesService(db, storage);
   const sandbox = await createSandboxClientFromEnvironment();
   const workspace = new AgentWorkspaceService(db, fileService);

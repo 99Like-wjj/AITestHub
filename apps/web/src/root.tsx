@@ -214,12 +214,29 @@ function readLinkedProjectId() {
   return parsed.success ? parsed.data : null;
 }
 
-function readReportWorkspace() {
-  if (readPage() !== 'reports') return false;
+function readStandaloneRoute():
+  { kind: 'report' } | { kind: 'case'; projectId: string } | null {
+  const page = readPage();
   const query = new URLSearchParams(window.location.hash.split('?')[1]);
-  return ['reportId', 'resultId'].some(
-    (key) => idSchema.safeParse(query.get(key)).success,
-  );
+  if (page === 'reports')
+    return ['reportId', 'resultId'].some(
+      (key) => idSchema.safeParse(query.get(key)).success,
+    )
+      ? { kind: 'report' }
+      : null;
+
+  const view = query.get('view');
+  if (page === 'cases' && (view === 'workbench' || view === 'meeting')) {
+    const scope = readCaseScope();
+    if (scope?.kind === 'UI')
+      return { kind: 'case', projectId: scope.projectId };
+  }
+  if (page === 'api-regression' && view === 'workbench') {
+    const projectId = idSchema.safeParse(query.get('projectId'));
+    if (projectId.success && idSchema.safeParse(query.get('caseId')).success)
+      return { kind: 'case', projectId: projectId.data };
+  }
+  return null;
 }
 
 function readCaseScope(): CaseScope | null {
@@ -294,7 +311,7 @@ function SignedIn({
   onPasswordChanged: () => void;
 }) {
   const [page, setPage] = useState(readPage);
-  const [reportWorkspace, setReportWorkspace] = useState(readReportWorkspace);
+  const [standaloneRoute, setStandaloneRoute] = useState(readStandaloneRoute);
   const currentHash = useRef(window.location.hash);
   const workspaceMounted = useRef(readPage() === 'workspace');
   const navigationGranted = useRef(false);
@@ -335,6 +352,10 @@ function SignedIn({
     isWorkspace || isPersonalSettings ? !workspaceExpanded : businessCollapsed;
   const selectedProject =
     me.projects.find((project) => project.id === projectId) ?? null;
+  const standaloneWorkspace =
+    standaloneRoute?.kind === 'report' ||
+    (standaloneRoute?.kind === 'case' &&
+      standaloneRoute.projectId === selectedProject?.id);
   const isPlatformPage =
     page === 'platform-projects' ||
     page === 'platform-users' ||
@@ -376,7 +397,7 @@ function SignedIn({
       currentHash.current = nextHash;
       const nextPage = readPage();
       setPage(nextPage);
-      setReportWorkspace(readReportWorkspace());
+      setStandaloneRoute(readStandaloneRoute());
       if (nextPage === 'workspace') workspaceMounted.current = true;
       else if (nextPage !== 'personal-settings')
         workspaceMounted.current = false;
@@ -630,6 +651,15 @@ function SignedIn({
         key={selectedProject?.id ?? 'none'}
         userId={me.user.id}
         project={selectedProject}
+        onNavigate={(hash) => {
+          if (
+            !/^#api-regression(?:\?|$)/.test(hash) ||
+            window.location.hash === hash
+          )
+            return;
+          navigationGranted.current = true;
+          window.location.hash = hash;
+        }}
       />
     );
   else if (page === 'settings')
@@ -681,7 +711,7 @@ function SignedIn({
 
   return (
     <Layout className="app-shell">
-      {!reportWorkspace && (
+      {!standaloneWorkspace && (
         <Layout.Sider
           width={179.2}
           collapsedWidth={56}
@@ -762,7 +792,7 @@ function SignedIn({
         </Layout.Sider>
       )}
       <Layout>
-        {!isWorkspace && !isPersonalSettings && !reportWorkspace && (
+        {!isWorkspace && !isPersonalSettings && !standaloneWorkspace && (
           <Layout.Header className="topbar globalbar" aria-label={currentLabel}>
             <div className="global-project-context">
               {!isPlatformPage && !isPersonalToolPage && (
@@ -832,8 +862,8 @@ function SignedIn({
               ? 'workspace-container'
               : isPersonalSettings
                 ? 'personal-settings-container'
-                : reportWorkspace
-                  ? 'report-workspace-container'
+                : standaloneWorkspace
+                  ? 'standalone-workspace-container'
                   : 'page-content'
           }
         >

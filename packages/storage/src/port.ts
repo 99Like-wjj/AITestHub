@@ -8,7 +8,7 @@ export interface StoragePort {
     bytes: number,
     mediaType: string,
   ): Promise<void>;
-  get(key: string): Promise<Readable>;
+  get(key: string, signal?: AbortSignal): Promise<Readable>;
   delete(key: string): Promise<void>;
   exists?(key: string): Promise<boolean>;
   close(): void;

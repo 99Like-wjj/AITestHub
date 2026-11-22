@@ -45,6 +45,13 @@ export class ApiWorkerController {
       );
     if (path === 'authorize')
       return res.json(await this.service.authorize(credential, req.body));
+    if (path === 'multipart-file') {
+      const bytes = await this.service.multipartFile(credential, req.body);
+      return res
+        .set('cache-control', 'no-store')
+        .type('application/octet-stream')
+        .send(bytes);
+    }
     if (path === 'response')
       return res.json(await this.service.completeAttempt(credential, req.body));
     if (path === 'local-failure')
@@ -93,6 +100,14 @@ export class ApiExecutionController {
     const actor = await authenticate();
     if (actor.entrypoint !== 'web')
       throw new DomainError('FORBIDDEN', '个人Key请使用官方MCP。', 403);
+    if (path === 'debug-history' && req.method === 'GET')
+      return res.json(
+        await this.service.debug.history(
+          actor,
+          projectId,
+          idSchema.parse(req.query.caseId),
+        ),
+      );
     if (path === 'debug' && req.method === 'POST')
       return res
         .status(202)

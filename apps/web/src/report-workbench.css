@@ -1,39 +1,14 @@
-.report-workspace-container {
-  min-width: 0;
-  background: var(--bg);
-}
-
 .report-workbench {
   min-height: 100dvh;
   color: var(--text);
 }
 
-.report-workbench-bar {
-  position: sticky;
-  top: 0;
-  z-index: 8;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 56px;
-  padding: 8px clamp(12px, 2vw, 32px);
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
-}
-
-.report-workbench-bar-left,
 .report-workbench-controls,
 .report-workbench-heading {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
-}
-
-.report-workbench-bar-left img {
-  width: 106px;
-  height: auto;
 }
 
 .report-workbench-body {
@@ -290,9 +265,5 @@
     grid-column: 1;
     max-height: none;
     overflow: visible;
-  }
-
-  .report-workbench-bar-left img {
-    display: none;
   }
 }

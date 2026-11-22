@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { multipartRequestBodySchema } from './api-multipart.js';
 import {
 safeSourceLinkSchema,
 sanitizeSourceLinkFields,
@@ -228,6 +229,7 @@ export const requestBodySchema = z.discriminatedUnion('format', [
     value: z.string().max(1_000_000),
     mediaType: z.string().max(256),
   }),
+  multipartRequestBodySchema,
   z.strictObject({
     format: z.literal('form'),
     fields: z.array(namedValueSchema).max(200),

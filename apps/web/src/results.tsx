@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeftOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ReloadOutlined } from '@ant-design/icons';
 import {
   Alert,
   Button,
@@ -28,6 +28,7 @@ import {
 import { api, ApiError, describeError } from './api';
 import { ResultDetailPanel } from './result-detail';
 import { ReportWorkbench } from './report-workbench';
+import { StandaloneWorkbenchHeader } from './standalone-workbench-header';
 import './report-workbench.css';
 import { EvidenceViewer } from './evidence-viewer';
 import type { EvidenceGalleryItem } from './evidence-gallery';
@@ -492,22 +493,12 @@ export function ResultsPage({
     <>
       {standalone && (
         <section className="report-workbench">
-          <header className="report-workbench-bar">
-            <div className="report-workbench-bar-left">
-              <img src="/brand-f-horizontal.png" alt="AITestHub" />
-              <Button
-                type="primary"
-                icon={<ArrowLeftOutlined />}
-                href={returnHash}
-              >
-                返回执行与报告
-              </Button>
-              <Typography.Text strong>
-                {reportId ? '测试报告' : '结果与证据'}
-              </Typography.Text>
-            </div>
-            <Typography.Text type="secondary">{project.name}</Typography.Text>
-          </header>
+          <StandaloneWorkbenchHeader
+            title={reportId ? '测试报告' : '结果与证据'}
+            projectName={project.name}
+            backLabel="返回执行与报告"
+            backHref={returnHash}
+          />
           <main className="report-workbench-body">
             {!contextMatches ? (
               <Alert

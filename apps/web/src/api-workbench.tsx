@@ -24,6 +24,7 @@ import {
 } from '../../../packages/contracts/src/assets';
 import {
   apiRegressionQualificationListSchema,
+  debugHistorySchema,
   apiRegressionQualificationSchema,
   apiRegressionWithdrawReceiptSchema,
 } from '../../../packages/contracts/src/api-execution';
@@ -32,16 +33,25 @@ import { idSchema } from '../../../packages/contracts/src/base';
 import { api, describeError } from './api';
 import { ApiCaseFields } from './api-case-fields';
 import { ApiCaseComposition } from './api-case-composition';
+import { ApiScopedCaseEditor } from './api-scoped-case-editor';
 import { ApiCoverage } from './api-coverage';
+import { ApiDefinitionLibrary } from './api-definition-library';
 import { apiDraftFromContent, serializeApiDraft } from './api-draft';
 import type { ApiDraft } from './api-draft';
 import { ApiDiagnosticPage, ApiDraftDebugger } from './api-draft-debugger';
-import type { DiagnosticDraft } from './api-draft-debugger';
+import type {
+  DiagnosticDraft,
+  DiagnosticRestoration,
+} from './api-draft-debugger';
+import type { ResponseRule } from './api-attempt-evidence';
 import { AssetEditor } from './asset-editor';
 import type { AssetEditorTarget } from './asset-editor';
 import { useBusinessCommand } from './business-command';
 import { AppIcon } from './app-icon';
+import { formatBeijingTime } from './beijing-time';
 import { PageHeading } from './page-heading';
+import { StandaloneWorkbenchHeader } from './standalone-workbench-header';
+import './api-workbench.css';
 import { StatusTag } from './semantic-status';
 import { registerNavigationBlocker } from './navigation-guard';
 import { uiLayers } from './ui-layers';
@@ -53,8 +63,21 @@ import type { Project } from './types';
 
 type Navigation = z.infer<typeof assetNavigationSchema>;
 type Qualification = z.infer<typeof apiRegressionQualificationSchema>;
+const apiQuery = () => new URLSearchParams(window.location.hash.split('?')[1]);
+const routeCaseId = () => {
+  const result = idSchema.safeParse(apiQuery().get('caseId'));
+  return result.success ? result.data : undefined;
+};
+const caseRestoration = (): DiagnosticRestoration | null => {
+  if (!routeCaseId()) return null;
+  const query = apiQuery();
+  const run = idSchema.safeParse(query.get('debugRunId'));
+  if (run.success) return { kind: 'run', id: run.data };
+  const command = idSchema.safeParse(query.get('debugCommandId'));
+  return command.success ? { kind: 'command', id: command.data } : null;
+};
 const hasRestoration = () => {
-  const query = new URLSearchParams(window.location.hash.split('?')[1]);
+  const query = apiQuery();
   return (
     idSchema.safeParse(query.get('debugRunId')).success ||
     idSchema.safeParse(query.get('debugCommandId')).success
@@ -64,9 +87,11 @@ const hasRestoration = () => {
 export function ApiWorkbenchPage({
   project,
   userId,
+  onNavigate,
 }: {
   project: Project | null;
   userId: string;
+  onNavigate: (hash: string) => void;
 }) {
   const { message, modal } = App.useApp();
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -88,14 +113,58 @@ export function ApiWorkbenchPage({
   const [leave, setLeave] = useState(false);
   const nextAction = useRef<(() => void) | null>(null);
   const preserveDraftOnLeave = useRef(false);
+  const libraryHash = useRef<string | undefined>(undefined);
+  const libraryScroll = useRef(0);
+  const [routedCase, setRoutedCase] = useState(routeCaseId);
   const [editor, setEditor] = useState<AssetEditorTarget | null>(null);
+  const [createCaseOpen, setCreateCaseOpen] = useState(false);
   const [diagnostic, setDiagnostic] = useState<DiagnosticDraft | null>(null);
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false);
+  const [restoration, setRestoration] = useState(caseRestoration);
+  const [diagnosticLookup, setDiagnosticLookup] = useState<{
+    kind: DiagnosticRestoration['kind'];
+    id: string;
+    error?: string;
+  }>();
+  const [history, setHistory] =
+    useState<z.infer<typeof debugHistorySchema>['rounds']>();
+  const [historyError, setHistoryError] = useState<string>();
+  const lookupOpen = Boolean(diagnosticLookup);
+  useEffect(() => {
+    if (!lookupOpen || !active || !project) return;
+    const controller = new AbortController();
+    setHistory(undefined);
+    setHistoryError(undefined);
+    void api(
+      '/projects/' +
+        project.id +
+        '/api-executions/debug-history?caseId=' +
+        active.id,
+      { signal: controller.signal },
+      debugHistorySchema,
+    )
+      .then((reply) => {
+        if (!controller.signal.aborted) setHistory(reply.rounds);
+      })
+      .catch((failure: unknown) => {
+        if (!controller.signal.aborted) setHistoryError(describeError(failure));
+      });
+    return () => controller.abort();
+  }, [lookupOpen, active?.id, project?.id]);
+  const [ruleFocus, setRuleFocus] = useState<{
+    stepId: string;
+    tab: 'assertions' | 'extractors';
+    nonce: string;
+  }>();
+
   const [previewEnvironmentId, setPreviewEnvironmentId] = useState<string>();
-  const [lookup, setLookup] = useState(hasRestoration);
-  const [qualifications, setQualifications] = useState<Qualification[]>([]);
-  const [caseView, setCaseView] = useState<'cases' | 'pending' | 'coverage'>(
-    'cases',
+  const [lookup, setLookup] = useState(
+    () => hasRestoration() && !routeCaseId(),
   );
+  const [qualifications, setQualifications] = useState<Qualification[]>([]);
+  const [caseView, setCaseView] = useState<
+    'cases' | 'pending' | 'coverage' | 'definitions'
+  >('cases');
   const [revisionSession, setRevisionSession] = useState<string | null>(null);
   const command = useBusinessCommand(revisionSession);
   const recoveryKey = project
@@ -115,9 +184,6 @@ export function ApiWorkbenchPage({
   const epoch = useRef(0);
   const loadedProject = useRef<string | null | undefined>(undefined);
   const tester = project?.roles.includes('tester') ?? false;
-  const scene = assets.find(
-    (asset) => asset.id === sceneId && asset.targetType === 'scenario',
-  );
   const currentRequirement = navigation.requirements.find((requirement) =>
     requirement.versions.some(
       (version) => version.id === (active?.requirementVersionId ?? versionId),
@@ -136,7 +202,7 @@ export function ApiWorkbenchPage({
   );
   const visibleVersion = Boolean(directoryVersion);
 
-  function activate(asset: Asset | null) {
+  function activate(asset: Asset | null, deriveScope = false) {
     setActive(asset);
     setDraft(
       asset && 'dslVersion' in asset.content
@@ -149,19 +215,72 @@ export function ApiWorkbenchPage({
         ? `${project?.id}:${asset.id}:${asset.revisionId}:${crypto.randomUUID()}`
         : null,
     );
-    if (asset) {
+    if (asset && deriveScope) {
       setVersionId(asset.requirementVersionId);
       setBatchId(asset.setId);
       setSceneId(asset.parentId ?? undefined);
     }
   }
   function guard(action: () => void, preserveDraft = false) {
-    if (command.pending) return;
+    if (command.pending || diagnosticBusy) return;
     if (dirty || command.uncertain) {
       nextAction.current = action;
       preserveDraftOnLeave.current = preserveDraft;
       setLeave(true);
     } else action();
+  }
+  function caseHash(caseId: string, original?: DiagnosticRestoration | null) {
+    const query = new URLSearchParams({
+      projectId: project?.id ?? '',
+      caseId,
+      view: 'workbench',
+    });
+    if (versionId) query.set('versionId', versionId);
+    if (original)
+      query.set(
+        original.kind === 'run' ? 'debugRunId' : 'debugCommandId',
+        original.id,
+      );
+    return '#api-regression?' + query.toString();
+  }
+  function openCase(asset: Asset) {
+    if (!project) return;
+    if (!active) {
+      libraryScroll.current = window.scrollY;
+      const source = new URLSearchParams({ projectId: project.id });
+      if (versionId) source.set('versionId', versionId);
+      if (sceneId) source.set('assetId', sceneId);
+      libraryHash.current = '#api-regression?' + source.toString();
+    }
+    setDiagnostic(null);
+    setRestoration(null);
+    setRuleFocus(undefined);
+    setRoutedCase(asset.id);
+    activate(asset);
+    onNavigate(caseHash(asset.id));
+    window.requestAnimationFrame(() => window.scrollTo(0, 0));
+  }
+  function restoreLibraryPosition() {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (!routeCaseId()) window.scrollTo(0, libraryScroll.current);
+      });
+    });
+  }
+  function backToLibrary() {
+    guard(() => {
+      const source = new URLSearchParams({ projectId: project?.id ?? '' });
+      if (versionId) source.set('versionId', versionId);
+      const hash =
+        libraryHash.current ?? '#api-regression?' + source.toString();
+      activate(null);
+      setDiagnostic(null);
+      setRestoration(null);
+      setRuleFocus(undefined);
+      setRoutedCase(undefined);
+      onNavigate(hash);
+      restoreLibraryPosition();
+    });
   }
   function setDirectoryScope(nextVersion?: string) {
     setVersionId(nextVersion);
@@ -233,7 +352,16 @@ export function ApiWorkbenchPage({
             throw new Error('此历史链接不是接口用例。');
           selectedAsset = historical.asset;
         }
-        activate(selectedAsset);
+        activate(selectedAsset, true);
+        if (selectedAsset) {
+          setRoutedCase(selectedAsset.id);
+          if (
+            query.get('view') !== 'workbench' ||
+            query.get('projectId') !== project.id
+          ) {
+            onNavigate(caseHash(selectedAsset.id, caseRestoration()));
+          }
+        }
         const versionFilter = idSchema.safeParse(query.get('versionId'));
         if (
           !selectedAsset &&
@@ -247,8 +375,11 @@ export function ApiWorkbenchPage({
           const target = list.assets.find(
             (asset) => asset.id === targetId.data,
           );
-          if (target?.targetType === 'case') activate(target);
-          else if (
+          if (target?.targetType === 'case') {
+            setRoutedCase(target.id);
+            activate(target, true);
+            onNavigate(caseHash(target.id));
+          } else if (
             target?.targetType === 'scenario' ||
             target?.targetType === 'set'
           ) {
@@ -276,7 +407,11 @@ export function ApiWorkbenchPage({
     setAssets([]);
     setQualifications([]);
     setNavigation({ requirements: [] });
-    if (initialize) activate(null);
+    if (initialize) {
+      activate(null);
+      libraryHash.current = undefined;
+      setRoutedCase(routeCaseId());
+    }
     void load(controller.signal, initialize);
     return () => controller.abort();
   }, [project?.id, includeArchivedRequirements]);
@@ -316,9 +451,10 @@ export function ApiWorkbenchPage({
     }
   }, [command.uncertain, command.commandId, active?.id, recoveryKey]);
   useEffect(() => {
-    if (!dirty && !command.pending && !command.uncertain) return;
+    if (!dirty && !command.pending && !command.uncertain && !diagnosticBusy)
+      return;
     return registerNavigationBlocker((action) => guard(action));
-  }, [dirty, command.pending, command.uncertain]);
+  }, [dirty, command.pending, command.uncertain, diagnosticBusy]);
   useEffect(() => {
     if (!dirty && !command.uncertain) return;
     const prevent = (event: BeforeUnloadEvent) => event.preventDefault();
@@ -327,11 +463,33 @@ export function ApiWorkbenchPage({
   }, [dirty, command.uncertain]);
   useEffect(() => {
     function update() {
-      if (hasRestoration()) setLookup(true);
+      if (hasRestoration() && !routeCaseId()) setLookup(true);
+      const requested = routeCaseId();
+      const next = caseRestoration();
+      setRestoration((current) =>
+        current?.id === next?.id && current?.kind === next?.kind
+          ? current
+          : next,
+      );
+      setRoutedCase(requested);
+      if (requested === active?.id) return;
+      setDiagnostic(null);
+      if (!requested) {
+        if (active) {
+          activate(null);
+          restoreLibraryPosition();
+        }
+        return;
+      }
+      const asset = assets.find(
+        (item) => item.id === requested && item.targetType === 'case',
+      );
+      if (asset) activate(asset);
+      else void load(undefined, true);
     }
     window.addEventListener('hashchange', update);
     return () => window.removeEventListener('hashchange', update);
-  }, []);
+  }, [assets, active?.id, project?.id]);
   async function saved(asset: Asset) {
     const generation = epoch.current + 1;
     const refreshed = await load();
@@ -345,8 +503,10 @@ export function ApiWorkbenchPage({
         '内容已保存，但目录未能更新。请刷新目录核对；无需再次创建或保存。',
       );
     }
-    if (asset.targetType === 'case') activate(asset);
-    else {
+    if (asset.targetType === 'case') {
+      if (active?.id === asset.id) activate(asset);
+      else openCase(asset);
+    } else {
       activate(null);
       setVersionId(asset.requirementVersionId);
       setBatchId(asset.targetType === 'set' ? asset.id : asset.setId);
@@ -369,7 +529,14 @@ export function ApiWorkbenchPage({
     setEditor(null);
   }
   async function save() {
-    if (!project || !active || !draft || !tester || pendingReceipt)
+    if (
+      !project ||
+      !active ||
+      !draft ||
+      !tester ||
+      pendingReceipt ||
+      diagnosticBusy
+    )
       return false;
     const response = await command.run((commandId) =>
       api(
@@ -442,14 +609,27 @@ export function ApiWorkbenchPage({
       setRecovering(false);
     }
   }
-  function prepareDiagnostic() {
-    if (!draft || !active) return;
+  function prepareDiagnostic(stepId?: string) {
+    if (
+      !draft ||
+      !active ||
+      !tester ||
+      active.removedAt ||
+      command.pending ||
+      command.uncertain ||
+      pendingReceipt ||
+      diagnosticBusy
+    )
+      return;
     try {
+      setRestoration(null);
+      if (caseRestoration()) onNavigate(caseHash(active.id));
       setDiagnostic({
         content: serializeApiDraft(draft),
         sourceCaseId: active.id,
         sourceCaseRevisionId: active.revisionId,
         sourceCaseRowVersion: active.rowVersion,
+        ...(stepId ? { stepId } : {}),
         ...(previewEnvironmentId ? { previewEnvironmentId } : {}),
       });
       setError(undefined);
@@ -462,6 +642,89 @@ export function ApiWorkbenchPage({
           : describeError(failure),
       );
     }
+  }
+  function openOriginalDiagnostic() {
+    if (!diagnosticLookup || !active || diagnosticBusy) return;
+    const id = idSchema.safeParse(diagnosticLookup.id.trim());
+    if (!id.success) {
+      setDiagnosticLookup({
+        ...diagnosticLookup,
+        error: '请输入有效的原调试轮次 ID 或原命令 ID。',
+      });
+      return;
+    }
+    const original: DiagnosticRestoration = {
+      kind: diagnosticLookup.kind,
+      id: id.data,
+    };
+    setDiagnosticLookup(undefined);
+    setDiagnostic(null);
+    setRestoration(original);
+    onNavigate(caseHash(active.id, original));
+  }
+  function addResponseRule(stepId: string, rule: ResponseRule) {
+    if (
+      !draft ||
+      !active ||
+      active.removedAt ||
+      !tester ||
+      command.pending ||
+      command.uncertain ||
+      pendingReceipt ||
+      diagnosticBusy
+    )
+      return '当前工作草稿不可编辑。';
+    const current = draft.requests.find((step) => step.stepId === stepId);
+    if (!current)
+      return '原请求步骤已经移除或来自准备步骤，请在当前编辑步骤配置规则。';
+    if (
+      rule.kind === 'extractor' &&
+      draft.requests.some((step) =>
+        step.extractors.some((extractor) => extractor.name === rule.name),
+      )
+    )
+      return '此用例已存在同名提取变量。';
+    const next =
+      rule.kind === 'assertion'
+        ? {
+            ...current,
+            assertions: [
+              ...current.assertions,
+              {
+                id: crypto.randomUUID(),
+                source: 'json' as const,
+                path: rule.path,
+                operator: 'equals' as const,
+                expectedText: JSON.stringify(rule.expected),
+              },
+            ],
+          }
+        : {
+            ...current,
+            extractors: [
+              ...current.extractors,
+              {
+                name: rule.name,
+                source: 'json' as const,
+                path: rule.path,
+                required: true,
+                sensitive: rule.sensitive,
+              },
+            ],
+          };
+    setDraft({
+      ...draft,
+      requests: draft.requests.map((step) =>
+        step.stepId === stepId ? next : step,
+      ),
+    });
+    setRuleFocus({
+      stepId,
+      tab: rule.kind === 'assertion' ? 'assertions' : 'extractors',
+      nonce: crypto.randomUUID(),
+    });
+    setDirty(true);
+    return undefined;
   }
   function validateDraft() {
     if (!draft) return;
@@ -483,21 +746,16 @@ export function ApiWorkbenchPage({
       setError(describeError(failure));
     }
   }
-  function create(targetType: 'set' | 'scenario' | 'case') {
-    if (
-      !versionId ||
-      !visibleVersion ||
-      (targetType !== 'set' && !batchId) ||
-      (targetType === 'case' && !scene)
-    )
+  function createScenario() {
+    if (!versionId || !visibleVersion || (!batchId && sets.length !== 1))
       return;
     guard(() =>
       setEditor({
-        targetType,
+        targetType: 'scenario',
         kind: 'API',
         requirementVersionId: versionId,
-        setId: batchId ?? null,
-        scenarioId: targetType === 'case' ? (sceneId ?? null) : null,
+        setId: batchId ?? (sets.length === 1 ? sets[0]?.id : undefined) ?? null,
+        scenarioId: null,
         asset: null,
       }),
     );
@@ -580,36 +838,69 @@ export function ApiWorkbenchPage({
   }
   if (!project)
     return <Empty description="请选择当前有效项目后维护接口用例。" />;
+  const caseWorkspace = Boolean(routedCase || active);
+  const editDisabled =
+    !tester ||
+    Boolean(active?.removedAt) ||
+    command.pending ||
+    command.uncertain ||
+    Boolean(pendingReceipt) ||
+    diagnosticBusy;
+  let diagnosticCurrent = false;
+  if (
+    diagnostic &&
+    active?.revisionId === diagnostic.sourceCaseRevisionId &&
+    draft
+  ) {
+    try {
+      diagnosticCurrent =
+        JSON.stringify(serializeApiDraft(draft)) ===
+        JSON.stringify(diagnostic.content);
+    } catch {
+      // A draft with invalid input cannot match an earlier diagnostic candidate.
+    }
+  }
+
   return (
     <>
-      <PageHeading
-        eyebrow="API REGRESSION"
-        title="接口用例管理"
-        description="配置请求与断言，在项目认可的环境完整调试通过后保存为可回归。"
-        actions={
-          <>
-            <Button
-              icon={<AppIcon name="spark" />}
-              disabled={!tester}
-              onClick={() =>
-                guard(() => {
-                  window.location.hash = 'workspace';
-                })
-              }
-            >
-              生成选定范围
-            </Button>
-            <Button
-              type="primary"
-              icon={<AppIcon name="plus" />}
-              disabled={!tester || !scene}
-              onClick={() => create('case')}
-            >
-              新建接口用例
-            </Button>
-          </>
-        }
-      />
+      {caseWorkspace ? (
+        <StandaloneWorkbenchHeader
+          title="接口自动化工作台"
+          projectName={project.name}
+          backLabel="返回接口用例管理"
+          onBack={backToLibrary}
+          backDisabled={command.pending || diagnosticBusy}
+        />
+      ) : (
+        <PageHeading
+          eyebrow="API REGRESSION"
+          title="接口用例管理"
+          description="配置请求与断言，在项目认可的环境完整调试通过后保存为可回归。"
+          actions={
+            <>
+              <Button
+                icon={<AppIcon name="spark" />}
+                disabled={!tester}
+                onClick={() =>
+                  guard(() => {
+                    window.location.hash = 'workspace';
+                  })
+                }
+              >
+                生成选定范围
+              </Button>
+              <Button
+                type="primary"
+                icon={<AppIcon name="plus" />}
+                disabled={!tester || !visibleVersion}
+                onClick={() => guard(() => setCreateCaseOpen(true))}
+              >
+                新建接口用例
+              </Button>
+            </>
+          }
+        />
+      )}
       {error && (
         <Alert type="error" title={error} showIcon className="section-alert" />
       )}
@@ -651,239 +942,8 @@ export function ApiWorkbenchPage({
           {recoveryStatus}
         </p>
       )}
-      <div className="asset-workspace live-asset-workspace api-workbench requirement-directory-layout">
-        <RequirementDirectory
-          includeArchived={includeArchivedRequirements}
-          onIncludeArchivedChange={changeArchiveScope}
-          archiveDisabled={command.pending}
-          search={query}
-          onSearchChange={setQuery}
-          searchPlaceholder="搜索需求、场景或用例"
-        >
-          <button
-            type="button"
-            className={`tree-node requirement-directory-button${directoryVersion ? '' : ' active'}`}
-            aria-pressed={!directoryVersion}
-            onClick={() =>
-              guard(() => {
-                activate(null);
-                setDirectoryScope();
-              })
-            }
-          >
-            <RequirementDirectoryLabel
-              title="全部需求"
-              count={`${navigation.requirements.reduce(
-                (count, requirement) => count + requirement.caseCount,
-                0,
-              )} 条用例`}
-            />
-          </button>
-          {loading && !assets.length ? (
-            <Skeleton active />
-          ) : (
-            <Tree
-              blockNode
-              expandedKeys={
-                keyword
-                  ? [
-                      ...navigation.requirements.map(
-                        (item) => `requirement:${item.id}`,
-                      ),
-                      ...assets
-                        .filter((item) => item.targetType === 'scenario')
-                        .map((item) => `scenario:${item.id}`),
-                    ]
-                  : expandedKeys
-              }
-              onExpand={(keys) => {
-                if (!keyword) setExpandedKeys(keys.map(String));
-              }}
-              selectedKeys={
-                directoryVersion && active
-                  ? [`case:${active.id}`]
-                  : sceneId
-                    ? [`scenario:${sceneId}`]
-                    : directoryRequirement
-                      ? [`requirement:${directoryRequirement.id}`]
-                      : []
-              }
-              onSelect={([key]) => {
-                if (typeof key !== 'string') return;
-                const [type, id] = key.split(':');
-                if (type === 'requirement') {
-                  const requirement = navigation.requirements.find(
-                    (item) => item.id === id,
-                  );
-                  guard(() => {
-                    activate(null);
-                    setDirectoryScope(
-                      requirement
-                        ? [...requirement.versions].sort(
-                            (a, b) => b.versionNo - a.versionNo,
-                          )[0]?.id
-                        : undefined,
-                    );
-                  });
-                } else {
-                  const asset = assets.find((item) => item.id === id);
-                  if (asset)
-                    guard(() => {
-                      if (type === 'case') activate(asset);
-                      else {
-                        activate(null);
-                        setVersionId(asset.requirementVersionId);
-                        setBatchId(asset.setId);
-                        setSceneId(asset.id);
-                      }
-                    });
-                }
-              }}
-              autoExpandParent={Boolean(keyword)}
-              treeData={navigation.requirements
-                .filter(
-                  (requirement) =>
-                    !keyword ||
-                    requirement.title.toLocaleLowerCase().includes(keyword) ||
-                    assets.some(
-                      (asset) =>
-                        asset.targetType !== 'set' &&
-                        matchesDirectory(asset) &&
-                        requirement.versions.some(
-                          (version) =>
-                            version.id === asset.requirementVersionId,
-                        ),
-                    ),
-                )
-                .map((requirement) => ({
-                  key: `requirement:${requirement.id}`,
-                  title: (
-                    <RequirementDirectoryLabel
-                      title={requirement.title}
-                      archived={requirement.archived}
-                      count={`${requirement.caseCount} 条用例`}
-                    />
-                  ),
-                  children: assets
-                    .filter(
-                      (asset) =>
-                        asset.targetType === 'scenario' &&
-                        requirement.versions.some(
-                          (version) =>
-                            version.id === asset.requirementVersionId,
-                        ),
-                    )
-                    .filter(
-                      (asset) =>
-                        matchesDirectory(asset) ||
-                        assets.some(
-                          (child) =>
-                            child.parentId === asset.id &&
-                            matchesDirectory(child),
-                        ),
-                    )
-                    .map((scenario) => ({
-                      key: `scenario:${scenario.id}`,
-                      title: scenario.title,
-                      children: assets
-                        .filter(
-                          (asset) =>
-                            asset.targetType === 'case' &&
-                            asset.parentId === scenario.id &&
-                            matchesDirectory(asset),
-                        )
-                        .map((asset) => ({
-                          key: `case:${asset.id}`,
-                          title: asset.title,
-                          isLeaf: true,
-                        })),
-                    })),
-                }))}
-            />
-          )}
-        </RequirementDirectory>
-        <section className="asset-pane">
-          <div className="card pad mb">
-            <div className="context-head">
-              <div>
-                <h2>{directoryRequirement?.title ?? '全部需求'}</h2>
-                <p className="caption">
-                  {directoryVersion
-                    ? `需求版本 v${directoryVersion.versionNo}`
-                    : '当前项目 · 全部版本'}
-                </p>
-              </div>
-              <Button
-                size="small"
-                loading={loading}
-                onClick={() => void load()}
-              >
-                刷新目录
-              </Button>
-            </div>
-            {tester && visibleVersion && !batchId && (
-              <p className="caption" role="status">
-                新增场景前，请先创建或选择批次。下方“新建批次”可直接创建。
-              </p>
-            )}
-            <div className="context-controls">
-              <Select
-                aria-label="接口需求版本"
-                placeholder="选择明确需求版本"
-                value={visibleVersion ? versionId : undefined}
-                onChange={(id) =>
-                  guard(() => {
-                    activate(null);
-                    setDirectoryScope(id);
-                  })
-                }
-                style={{ width: 220 }}
-                options={navigation.requirements.flatMap((requirement) =>
-                  requirement.versions.map((version) => ({
-                    value: version.id,
-                    label: `${requirement.title} · v${version.versionNo}`,
-                  })),
-                )}
-              />
-              <Select
-                aria-label="接口生成批次"
-                placeholder="选择批次"
-                value={
-                  sets.some((set) => set.id === batchId) ? batchId : undefined
-                }
-                onChange={(id) =>
-                  guard(() => {
-                    activate(null);
-                    setBatchId(id);
-                    setSceneId(undefined);
-                  })
-                }
-                style={{ width: 165 }}
-                options={sets.map((set) => ({
-                  value: set.id,
-                  label: set.title,
-                }))}
-              />
-              {tester && (
-                <>
-                  <Button
-                    size="small"
-                    disabled={!versionId || !visibleVersion}
-                    onClick={() => create('set')}
-                  >
-                    新建批次
-                  </Button>
-                  <Button
-                    size="small"
-                    disabled={!versionId || !visibleVersion || !batchId}
-                    onClick={() => create('scenario')}
-                  >
-                    新增场景
-                  </Button>
-                </>
-              )}
-            </div>
-          </div>
+      {caseWorkspace && (
+        <main className="api-immersive-content">
           {!loading && !error && active && !currentRequirement && (
             <Alert
               type="info"
@@ -893,7 +953,7 @@ export function ApiWorkbenchPage({
               description="原详情、草稿与保存回执仍保留。可开启“显示已归档需求”找回目录；归档浏览开关不会撤销访问权限或重新提交保存。"
             />
           )}
-          {active && draft ? (
+          {active && draft && (
             <div className="card api-editor-card">
               <div className="case-editor-head">
                 <div className="between">
@@ -901,6 +961,16 @@ export function ApiWorkbenchPage({
                     <h2>{draft.base.title}</h2>
                     <p>
                       {currentRequirement?.title ?? '原需求'} /{' '}
+                      {currentRequirement?.versions.find(
+                        (version) => version.id === active.requirementVersionId,
+                      )?.versionNo !== undefined
+                        ? 'v' +
+                          currentRequirement?.versions.find(
+                            (version) =>
+                              version.id === active.requirementVersionId,
+                          )?.versionNo
+                        : '原版本 ' + active.requirementVersionId}{' '}
+                      /{' '}
                       {assets.find((asset) => asset.id === active.parentId)
                         ?.title ?? '原场景'}{' '}
                       · {active.id}
@@ -910,12 +980,7 @@ export function ApiWorkbenchPage({
                     <Button onClick={validateDraft}>检查配置</Button>
                     <Button
                       icon={<AppIcon name="check" />}
-                      disabled={
-                        !tester ||
-                        !dirty ||
-                        command.uncertain ||
-                        Boolean(pendingReceipt)
-                      }
+                      disabled={editDisabled || !dirty}
                       loading={command.pending}
                       onClick={() => void save()}
                     >
@@ -924,13 +989,8 @@ export function ApiWorkbenchPage({
                     <Button
                       type="primary"
                       icon={<AppIcon name="play" />}
-                      disabled={
-                        !tester ||
-                        command.pending ||
-                        command.uncertain ||
-                        Boolean(pendingReceipt)
-                      }
-                      onClick={prepareDiagnostic}
+                      disabled={editDisabled}
+                      onClick={() => prepareDiagnostic()}
                     >
                       运行调试
                     </Button>
@@ -977,136 +1037,320 @@ export function ApiWorkbenchPage({
                   showIcon
                 />
               )}
-              <ApiCaseComposition
-                key={`${active.id}:${active.revisionId}`}
-                value={draft.base}
-                cases={assets.filter(
-                  (asset) =>
-                    asset.targetType === 'case' && asset.id !== active.id,
-                )}
-                disabled={
-                  !tester ||
-                  command.pending ||
-                  command.uncertain ||
-                  Boolean(pendingReceipt)
-                }
-                onApply={(composition) => {
-                  setDraft({
-                    ...draft,
-                    base: { ...draft.base, ...composition },
-                  });
-                  setDirty(true);
-                }}
-              />
-              <ApiCaseFields
-                projectId={project.id}
-                value={draft}
-                disabled={
-                  !tester ||
-                  command.pending ||
-                  command.uncertain ||
-                  Boolean(pendingReceipt)
-                }
-                presentation="workbench"
-                previewEnvironmentId={previewEnvironmentId}
-                onPreviewEnvironmentChange={setPreviewEnvironmentId}
-                onChange={(value) => {
-                  setDraft(value);
-                  setDirty(true);
-                }}
-                documentation={
-                  <div className="api-documentation-fields">
-                    <label className="field-label">
-                      标题
-                      <Input
-                        value={draft.base.title}
-                        disabled={
-                          !tester ||
-                          command.pending ||
-                          command.uncertain ||
-                          Boolean(pendingReceipt)
-                        }
-                        maxLength={200}
-                        onChange={(event) => {
-                          setDraft({
-                            ...draft,
-                            base: { ...draft.base, title: event.target.value },
-                          });
-                          setDirty(true);
-                        }}
-                      />
-                    </label>
-                    {(['testPoint', 'expected'] as const).map((field) => (
-                      <label className="field-label" key={field}>
-                        {field === 'testPoint' ? '测试点' : '业务预期'}
-                        <Input.TextArea
-                          value={draft.base[field]}
-                          rows={3}
-                          disabled={
-                            !tester ||
-                            command.pending ||
-                            command.uncertain ||
-                            Boolean(pendingReceipt)
-                          }
-                          onChange={(event) => {
-                            setDraft({
-                              ...draft,
-                              base: {
-                                ...draft.base,
-                                [field]: event.target.value,
-                              },
-                            });
-                            setDirty(true);
-                          }}
-                        />
-                      </label>
-                    ))}
-                    <label className="field-label">
-                      用例前提（每行一项）
-                      <Input.TextArea
-                        rows={3}
-                        value={draft.base.preconditions.join('\n')}
-                        disabled={
-                          !tester ||
-                          command.pending ||
-                          command.uncertain ||
-                          Boolean(pendingReceipt)
-                        }
-                        onChange={(event) => {
-                          setDraft({
-                            ...draft,
-                            base: {
-                              ...draft.base,
-                              preconditions: event.target.value.split('\n'),
+              <div className="api-workbench-split">
+                <div className="api-workbench-editor stack">
+                  {currentRequirement && (
+                    <Collapse
+                      items={[
+                        {
+                          key: 'source',
+                          label: '从接口定义新增请求',
+                          children: (
+                            <ApiDefinitionLibrary
+                              projectId={project.id}
+                              requirementId={currentRequirement.id}
+                              versionId={active.requirementVersionId}
+                              {...(!editDisabled
+                                ? {
+                                    onAdopt: (step, basis) => {
+                                      if (draft.requests.length >= 100) {
+                                        void message.warning(
+                                          '当前用例已达到步骤上限。',
+                                        );
+                                        return;
+                                      }
+                                      setDraft({
+                                        ...draft,
+                                        requests: [...draft.requests, step],
+                                        base: {
+                                          ...draft.base,
+                                          basisRefs: draft.base.basisRefs.some(
+                                            (ref) =>
+                                              ref.objectId === basis.objectId &&
+                                              ref.revisionId ===
+                                                basis.revisionId &&
+                                              ref.locator === basis.locator,
+                                          )
+                                            ? draft.base.basisRefs
+                                            : [...draft.base.basisRefs, basis],
+                                        },
+                                      });
+                                      setDirty(true);
+                                    },
+                                  }
+                                : {})}
+                            />
+                          ),
+                        },
+                      ]}
+                    />
+                  )}
+
+                  <ApiCaseComposition
+                    key={`${active.id}:${active.revisionId}`}
+                    value={draft.base}
+                    cases={assets.flatMap((asset) => {
+                      const qualified = qualificationsByCase.get(asset.id);
+                      return asset.targetType === 'case' &&
+                        asset.id !== active.id &&
+                        qualified
+                        ? [
+                            {
+                              ...asset,
+                              revisionId: qualified.revisionId,
+                              revisionNo: qualified.revisionNo,
                             },
-                          });
-                          setDirty(true);
-                        }}
-                      />
-                    </label>
-                    <p className="caption">
-                      依据引用随原内容保留：
-                      {draft.base.basisRefs
-                        .map((basis) => basis.description)
-                        .join('；') || '未登记'}
-                    </p>
-                  </div>
-                }
-              />
+                          ]
+                        : [];
+                    })}
+                    disabled={editDisabled}
+                    onApply={(composition) => {
+                      setDraft({
+                        ...draft,
+                        base: { ...draft.base, ...composition },
+                      });
+                      setDirty(true);
+                    }}
+                  />
+                  <ApiCaseFields
+                    projectId={project.id}
+                    value={draft}
+                    disabled={editDisabled}
+                    presentation="workbench"
+                    onSingleDiagnostic={prepareDiagnostic}
+                    ruleFocus={ruleFocus}
+                    previewEnvironmentId={previewEnvironmentId}
+                    onPreviewEnvironmentChange={setPreviewEnvironmentId}
+                    onChange={(value) => {
+                      setDraft(value);
+                      setDirty(true);
+                    }}
+                    documentation={
+                      <div className="api-documentation-fields">
+                        <label className="field-label">
+                          标题
+                          <Input
+                            value={draft.base.title}
+                            disabled={editDisabled}
+                            maxLength={200}
+                            onChange={(event) => {
+                              setDraft({
+                                ...draft,
+                                base: {
+                                  ...draft.base,
+                                  title: event.target.value,
+                                },
+                              });
+                              setDirty(true);
+                            }}
+                          />
+                        </label>
+                        {(['testPoint', 'expected'] as const).map((field) => (
+                          <label className="field-label" key={field}>
+                            {field === 'testPoint' ? '测试点' : '业务预期'}
+                            <Input.TextArea
+                              value={draft.base[field]}
+                              rows={3}
+                              disabled={editDisabled}
+                              onChange={(event) => {
+                                setDraft({
+                                  ...draft,
+                                  base: {
+                                    ...draft.base,
+                                    [field]: event.target.value,
+                                  },
+                                });
+                                setDirty(true);
+                              }}
+                            />
+                          </label>
+                        ))}
+                        <label className="field-label">
+                          用例前提（每行一项）
+                          <Input.TextArea
+                            rows={3}
+                            value={draft.base.preconditions.join('\n')}
+                            disabled={editDisabled}
+                            onChange={(event) => {
+                              setDraft({
+                                ...draft,
+                                base: {
+                                  ...draft.base,
+                                  preconditions: event.target.value.split('\n'),
+                                },
+                              });
+                              setDirty(true);
+                            }}
+                          />
+                        </label>
+                        <p className="caption">
+                          依据引用随原内容保留：
+                          {draft.base.basisRefs
+                            .map((basis) => basis.description)
+                            .join('；') || '未登记'}
+                        </p>
+                      </div>
+                    }
+                  />
+                </div>
+                <ApiDraftDebugger
+                  projectId={project.id}
+                  draft={diagnostic}
+                  restoration={restoration}
+                  expectedCaseId={active.id}
+                  userId={userId}
+                  presentation="inline"
+                  candidateCurrent={diagnosticCurrent}
+                  {...(!editDisabled ? { onRule: addResponseRule } : {})}
+                  onBusyChange={setDiagnosticBusy}
+                  onQualified={async (asset) => {
+                    setDiagnostic(null);
+                    await saved(asset);
+                    void message.success('已保存为可回归修订。');
+                  }}
+                  onClose={() => {
+                    setDiagnostic(null);
+                    setRestoration(null);
+                    onNavigate(caseHash(active.id));
+                  }}
+                />
+              </div>
               <Space className="api-editor-footer" wrap>
-                <Button onClick={() => guard(() => activate(null))}>
-                  返回用例库
+                <Button
+                  disabled={diagnosticBusy}
+                  onClick={() => setDiagnosticLookup({ kind: 'run', id: '' })}
+                >
+                  查找原诊断
                 </Button>
+                <Modal
+                  title="只读查询原诊断"
+                  open={Boolean(diagnosticLookup)}
+                  onCancel={() => setDiagnosticLookup(undefined)}
+                  onOk={openOriginalDiagnostic}
+                  okText="查询原诊断"
+                >
+                  {diagnosticLookup && (
+                    <div className="stack">
+                      <p className="caption">
+                        以原始标识读取当前项目同一用例的证据。
+                      </p>
+                      <Select
+                        aria-label="选择此用例已有调试轮次"
+                        placeholder="选择此用例的历史调试轮次"
+                        loading={!history && !historyError}
+                        showSearch
+                        optionFilterProp="label"
+                        value={
+                          diagnosticLookup.kind === 'run' &&
+                          history?.some(
+                            (entry) => entry.runId === diagnosticLookup.id,
+                          )
+                            ? diagnosticLookup.id
+                            : null
+                        }
+                        options={(history ?? []).map((entry) => ({
+                          value: entry.runId,
+                          label: [
+                            formatBeijingTime(entry.createdAt, true),
+                            entry.diagnosticStepId ? '单步诊断' : '完整调试',
+                            entry.sourceRevisionNo !== null
+                              ? '来源 r' + entry.sourceRevisionNo
+                              : '来源修订未取得',
+                            entry.state,
+                            entry.qualificationRetained
+                              ? '资格证据保留'
+                              : '临时诊断',
+                          ].join(' · '),
+                        }))}
+                        notFoundContent="没有仍可读取的已登记调试轮次。"
+                        onChange={(id: string) =>
+                          setDiagnosticLookup({ kind: 'run', id })
+                        }
+                      />
+                      {historyError && (
+                        <Alert type="warning" showIcon title={historyError} />
+                      )}
+                      <p className="caption">
+                        也可用原调试轮次或命令标识查询。
+                      </p>
+
+                      <Select
+                        aria-label="原诊断标识类型"
+                        value={diagnosticLookup.kind}
+                        options={[
+                          { value: 'run', label: '原调试轮次 ID' },
+                          { value: 'command', label: '原命令 ID' },
+                        ]}
+                        onChange={(kind: DiagnosticRestoration['kind']) =>
+                          setDiagnosticLookup({ kind, id: diagnosticLookup.id })
+                        }
+                      />
+                      <Input
+                        aria-label="原诊断标识"
+                        value={diagnosticLookup.id}
+                        onChange={(event) =>
+                          setDiagnosticLookup({
+                            kind: diagnosticLookup.kind,
+                            id: event.target.value,
+                          })
+                        }
+                      />
+                      {diagnosticLookup.error && (
+                        <Alert
+                          type="error"
+                          showIcon
+                          title={diagnosticLookup.error}
+                        />
+                      )}
+                    </div>
+                  )}
+                </Modal>
                 {activeQualification?.debugRunId && (
                   <Button
                     onClick={() =>
                       guard(() => {
-                        window.location.hash = `api-regression?projectId=${project.id}&caseId=${active.id}&debugRunId=${activeQualification.debugRunId}`;
-                        setLookup(true);
+                        if (!activeQualification.debugRunId) return;
+                        setDiagnostic(null);
+                        setRestoration({
+                          kind: 'run',
+                          id: activeQualification.debugRunId,
+                        });
+                        onNavigate(
+                          caseHash(active.id, {
+                            kind: 'run',
+                            id: activeQualification.debugRunId,
+                          }),
+                        );
                       }, true)
                     }
                   >
                     查看资格调试证据
+                  </Button>
+                )}
+                {activeQualification && (
+                  <Button
+                    onClick={() => {
+                      void modal.info({
+                        title: '回归计划选版',
+                        content: (
+                          <div className="stack">
+                            <strong>
+                              {active.title +
+                                ' · r' +
+                                activeQualification.revisionNo}
+                            </strong>
+                            <p className="caption">
+                              这是此刻有效的资格。正式启动会重新核对资格、目标环境和清理配置。
+                            </p>
+                            <span className="caption">
+                              资格 {activeQualification.snapshotId}
+                            </span>
+                          </div>
+                        ),
+                      });
+                    }}
+                  >
+                    查看计划选版
                   </Button>
                 )}
                 {tester && activeQualification && (
@@ -1130,7 +1374,246 @@ export function ApiWorkbenchPage({
                 )}
               </Space>
             </div>
-          ) : (
+          )}
+          {!active &&
+            (loading ? (
+              <Skeleton active />
+            ) : (
+              <Empty description="未取得此接口用例" />
+            ))}
+        </main>
+      )}
+      <div className="api-management-library" hidden={caseWorkspace}>
+        <div className="asset-workspace live-asset-workspace api-workbench requirement-directory-layout">
+          <RequirementDirectory
+            includeArchived={includeArchivedRequirements}
+            onIncludeArchivedChange={changeArchiveScope}
+            archiveDisabled={command.pending}
+            search={query}
+            onSearchChange={setQuery}
+            searchPlaceholder="搜索需求、场景或用例"
+          >
+            <button
+              type="button"
+              className={`tree-node requirement-directory-button${directoryVersion ? '' : ' active'}`}
+              aria-pressed={!directoryVersion}
+              onClick={() =>
+                guard(() => {
+                  activate(null);
+                  setDirectoryScope();
+                })
+              }
+            >
+              <RequirementDirectoryLabel
+                title="全部需求"
+                count={`${navigation.requirements.reduce(
+                  (count, requirement) => count + requirement.caseCount,
+                  0,
+                )} 条用例`}
+              />
+            </button>
+            {loading && !assets.length ? (
+              <Skeleton active />
+            ) : (
+              <Tree
+                blockNode
+                expandedKeys={
+                  keyword
+                    ? [
+                        ...navigation.requirements.map(
+                          (item) => `requirement:${item.id}`,
+                        ),
+                        ...assets
+                          .filter((item) => item.targetType === 'scenario')
+                          .map((item) => `scenario:${item.id}`),
+                      ]
+                    : expandedKeys
+                }
+                onExpand={(keys) => {
+                  if (!keyword) setExpandedKeys(keys.map(String));
+                }}
+                selectedKeys={
+                  directoryVersion && active
+                    ? [`case:${active.id}`]
+                    : sceneId
+                      ? [`scenario:${sceneId}`]
+                      : directoryRequirement
+                        ? [`requirement:${directoryRequirement.id}`]
+                        : []
+                }
+                onSelect={([key]) => {
+                  if (typeof key !== 'string') return;
+                  const [type, id] = key.split(':');
+                  if (type === 'requirement') {
+                    const requirement = navigation.requirements.find(
+                      (item) => item.id === id,
+                    );
+                    guard(() => {
+                      activate(null);
+                      setDirectoryScope(
+                        requirement
+                          ? [...requirement.versions].sort(
+                              (a, b) => b.versionNo - a.versionNo,
+                            )[0]?.id
+                          : undefined,
+                      );
+                    });
+                  } else {
+                    const asset = assets.find((item) => item.id === id);
+                    if (asset)
+                      guard(() => {
+                        if (type === 'case') openCase(asset);
+                        else {
+                          activate(null);
+                          setVersionId(asset.requirementVersionId);
+                          setBatchId(asset.setId);
+                          setSceneId(asset.id);
+                        }
+                      });
+                  }
+                }}
+                autoExpandParent={Boolean(keyword)}
+                treeData={navigation.requirements
+                  .filter(
+                    (requirement) =>
+                      !keyword ||
+                      requirement.title.toLocaleLowerCase().includes(keyword) ||
+                      assets.some(
+                        (asset) =>
+                          asset.targetType !== 'set' &&
+                          matchesDirectory(asset) &&
+                          requirement.versions.some(
+                            (version) =>
+                              version.id === asset.requirementVersionId,
+                          ),
+                      ),
+                  )
+                  .map((requirement) => ({
+                    key: `requirement:${requirement.id}`,
+                    title: (
+                      <RequirementDirectoryLabel
+                        title={requirement.title}
+                        archived={requirement.archived}
+                        count={`${requirement.caseCount} 条用例`}
+                      />
+                    ),
+                    children: assets
+                      .filter(
+                        (asset) =>
+                          asset.targetType === 'scenario' &&
+                          requirement.versions.some(
+                            (version) =>
+                              version.id === asset.requirementVersionId,
+                          ),
+                      )
+                      .filter(
+                        (asset) =>
+                          matchesDirectory(asset) ||
+                          assets.some(
+                            (child) =>
+                              child.parentId === asset.id &&
+                              matchesDirectory(child),
+                          ),
+                      )
+                      .map((scenario) => ({
+                        key: `scenario:${scenario.id}`,
+                        title: scenario.title,
+                        children: assets
+                          .filter(
+                            (asset) =>
+                              asset.targetType === 'case' &&
+                              asset.parentId === scenario.id &&
+                              matchesDirectory(asset),
+                          )
+                          .map((asset) => ({
+                            key: `case:${asset.id}`,
+                            title: asset.title,
+                            isLeaf: true,
+                          })),
+                      })),
+                  }))}
+              />
+            )}
+          </RequirementDirectory>
+          <section className="asset-pane">
+            <div className="card pad mb">
+              <div className="context-head">
+                <div>
+                  <h2>{directoryRequirement?.title ?? '全部需求'}</h2>
+                  <p className="caption">
+                    {directoryVersion
+                      ? `需求版本 v${directoryVersion.versionNo}`
+                      : '当前项目 · 全部版本'}
+                  </p>
+                </div>
+                <Button
+                  size="small"
+                  loading={loading}
+                  onClick={() => void load()}
+                >
+                  刷新目录
+                </Button>
+              </div>
+              <div className="context-controls">
+                <Select
+                  aria-label="接口需求版本"
+                  placeholder="选择明确需求版本"
+                  value={visibleVersion ? versionId : undefined}
+                  onChange={(id) =>
+                    guard(() => {
+                      activate(null);
+                      setDirectoryScope(id);
+                    })
+                  }
+                  style={{ width: 220 }}
+                  options={navigation.requirements.flatMap((requirement) =>
+                    requirement.versions.map((version) => ({
+                      value: version.id,
+                      label: `${requirement.title} · v${version.versionNo}`,
+                    })),
+                  )}
+                />
+                {sets.length > 1 && visibleVersion && (
+                  <Select
+                    aria-label="历史用例来源"
+                    placeholder="历史来源（全部）"
+                    allowClear
+                    value={
+                      sets.some((set) => set.id === batchId)
+                        ? batchId
+                        : undefined
+                    }
+                    onChange={(id) =>
+                      guard(() => {
+                        activate(null);
+                        setBatchId(id);
+                        setSceneId(undefined);
+                      })
+                    }
+                    style={{ width: 165 }}
+                    options={sets.map((set) => ({
+                      value: set.id,
+                      label: set.title,
+                    }))}
+                  />
+                )}
+                {tester && (
+                  <>
+                    <Button
+                      size="small"
+                      disabled={
+                        !versionId ||
+                        !visibleVersion ||
+                        (!batchId && sets.length !== 1)
+                      }
+                      onClick={createScenario}
+                    >
+                      新增场景
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
             <div className="card pad">
               <Space className="mb" wrap>
                 <Button
@@ -1151,8 +1634,24 @@ export function ApiWorkbenchPage({
                 >
                   覆盖矩阵
                 </Button>
+                <Button
+                  type={caseView === 'definitions' ? 'primary' : 'default'}
+                  onClick={() => setCaseView('definitions')}
+                >
+                  接口定义
+                </Button>
               </Space>
-              {caseView === 'coverage' ? (
+              {caseView === 'definitions' ? (
+                directoryRequirement && versionId ? (
+                  <ApiDefinitionLibrary
+                    projectId={project.id}
+                    requirementId={directoryRequirement.id}
+                    versionId={versionId}
+                  />
+                ) : (
+                  <Empty description="选择明确的需求版本后查看此版登记的接口材料。" />
+                )
+              ) : caseView === 'coverage' ? (
                 <ApiCoverage
                   projectId={project.id}
                   cases={visibleCases}
@@ -1181,7 +1680,7 @@ export function ApiWorkbenchPage({
                         <Space direction="vertical" size={0}>
                           <Button
                             type="link"
-                            onClick={() => guard(() => activate(asset))}
+                            onClick={() => guard(() => openCase(asset))}
                           >
                             {asset.title}
                           </Button>
@@ -1227,40 +1726,58 @@ export function ApiWorkbenchPage({
                 />
               )}
             </div>
-          )}
-          <Collapse
-            className="mt"
-            activeKey={lookup ? ['lookup'] : []}
-            onChange={(keys) =>
-              setLookup(Array.isArray(keys) && keys.includes('lookup'))
-            }
-            items={[
-              {
-                key: 'lookup',
-                label: '原诊断找回（只读，不重发）',
-                children: <ApiDiagnosticPage project={project} />,
-              },
-            ]}
-          />
-        </section>
+            <Collapse
+              className="mt"
+              activeKey={lookup ? ['lookup'] : []}
+              onChange={(keys) =>
+                setLookup(Array.isArray(keys) && keys.includes('lookup'))
+              }
+              items={[
+                {
+                  key: 'lookup',
+                  label: '原诊断找回（只读，不重发）',
+                  children: caseWorkspace ? null : (
+                    <ApiDiagnosticPage project={project} />
+                  ),
+                },
+              ]}
+            />
+          </section>
+        </div>
       </div>
+      {createCaseOpen && versionId && (
+        <ApiScopedCaseEditor
+          key={versionId}
+          projectId={project.id}
+          userId={userId}
+          requirementVersionId={versionId}
+          scopeLabel={[
+            directoryRequirement?.title ?? '需求',
+            directoryVersion && 'v' + directoryVersion.versionNo,
+          ]
+            .filter(Boolean)
+            .join(' · ')}
+          scenarios={assets.filter(
+            (asset) =>
+              asset.targetType === 'scenario' &&
+              asset.requirementVersionId === versionId &&
+              !asset.removedAt,
+          )}
+          collections={sets}
+          initialScenarioId={sceneId}
+          onClose={() => setCreateCaseOpen(false)}
+          onSaved={async (asset) => {
+            setCreateCaseOpen(false);
+            await saved(asset);
+          }}
+        />
+      )}
       <AssetEditor
         userId={userId}
         projectId={project.id}
         target={editor}
         onClose={() => setEditor(null)}
         onSaved={saved}
-      />
-      <ApiDraftDebugger
-        projectId={project.id}
-        draft={diagnostic}
-        userId={userId}
-        onQualified={async (asset) => {
-          setDiagnostic(null);
-          await saved(asset);
-          void message.success('已保存为可回归修订。');
-        }}
-        onClose={() => setDiagnostic(null)}
       />
       <Modal
         title="用例有未保存修改"

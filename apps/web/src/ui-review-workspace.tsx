@@ -13,11 +13,9 @@ import {
   Tag,
 } from 'antd';
 import { z } from 'zod';
-import type {
-  Asset,
-  AssetContent,
-} from '../../../packages/contracts/src/assets';
+import type { Asset } from '../../../packages/contracts/src/assets';
 import {
+  uiCaseAssessmentOutcomeSchema,
   uiReviewMeetingDetailSchema,
   uiReviewMeetingListSchema,
   uiReviewMeetingMutationSchema,
@@ -25,9 +23,19 @@ import {
 } from '../../../packages/contracts/src/ui-reviews';
 import { api, describeError, isUncertainMutationError } from './api';
 import { PageHeading } from './page-heading';
+import { UiCaseText } from './ui-case-reader';
+export { UiCaseText } from './ui-case-reader';
 import './ui-review-workspace.css';
 
-type Room = z.infer<typeof uiReviewMeetingDetailSchema>;
+export type UiReviewRoom = z.infer<typeof uiReviewMeetingDetailSchema>;
+type Room = UiReviewRoom;
+type AssessmentOutcome = z.infer<typeof uiCaseAssessmentOutcomeSchema>;
+const assessmentLabels: Record<AssessmentOutcome, string> = {
+  resolved: '确认已解决',
+  needsRework: '需要补改',
+  inconclusive: '无法确认',
+};
+export { assessmentLabels };
 type Meetings = z.infer<typeof uiReviewMeetingListSchema>['meetings'];
 type Target = 'case' | 'scenario' | 'set';
 type Command = {
@@ -52,41 +60,6 @@ function latestItems(items: UiReviewWorkItem[], caseId: string) {
   return [...byOpinion.values()];
 }
 
-export function UiCaseText({ content }: { content: AssetContent }) {
-  if (!('testPoint' in content) || content.kind !== 'UI') return null;
-  return (
-    <dl className="ui-review-case-text">
-      <dt>测试点</dt>
-      <dd>{content.testPoint}</dd>
-      {content.preconditions.length > 0 && (
-        <>
-          <dt>前置条件</dt>
-          <dd>{content.preconditions.join('\n')}</dd>
-        </>
-      )}
-      <dt>文字业务步骤</dt>
-      <dd>
-        {content.steps?.length ? (
-          <ol>
-            {content.steps.map((item, index) => (
-              <li key={index}>
-                <span>{item.action}</span>
-                {item.expected && (
-                  <div className="muted">预期 {item.expected}</div>
-                )}
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <span className="muted">此历史修订未记录文字步骤</span>
-        )}
-      </dd>
-      <dt>用例整体预期</dt>
-      <dd>{content.expected}</dd>
-    </dl>
-  );
-}
-
 export function UiReviewWorkspace({
   projectId,
   userId,
@@ -100,6 +73,12 @@ export function UiReviewWorkspace({
   onReturn,
   onApprove,
   updated,
+  inlineCaseId,
+  inlineDrafts,
+  onBusyChange,
+  onSupplement,
+  onRead,
+  onCompare,
 }: {
   projectId: string;
   userId: string;
@@ -113,6 +92,16 @@ export function UiReviewWorkspace({
   onReturn: () => void;
   onApprove: (ids: string[]) => Promise<void>;
   updated: () => Promise<void>;
+  inlineCaseId?: string;
+  inlineDrafts?: Map<string, string>;
+  onBusyChange?: (busy: boolean) => void;
+  onSupplement?: (origin: {
+    meetingId: string;
+    opinionId: string;
+    round: number;
+  }) => void;
+  onRead?: (room: Room | undefined) => void;
+  onCompare?: (from: string, to: string) => void;
 }) {
   const path = '/projects/' + projectId + '/assets/ui-review-meetings';
   const storageKey =
@@ -125,9 +114,11 @@ export function UiReviewWorkspace({
   const [roomId, setRoomId] = useState<string>();
   const [room, setRoom] = useState<Room>();
   const [meetings, setMeetings] = useState<Meetings>([]);
-  const [focus, setFocus] = useState('');
+  const [focus, setFocus] = useState(inlineCaseId ?? '');
   const [selection, setSelection] = useState(initialCases);
-  const [body, setBody] = useState('');
+  const [body, setBody] = useState(() =>
+    inlineCaseId ? (inlineDrafts?.get(inlineCaseId) ?? '') : '',
+  );
   const [target, setTarget] = useState<Target>('case');
   const [affected, setAffected] = useState<string[]>([]);
   const [editId, setEditId] = useState<string>();
@@ -142,6 +133,21 @@ export function UiReviewWorkspace({
   const [returnItem, setReturnItem] = useState<UiReviewWorkItem>();
   const [instruction, setInstruction] = useState('');
   const [receiptNotice, setReceiptNotice] = useState<string>();
+  const [assessmentOutcome, setAssessmentOutcome] =
+    useState<AssessmentOutcome>();
+  const [assessmentNote, setAssessmentNote] = useState('');
+  const [assessmentInstruction, setAssessmentInstruction] = useState('');
+  const [confirmAssessment, setConfirmAssessment] = useState(false);
+
+  useEffect(() => {
+    onRead?.(room);
+    return () => onRead?.(undefined);
+  }, [onRead, room]);
+
+  useEffect(() => {
+    onBusyChange?.(submitting);
+    return () => onBusyChange?.(false);
+  }, [onBusyChange, submitting]);
 
   useEffect(() => {
     try {
@@ -163,8 +169,10 @@ export function UiReviewWorkspace({
   }, [storageKey, path]);
   useEffect(() => {
     const controller = new AbortController();
+    const query = new URLSearchParams({ requirementVersionId });
+    if (inlineCaseId) query.set('caseId', inlineCaseId);
     void api(
-      path + '?requirementVersionId=' + requirementVersionId,
+      path + '?' + query,
       { signal: controller.signal },
       uiReviewMeetingListSchema,
     )
@@ -174,7 +182,11 @@ export function UiReviewWorkspace({
         const requested = new URLSearchParams(
           window.location.hash.split('?')[1],
         ).get('meetingId');
-        if (requested && reply.meetings.some((item) => item.id === requested))
+        if (inlineCaseId) setRoomId(reply.meetings[0]?.id);
+        else if (
+          requested &&
+          reply.meetings.some((item) => item.id === requested)
+        )
           setRoomId(requested);
         setLoading(false);
       })
@@ -185,7 +197,7 @@ export function UiReviewWorkspace({
         }
       });
     return () => controller.abort();
-  }, [path, requirementVersionId]);
+  }, [path, requirementVersionId, inlineCaseId]);
   useEffect(() => {
     if (!roomId) {
       setRoom(undefined);
@@ -200,6 +212,14 @@ export function UiReviewWorkspace({
     )
       .then((value) => {
         if (controller.signal.aborted) return;
+        if (
+          inlineCaseId &&
+          !value.cases.some((item) => item.id === inlineCaseId)
+        ) {
+          setError('此评审会话不包含当前用例。');
+          setRoom(undefined);
+          return;
+        }
         setRoom(value);
         if (!value.cases.some((item) => item.id === focus))
           setFocus(value.cases[0]?.id ?? '');
@@ -208,7 +228,7 @@ export function UiReviewWorkspace({
         if (!controller.signal.aborted) setError(describeError(err));
       });
     return () => controller.abort();
-  }, [path, roomId, focus, assets]);
+  }, [path, roomId, focus, assets, inlineCaseId]);
   const active = room?.cases.find((item) => item.id === focus);
   const items = room?.state.items ?? [];
   const openItems = room && active ? latestItems(items, active.id) : [];
@@ -271,13 +291,15 @@ export function UiReviewWorkspace({
       ? [targetId]
       : affected.filter((id) => applicable.some((asset) => asset.id === id));
   const activateRoom = (id: string | undefined) => {
-    const query = new URLSearchParams(window.location.hash.split('?')[1]);
-    if (id) query.set('meetingId', id);
-    else query.delete('meetingId');
-    window.history.replaceState(null, '', '#cases?' + query.toString());
+    if (!inlineCaseId) {
+      const query = new URLSearchParams(window.location.hash.split('?')[1]);
+      if (id) query.set('meetingId', id);
+      else query.delete('meetingId');
+      window.history.replaceState(null, '', '#cases?' + query.toString());
+    }
     if (roomId !== id) {
       setRoom(undefined);
-      setFocus('');
+      setFocus(inlineCaseId ?? '');
     }
     setRoomId(id);
   };
@@ -317,6 +339,7 @@ export function UiReviewWorkspace({
         if (
           command.body.action === 'finalize' ||
           command.body.action === 'decide' ||
+          command.body.action === 'assess-case' ||
           command.body.action === 'supplement'
         )
           await updated();
@@ -424,7 +447,54 @@ export function UiReviewWorkspace({
         ...(editId ? { id: editId } : {}),
       },
     });
-    if (result) resetEditor();
+    if (result) {
+      if (inlineCaseId) inlineDrafts?.delete(inlineCaseId);
+      resetEditor();
+    }
+  }
+  const currentAssessment = room?.state.assessments?.findLast(
+    (entry) =>
+      entry.caseId === active?.id && entry.revisionId === active.revisionId,
+  );
+  const assessmentChanged = Boolean(
+    assessmentOutcome || assessmentNote.trim() || assessmentInstruction.trim(),
+  );
+  const assessmentAllowed = Boolean(
+    active &&
+    room?.state.finalized &&
+    tester &&
+    !frozenFocus &&
+    active.reviewState !== 'approved' &&
+    !openItems.some((item) => item.state === 'waiting'),
+  );
+  function clearAssessmentForm() {
+    setAssessmentOutcome(undefined);
+    setAssessmentNote('');
+    setAssessmentInstruction('');
+  }
+  async function saveAssessment() {
+    if (
+      !active ||
+      !assessmentOutcome ||
+      !assessmentAllowed ||
+      !assessmentNote.trim()
+    )
+      return;
+    if (
+      await update({
+        action: 'assess-case',
+        caseId: active.id,
+        revisionId: active.revisionId,
+        outcome: assessmentOutcome,
+        note: assessmentNote.trim(),
+        ...(assessmentOutcome === 'needsRework' && assessmentInstruction.trim()
+          ? { instruction: assessmentInstruction.trim() }
+          : {}),
+      })
+    ) {
+      clearAssessmentForm();
+      setConfirmAssessment(false);
+    }
   }
   const checkReady = Boolean(
     active &&
@@ -432,59 +502,98 @@ export function UiReviewWorkspace({
     room?.state.finalized &&
     (room.state.noChange.some((b) => b.caseId === active.id) ||
       openItems.length) &&
-    openItems.every((item) => item.state === 'resolved'),
+    openItems.every((item) => item.state === 'resolved') &&
+    currentAssessment?.outcome !== 'inconclusive' &&
+    (!inlineCaseId ||
+      (currentAssessment?.outcome === 'resolved' && !assessmentChanged)),
   );
   const blocked = submitting || Boolean(uncertain);
+  const controls = (
+    <Space wrap>
+      {!inlineCaseId && <Button onClick={onReturn}>返回用例库</Button>}
+      {room?.state.finalized && (
+        <Button onClick={() => setHandoff(true)} disabled={!outstanding.length}>
+          查看交接说明
+        </Button>
+      )}
+      {room && !room.state.finalized && tester && (
+        <Button
+          type="primary"
+          disabled={
+            blocked ||
+            (!room.state.draftOpinions.length && !room.state.noChange.length)
+          }
+          onClick={() => setFinalize(true)}
+        >
+          确认本次意见
+        </Button>
+      )}
+      {room?.state.finalized && tester && !inlineCaseId && (
+        <Button
+          disabled={!awaitingReview.length || blocked}
+          onClick={() => void onApprove(awaitingReview)}
+        >
+          预览批准（{awaitingReview.length}）
+        </Button>
+      )}
+      {room?.state.finalized && tester && !inlineCaseId && (
+        <Button
+          type="primary"
+          disabled={!eligible.length || blocked}
+          onClick={() => setForPlan(eligible)}
+        >
+          加入执行范围（{eligible.length}）
+        </Button>
+      )}
+      {inlineCaseId &&
+        room &&
+        active &&
+        tester &&
+        !frozenFocus &&
+        (room.state.finalized ? (
+          <Button
+            type="primary"
+            size="small"
+            disabled={
+              blocked || !checkReady || active.reviewState === 'approved'
+            }
+            onClick={() => void onApprove([active.id])}
+          >
+            {active.reviewState === 'approved' ? '已批准' : '批准当前修订'}
+          </Button>
+        ) : (
+          <Button
+            size="small"
+            disabled={
+              blocked ||
+              room.state.noChange.some((basis) => basis.caseId === active.id)
+            }
+            onClick={() =>
+              void update({ action: 'no-change', caseId: active.id })
+            }
+          >
+            {room.state.noChange.some((basis) => basis.caseId === active.id)
+              ? '已记录无需修改'
+              : '记录无需修改'}
+          </Button>
+        ))}
+    </Space>
+  );
+  const startingAssets = inlineCaseId
+    ? assets.filter((asset) => asset.id === inlineCaseId)
+    : assets;
   return (
     <>
-      <PageHeading
-        eyebrow="UI CASE REVIEW"
-        title="用例评审"
-        description={requirementTitle + ' · v' + versionNo}
-        actions={
-          <Space wrap>
-            <Button onClick={onReturn}>返回用例库</Button>
-            {room?.state.finalized && (
-              <Button
-                onClick={() => setHandoff(true)}
-                disabled={!outstanding.length}
-              >
-                查看交接说明
-              </Button>
-            )}
-            {room && !room.state.finalized && tester && (
-              <Button
-                type="primary"
-                disabled={
-                  blocked ||
-                  (!room.state.draftOpinions.length &&
-                    !room.state.noChange.length)
-                }
-                onClick={() => setFinalize(true)}
-              >
-                确认本次意见
-              </Button>
-            )}
-            {room?.state.finalized && tester && (
-              <Button
-                disabled={!awaitingReview.length || blocked}
-                onClick={() => void onApprove(awaitingReview)}
-              >
-                预览批准（{awaitingReview.length}）
-              </Button>
-            )}
-            {room?.state.finalized && tester && (
-              <Button
-                type="primary"
-                disabled={!eligible.length || blocked}
-                onClick={() => setForPlan(eligible)}
-              >
-                加入执行范围（{eligible.length}）
-              </Button>
-            )}
-          </Space>
-        }
-      />
+      {inlineCaseId ? (
+        controls
+      ) : (
+        <PageHeading
+          eyebrow="UI CASE REVIEW"
+          title="用例评审"
+          description={requirementTitle + ' · v' + versionNo}
+          actions={controls}
+        />
+      )}
       {error && (
         <Alert
           className="mb"
@@ -516,11 +625,13 @@ export function UiReviewWorkspace({
       {receiptNotice && (
         <Alert className="mb" type="success" showIcon title={receiptNotice} />
       )}
-      <div className="panel pad mb">
+      <div
+        className={inlineCaseId ? 'ui-review-inline-session' : 'panel pad mb'}
+      >
         <Space wrap>
           <Select
             aria-label="评审会话"
-            style={{ minWidth: 280 }}
+            style={inlineCaseId ? { maxWidth: '100%' } : { minWidth: 280 }}
             value={roomId ?? ''}
             disabled={loading || blocked}
             options={[
@@ -532,7 +643,7 @@ export function UiReviewWorkspace({
             ]}
             onChange={(id: string) => {
               activateRoom(id || undefined);
-              resetEditor();
+              if (!inlineCaseId) resetEditor();
             }}
           />
           {room && (
@@ -557,18 +668,23 @@ export function UiReviewWorkspace({
       {roomId && !room ? (
         <Skeleton active />
       ) : !room ? (
-        <section className="panel pad">
+        <section
+          className={inlineCaseId ? 'ui-review-inline-session' : 'panel pad'}
+        >
           <h2>确认本次评审范围</h2>
-          {assets.length ? (
+          {startingAssets.length ? (
             <>
               <Checkbox
                 checked={
-                  Boolean(assets.length) && selection.length === assets.length
+                  Boolean(startingAssets.length) &&
+                  selection.length === startingAssets.length
                 }
                 disabled={!tester || blocked}
                 onChange={(e) =>
                   setSelection(
-                    e.target.checked ? assets.map((item) => item.id) : [],
+                    e.target.checked
+                      ? startingAssets.map((item) => item.id)
+                      : [],
                   )
                 }
               >
@@ -578,7 +694,7 @@ export function UiReviewWorkspace({
                 className="ui-review-start-list"
                 value={selection}
                 disabled={!tester || blocked}
-                options={assets.map((asset) => ({
+                options={startingAssets.map((asset) => ({
                   value: asset.id,
                   label: asset.title + ' · r' + asset.revisionNo,
                 }))}
@@ -608,7 +724,11 @@ export function UiReviewWorkspace({
         </section>
       ) : (
         <>
-          <div className="ui-review-stages panel pad mb" aria-label="评审进程">
+          <div
+            className="ui-review-stages panel pad mb"
+            aria-label="评审进程"
+            hidden={Boolean(inlineCaseId)}
+          >
             {stepLabels.map((label, i) => (
               <div key={label} className={stage === i ? 'selected' : ''}>
                 <strong>{label}</strong>
@@ -632,163 +752,245 @@ export function UiReviewWorkspace({
               {eligible.length} / {reviewedCases.size} 条
             </p>
           )}
-          <div className="ui-review-layout">
-            <aside className="panel pad">
-              <h2>评审目录</h2>
-              {[...new Set(room.cases.map((asset) => asset.parentId))].map(
-                (parent) => (
-                  <section key={parent ?? ''} className="mb">
-                    <h3>{scenarioTitles.get(parent ?? '') ?? '用例场景'}</h3>
-                    {room.cases
-                      .filter((asset) => asset.parentId === parent)
-                      .map((asset) => (
-                        <button
-                          type="button"
-                          key={asset.id}
-                          className={
-                            asset.id === focus
-                              ? 'ui-review-entry selected'
-                              : 'ui-review-entry'
-                          }
-                          onClick={() => openCase(asset.id)}
-                        >
-                          <strong>{asset.title}</strong>
-                          <small>
-                            r{asset.revisionNo} ·{' '}
-                            {asset.removedAt
-                              ? '已移除'
-                              : asset.reviewState === 'approved'
-                                ? '已批准'
-                                : latestItems(items, asset.id).some(
-                                      (item) => item.state === 'waiting',
-                                    )
-                                  ? '待修改'
-                                  : '待复审'}
-                          </small>
-                        </button>
-                      ))}
-                  </section>
-                ),
-              )}
-            </aside>
-            <section className="panel pad">
-              {active ? (
-                <>
-                  <Space wrap className="mb">
-                    <h2>{active.title}</h2>
-                    <Tag>当前 r{active.revisionNo}</Tag>
-                  </Space>
-                  {tester &&
-                    (!room.state.finalized ? (
-                      <Button
-                        size="small"
-                        disabled={
-                          blocked ||
-                          frozenFocus ||
-                          room.state.noChange.some(
-                            (basis) => basis.caseId === active.id,
-                          )
-                        }
-                        onClick={() =>
-                          void update({
-                            action: 'no-change',
-                            caseId: active.id,
-                          })
-                        }
-                      >
-                        {room.state.noChange.some(
-                          (basis) => basis.caseId === active.id,
-                        )
-                          ? '已记录无需修改'
-                          : '记录无需修改'}
-                      </Button>
-                    ) : (
-                      <Button
-                        type="primary"
-                        size="small"
-                        disabled={
-                          blocked ||
-                          !checkReady ||
-                          active.reviewState === 'approved'
-                        }
-                        onClick={() => void onApprove([active.id])}
-                      >
-                        {active.reviewState === 'approved'
-                          ? '已批准'
-                          : '批准当前修订'}
-                      </Button>
-                    ))}
-                  <UiCaseText content={active.content} />
-                  {items.filter(
-                    (item) => item.basis.caseId === active.id && item.reply,
-                  ).length > 0 && (
-                    <section>
-                      <h3>历次回传与版本差异</h3>
-                      {[...items]
-                        .reverse()
-                        .filter(
-                          (item) =>
-                            item.basis.caseId === active.id && item.reply,
-                        )
-                        .map((item) => {
-                          const source = room.revisions.find(
-                            (rev) => rev.id === item.basis.revisionId,
-                          );
-                          const reply = room.revisions.find(
-                            (rev) => rev.id === item.reply?.revisionId,
-                          );
-                          const text = (revision: typeof source) =>
-                            revision
-                              ? [
-                                  revision.content.testPoint,
-                                  ...(revision.content.steps?.map(
-                                    (step) =>
-                                      step.action +
-                                      (step.expected
-                                        ? '\n预期 ' + step.expected
-                                        : ''),
-                                  ) ?? []),
-                                  revision.content.expected,
-                                ].join('\n')
-                              : '版本内容加载中';
-                          return (
-                            <details
-                              key={item.opinionId + '-' + item.round}
-                              className="ui-review-diff"
+          <div
+            className={
+              inlineCaseId ? 'ui-review-inline-room' : 'ui-review-layout'
+            }
+          >
+            {!inlineCaseId && (
+              <>
+                <aside className="panel pad">
+                  <h2>评审目录</h2>
+                  {[...new Set(room.cases.map((asset) => asset.parentId))].map(
+                    (parent) => (
+                      <section key={parent ?? ''} className="mb">
+                        <h3>
+                          {scenarioTitles.get(parent ?? '') ?? '用例场景'}
+                        </h3>
+                        {room.cases
+                          .filter((asset) => asset.parentId === parent)
+                          .map((asset) => (
+                            <button
+                              type="button"
+                              key={asset.id}
+                              className={
+                                asset.id === focus
+                                  ? 'ui-review-entry selected'
+                                  : 'ui-review-entry'
+                              }
+                              onClick={() => openCase(asset.id)}
                             >
-                              <summary>
-                                第 {item.round} 轮 · r{item.basis.revisionNo} →
-                                r
-                                {(item.reply &&
-                                  revisionLabel(room, item.reply.revisionId)) ||
-                                  '—'}{' '}
-                                · {statuses[item.state]}
-                              </summary>
-                              <p className="preserve-lines">
-                                {item.reply?.body}
-                              </p>
-                              <div className="ui-review-compare">
-                                <div>
-                                  <strong>基准修订</strong>
-                                  <pre>{text(source)}</pre>
-                                </div>
-                                <div>
-                                  <strong>回传修订</strong>
-                                  <pre>{text(reply)}</pre>
-                                </div>
-                              </div>
-                            </details>
-                          );
-                        })}
-                    </section>
+                              <strong>{asset.title}</strong>
+                              <small>
+                                r{asset.revisionNo} ·{' '}
+                                {asset.removedAt
+                                  ? '已移除'
+                                  : asset.reviewState === 'approved'
+                                    ? '已批准'
+                                    : latestItems(items, asset.id).some(
+                                          (item) => item.state === 'waiting',
+                                        )
+                                      ? '待修改'
+                                      : '待复审'}
+                              </small>
+                            </button>
+                          ))}
+                      </section>
+                    ),
                   )}
-                </>
-              ) : (
-                <Empty description="请选择用例" />
-              )}
-            </section>
-            <aside className="panel pad">
+                </aside>
+                <section className="panel pad">
+                  {active ? (
+                    <>
+                      <Space wrap className="mb">
+                        <h2>{active.title}</h2>
+                        <Tag>当前 r{active.revisionNo}</Tag>
+                      </Space>
+                      {tester &&
+                        (!room.state.finalized ? (
+                          <Button
+                            size="small"
+                            disabled={
+                              blocked ||
+                              frozenFocus ||
+                              room.state.noChange.some(
+                                (basis) => basis.caseId === active.id,
+                              )
+                            }
+                            onClick={() =>
+                              void update({
+                                action: 'no-change',
+                                caseId: active.id,
+                              })
+                            }
+                          >
+                            {room.state.noChange.some(
+                              (basis) => basis.caseId === active.id,
+                            )
+                              ? '已记录无需修改'
+                              : '记录无需修改'}
+                          </Button>
+                        ) : (
+                          <Button
+                            type="primary"
+                            size="small"
+                            disabled={
+                              blocked ||
+                              !checkReady ||
+                              active.reviewState === 'approved'
+                            }
+                            onClick={() => void onApprove([active.id])}
+                          >
+                            {active.reviewState === 'approved'
+                              ? '已批准'
+                              : '批准当前修订'}
+                          </Button>
+                        ))}
+                      <UiCaseText content={active.content} />
+                      {items.filter(
+                        (item) => item.basis.caseId === active.id && item.reply,
+                      ).length > 0 && (
+                        <section>
+                          <h3>历次回传与版本差异</h3>
+                          {[...items]
+                            .reverse()
+                            .filter(
+                              (item) =>
+                                item.basis.caseId === active.id && item.reply,
+                            )
+                            .map((item) => {
+                              const source = room.revisions.find(
+                                (rev) => rev.id === item.basis.revisionId,
+                              );
+                              const reply = room.revisions.find(
+                                (rev) => rev.id === item.reply?.revisionId,
+                              );
+                              const text = (revision: typeof source) =>
+                                revision
+                                  ? [
+                                      revision.content.testPoint,
+                                      ...(revision.content.steps?.map(
+                                        (step) =>
+                                          step.action +
+                                          (step.expected
+                                            ? '\n预期 ' + step.expected
+                                            : ''),
+                                      ) ?? []),
+                                      revision.content.expected,
+                                    ].join('\n')
+                                  : '版本内容加载中';
+                              return (
+                                <details
+                                  key={item.opinionId + '-' + item.round}
+                                  className="ui-review-diff"
+                                >
+                                  <summary>
+                                    第 {item.round} 轮 · r
+                                    {item.basis.revisionNo} → r
+                                    {(item.reply &&
+                                      revisionLabel(
+                                        room,
+                                        item.reply.revisionId,
+                                      )) ||
+                                      '—'}{' '}
+                                    · {statuses[item.state]}
+                                  </summary>
+                                  <p className="preserve-lines">
+                                    {item.reply?.body}
+                                  </p>
+                                  <div className="ui-review-compare">
+                                    <div>
+                                      <strong>基准修订</strong>
+                                      <pre>{text(source)}</pre>
+                                    </div>
+                                    <div>
+                                      <strong>回传修订</strong>
+                                      <pre>{text(reply)}</pre>
+                                    </div>
+                                  </div>
+                                </details>
+                              );
+                            })}
+                        </section>
+                      )}
+                    </>
+                  ) : (
+                    <Empty description="请选择用例" />
+                  )}
+                </section>
+              </>
+            )}
+            <aside
+              className={
+                inlineCaseId ? 'ui-review-inline-opinions' : 'panel pad'
+              }
+            >
               <h2>{room.state.finalized ? '评审意见与复审' : '会议意见'}</h2>
+              {assessmentAllowed && (
+                <section className="ui-review-opinion ui-review-opinion-form">
+                  <h3>人工评审结果</h3>
+                  {currentAssessment && (
+                    <p className="caption preserve-lines">
+                      已保存 · {assessmentLabels[currentAssessment.outcome]} ·{' '}
+                      {currentAssessment.note}
+                    </p>
+                  )}
+                  <Select
+                    aria-label="复审结论"
+                    placeholder="复审结论"
+                    value={assessmentOutcome}
+                    options={uiCaseAssessmentOutcomeSchema.options.map(
+                      (value) => ({ value, label: assessmentLabels[value] }),
+                    )}
+                    onChange={setAssessmentOutcome}
+                    disabled={blocked}
+                  />
+                  <Input.TextArea
+                    aria-label="评审说明"
+                    placeholder="填写复核依据和说明"
+                    rows={2}
+                    maxLength={10000}
+                    value={assessmentNote}
+                    disabled={blocked}
+                    onChange={(event) => setAssessmentNote(event.target.value)}
+                  />
+                  {assessmentOutcome === 'needsRework' && (
+                    <Input.TextArea
+                      aria-label="下一轮补改意见"
+                      placeholder="具体说明下一轮需要修改的内容"
+                      rows={2}
+                      maxLength={10000}
+                      value={assessmentInstruction}
+                      disabled={blocked}
+                      onChange={(event) =>
+                        setAssessmentInstruction(event.target.value)
+                      }
+                    />
+                  )}
+                  <Button
+                    size="small"
+                    disabled={
+                      blocked ||
+                      !assessmentOutcome ||
+                      !assessmentNote.trim() ||
+                      (assessmentOutcome === 'needsRework' &&
+                        !assessmentInstruction.trim())
+                    }
+                    onClick={() =>
+                      assessmentOutcome === 'needsRework'
+                        ? setConfirmAssessment(true)
+                        : void saveAssessment()
+                    }
+                  >
+                    保存评审结果
+                  </Button>
+                  {openItems.some((item) => item.state === 'returned') && (
+                    <p className="caption">
+                      请同时确认下方各项已回传意见的处理结果。
+                    </p>
+                  )}
+                </section>
+              )}
               {active && (
                 <>
                   {(room.state.finalized
@@ -813,6 +1015,21 @@ export function UiReviewWorkspace({
                             {assessment && (
                               <Tag>{statuses[assessment.state]}</Tag>
                             )}
+                            {tester && onSupplement && assessment && (
+                              <Button
+                                size="small"
+                                disabled={blocked}
+                                onClick={() =>
+                                  onSupplement({
+                                    meetingId: room.meeting.id,
+                                    opinionId: opinion.id,
+                                    round: assessment.round,
+                                  })
+                                }
+                              >
+                                补充用例
+                              </Button>
+                            )}
                           </Space>
                           <p className="preserve-lines">{opinion.body}</p>
                           {assessment?.instruction && (
@@ -821,9 +1038,25 @@ export function UiReviewWorkspace({
                             </p>
                           )}
                           {assessment?.reply && (
-                            <p className="preserve-lines">
-                              处理说明 {assessment.reply.body}
-                            </p>
+                            <>
+                              <p className="preserve-lines">
+                                处理说明 {assessment.reply.body}
+                              </p>
+                              {onCompare && (
+                                <Button
+                                  size="small"
+                                  onClick={() => {
+                                    if (assessment.reply)
+                                      onCompare(
+                                        assessment.basis.revisionId,
+                                        assessment.reply.revisionId,
+                                      );
+                                  }}
+                                >
+                                  查看本轮修订差异
+                                </Button>
+                              )}
+                            </>
                           )}
                           {tester && !room.state.finalized && (
                             <Space wrap>
@@ -937,7 +1170,11 @@ export function UiReviewWorkspace({
                         value={body}
                         autoSize={{ minRows: 3, maxRows: 8 }}
                         maxLength={10000}
-                        onChange={(event) => setBody(event.target.value)}
+                        onChange={(event) => {
+                          setBody(event.target.value);
+                          if (inlineCaseId && !editId)
+                            inlineDrafts?.set(inlineCaseId, event.target.value);
+                        }}
                         disabled={blocked}
                       />
                       <Space wrap>
@@ -967,6 +1204,17 @@ export function UiReviewWorkspace({
           </div>
         </>
       )}
+      <Modal
+        title="确认退回补改"
+        open={confirmAssessment}
+        confirmLoading={submitting}
+        okText="保存并退回"
+        onCancel={() => setConfirmAssessment(false)}
+        onOk={() => void saveAssessment()}
+      >
+        <p>将按当前 r{active?.revisionNo} 开启下一轮。</p>
+        <p className="preserve-lines">{assessmentInstruction}</p>
+      </Modal>
       <Modal
         title="确认本次评审意见"
         open={finalize}

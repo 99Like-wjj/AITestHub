@@ -5,6 +5,8 @@ import {
   Card,
   Collapse,
   Descriptions,
+  Empty,
+  List,
   Form,
   Input,
   Modal,
@@ -34,6 +36,7 @@ import { apiAuthoringVariableIssues } from '../../../packages/contracts/src/api-
 import { configuredEnvironment } from './api-variable-fields';
 import type { Project } from './types';
 import { uiLayers } from './ui-layers';
+import { ApiAttemptEvidence, type ResponseRule } from './api-attempt-evidence';
 
 type DebugReceipt = z.infer<typeof debugStartReceiptSchema>;
 type DebugTrace = z.infer<typeof debugTraceSchema>;
@@ -44,8 +47,10 @@ export interface DiagnosticDraft {
   sourceCaseRevisionId: string | null;
   sourceCaseRowVersion?: number;
   previewEnvironmentId?: string;
+  stepId?: string;
 }
-type Restoration = { kind: 'command' | 'run'; id: string };
+export type DiagnosticRestoration = { kind: 'command' | 'run'; id: string };
+type Restoration = DiagnosticRestoration;
 const evaluationLabels = {
   notStarted: '尚未开始判断',
   inProgress: '诊断处理中',
@@ -61,6 +66,11 @@ export function ApiDraftDebugger({
   userId,
   onQualified,
   onClose,
+  presentation = 'modal',
+  candidateCurrent = true,
+  expectedCaseId,
+  onRule,
+  onBusyChange,
 }: {
   projectId: string;
   draft: DiagnosticDraft | null;
@@ -68,12 +78,18 @@ export function ApiDraftDebugger({
   userId?: string;
   onQualified?: (asset: Asset) => Promise<void> | void;
   onClose: () => void;
+  presentation?: 'modal' | 'inline';
+  candidateCurrent?: boolean;
+  expectedCaseId?: string;
+  onRule?: (stepId: string, rule: ResponseRule) => string | undefined;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [environments, setEnvironments] = useState<TestConfigurationView[]>([]);
   const [loading, setLoading] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const [uncertain, setUncertain] = useState(false);
+  const [restoredFromLocator, setRestoredFromLocator] = useState(false);
   const [receipt, setReceipt] = useState<DebugReceipt | null>(null);
   const [trace, setTrace] = useState<DebugTrace | null>(null);
   const [restoredRunId, setRestoredRunId] = useState<string | null>(null);
@@ -87,9 +103,31 @@ export function ApiDraftDebugger({
     dataRowId?: string;
     productBuild: string;
   }>();
+  useEffect(() => {
+    onBusyChange?.(pending || savingQualification);
+    return () => onBusyChange?.(false);
+  }, [pending, savingQualification, onBusyChange]);
   const commandId = useRef<string>(crypto.randomUUID());
   const epoch = useRef(0);
   const attemptEpoch = useRef(0);
+  const diagnosticRecoveryKey =
+    draft?.sourceCaseId && userId
+      ? 'ath:api-diagnostic:v1:' +
+        userId +
+        ':' +
+        projectId +
+        ':' +
+        draft.sourceCaseId
+      : null;
+  const clearDiagnosticLocator = (id: string) => {
+    if (!diagnosticRecoveryKey) return;
+    try {
+      if (localStorage.getItem(diagnosticRecoveryKey) === id)
+        localStorage.removeItem(diagnosticRecoveryKey);
+    } catch {
+      // The on-screen receipt remains usable.
+    }
+  };
   const qualificationRecoveryKey =
     draft?.sourceCaseId && userId
       ? `ath:api-qualification:v1:${userId}:${projectId}:${draft.sourceCaseId}`
@@ -110,15 +148,29 @@ export function ApiDraftDebugger({
     if (!draft && !restoration) return;
     const generation = epoch.current;
     const controller = new AbortController();
+    let originalLocator: string | undefined;
+    if (diagnosticRecoveryKey && !restoration) {
+      try {
+        const cached = idSchema.safeParse(
+          localStorage.getItem(diagnosticRecoveryKey),
+        );
+        if (cached.success) originalLocator = cached.data;
+      } catch {
+        /* Storage access is optional when no original locator was saved. */
+      }
+    }
     commandId.current =
-      restoration?.kind === 'command' ? restoration.id : crypto.randomUUID();
+      restoration?.kind === 'command'
+        ? restoration.id
+        : (originalLocator ?? crypto.randomUUID());
     form.resetFields();
     setReceipt(null);
     setTrace(null);
     setRestoredRunId(restoration?.kind === 'run' ? restoration.id : null);
     setAttempt(null);
     setReceiptStatus(undefined);
-    setUncertain(false);
+    setUncertain(Boolean(originalLocator));
+    setRestoredFromLocator(Boolean(originalLocator));
     setError(undefined);
     setEnvironments([]);
     setLoading(true);
@@ -156,7 +208,7 @@ export function ApiDraftDebugger({
           setLoading(false);
       });
     return () => controller.abort();
-  }, [draft, restoration, projectId, form]);
+  }, [draft, restoration, projectId, form, diagnosticRecoveryKey]);
 
   async function readTrace(runId = receipt?.runId ?? restoredRunId) {
     if (!runId) return;
@@ -172,6 +224,8 @@ export function ApiDraftDebugger({
       if (epoch.current !== generation) return;
       if (result.runId !== runId)
         throw new Error('诊断回执标识不匹配，请保留原轮次 ID 查询。');
+      if (expectedCaseId && result.scope.items[0]?.caseId !== expectedCaseId)
+        throw new Error('原诊断回执不属于当前接口用例。');
       setTrace(result);
     } catch (failure) {
       if (epoch.current === generation) setError(describeError(failure));
@@ -194,9 +248,15 @@ export function ApiDraftDebugger({
         throw new Error('原诊断提交标识不匹配。');
       setReceiptStatus(result.status);
       if (result.receipt) {
+        clearDiagnosticLocator(result.commandId);
         setReceipt(result.receipt);
         setUncertain(false);
         await readTrace(result.receipt.runId);
+      } else if (result.status === 'failed' && !restoration) {
+        clearDiagnosticLocator(result.commandId);
+        commandId.current = crypto.randomUUID();
+        setUncertain(false);
+        setRestoredFromLocator(false);
       }
     } catch (failure) {
       if (epoch.current === generation)
@@ -242,12 +302,23 @@ export function ApiDraftDebugger({
     const generation = epoch.current;
     setPending(true);
     setError(undefined);
+    let sent = false;
     try {
       const selected = environments.find(
         (entry) => entry.id === values.environmentId,
       );
+      const configurationCandidate = draft.stepId
+        ? {
+            ...draft.content,
+            steps: draft.content.steps.filter(
+              (step) => step.stepId === draft.stepId,
+            ),
+            preparations: undefined,
+            cleanup: { mode: 'none' as const },
+          }
+        : draft.content;
       const invalid = apiAuthoringVariableIssues(
-        draft.content,
+        configurationCandidate,
         configuredEnvironment(selected),
       )[0];
       if (invalid)
@@ -259,23 +330,37 @@ export function ApiDraftDebugger({
         productBuild: values.productBuild?.trim() || null,
         sourceCaseId: draft.sourceCaseId,
         sourceCaseRevisionId: draft.sourceCaseRevisionId,
+        ...(draft.stepId ? { stepId: draft.stepId } : {}),
         content: draft.content,
       });
+      if (diagnosticRecoveryKey) {
+        try {
+          localStorage.setItem(diagnosticRecoveryKey, input.commandId);
+        } catch {
+          /* The on-screen command locator still protects the current editing session. */
+        }
+      }
+      sent = true;
       const response = await api(
         `/projects/${projectId}/api-executions/debug`,
         { method: 'POST', body: input },
         debugStartReceiptSchema,
       );
       if (epoch.current !== generation) return;
+      clearDiagnosticLocator(input.commandId);
       setReceipt(response);
       await readTrace(response.runId);
     } catch (failure) {
       if (epoch.current !== generation) return;
-      if (
-        failure instanceof ApiError &&
-        (failure.status === 0 || failure.status >= 500)
-      )
-        setUncertain(true);
+      if (sent) {
+        if (
+          failure instanceof ApiError &&
+          failure.status >= 400 &&
+          failure.status < 500
+        )
+          clearDiagnosticLocator(commandId.current);
+        else setUncertain(true);
+      }
       setError(describeError(failure));
     } finally {
       if (epoch.current === generation) setPending(false);
@@ -283,7 +368,12 @@ export function ApiDraftDebugger({
   }
   const expectedCleanup =
     draft?.content.cleanup.mode === 'none' ? 'notConfigured' : 'succeeded';
+  const singleStep =
+    draft?.stepId ?? trace?.scope.diagnosticStepId ?? receipt?.diagnosticStepId;
   const eligible =
+    singleStep === undefined &&
+    !restoredFromLocator &&
+    candidateCurrent &&
     Boolean(
       draft?.sourceCaseId &&
       draft.sourceCaseRevisionId &&
@@ -291,6 +381,7 @@ export function ApiDraftDebugger({
       receipt &&
       onQualified,
     ) &&
+    !receipt?.sourceChanged &&
     trace?.state === 'completed' &&
     trace.qualificationEnvironment === true &&
     trace.scope.items[0]?.caseId === draft?.sourceCaseId &&
@@ -396,6 +487,352 @@ export function ApiDraftDebugger({
       setSavingQualification(false);
     }
   }
+  const actions = (
+    <Space wrap>
+      <Button disabled={pending || savingQualification} onClick={onClose}>
+        关闭诊断
+      </Button>
+      {receipt || restoredRunId ? (
+        <Button loading={loading} onClick={() => void readTrace()}>
+          只读刷新原诊断
+        </Button>
+      ) : restoration ? (
+        <Button loading={loading} onClick={() => void recoverReceipt()}>
+          只读查询原提交
+        </Button>
+      ) : (
+        <Button
+          type="primary"
+          loading={pending}
+          disabled={
+            loading ||
+            uncertain ||
+            !environments.length ||
+            Boolean(qualificationCommand)
+          }
+          onClick={() => form.submit()}
+        >
+          {singleStep ? '确认执行所选步骤' : '确认完整调试'}
+        </Button>
+      )}
+      {qualificationCommand ? (
+        <Button
+          loading={savingQualification}
+          onClick={() => void readQualificationReceipt()}
+        >
+          查询原资格保存回执
+        </Button>
+      ) : eligible && !trace?.qualificationRetained ? (
+        <Button
+          type="primary"
+          loading={savingQualification}
+          onClick={() => void saveQualification()}
+        >
+          保存为可回归
+        </Button>
+      ) : null}
+    </Space>
+  );
+  const evidence = (
+    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      {draft ? (
+        <Alert
+          type="warning"
+          showIcon
+          title={
+            singleStep
+              ? '单步诊断会向所选环境发起真实请求'
+              : '完整调试会向所选环境发起真实请求'
+          }
+          description={
+            singleStep
+              ? '只执行所选步骤，按项目配置处理必要认证。不会执行准备、前序步骤和清理。需要的前序变量无法解析时不发送请求，单步结果不能用于回归资格。'
+              : '当前候选已固定。所选环境认可且完整调试通过后可保存为可回归。业务请求和清理遵循当前执行策略。'
+          }
+        />
+      ) : (
+        <Alert
+          type="info"
+          showIcon
+          title="按当前项目权限只读找回原诊断"
+          description="查询原提交/轮次不会启动接口或重发未知请求。找回原回执后，再读取实际进度和安全请求事实；prepared 不等于执行完成。"
+        />
+      )}
+      {error && <Alert type="error" title={error} showIcon />}
+      {uncertain && (
+        <Alert
+          type="warning"
+          showIcon
+          title={`本次开始回执未知：${commandId.current}`}
+          description="已禁重复开始。请保留此提交标识核对原诊断记录，不新建提交来推断原操作未发生。"
+          action={
+            <Button loading={loading} onClick={() => void recoverReceipt()}>
+              只读找回原开始回执
+            </Button>
+          }
+        />
+      )}
+      {receiptStatus && (
+        <Typography.Text type="secondary">
+          原提交查询状态：{receiptStatus}；只按取得的原轮次读取实际进度。
+        </Typography.Text>
+      )}
+      {draft && (
+        <Form
+          form={form}
+          layout="vertical"
+          onFinish={(values) => void start(values)}
+        >
+          <Form.Item
+            name="environmentId"
+            label="明确的诊断环境"
+            rules={[
+              { required: true, message: '请选择本次真实请求的目标环境' },
+            ]}
+          >
+            <Select
+              loading={loading && !receipt}
+              disabled={pending || Boolean(receipt) || uncertain}
+              options={environments.map((entry) => ({
+                value: entry.id,
+                label:
+                  entry.content.kind === 'environment' &&
+                  'allowApiRegressionQualification' in entry.content &&
+                  entry.content.allowApiRegressionQualification
+                    ? `${entry.content.name} · 可验证回归资格`
+                    : entry.content.name,
+              }))}
+              placeholder="请选择已确认的隔离目标"
+            />
+          </Form.Item>
+          {draft.content.dataRows?.length ? (
+            <Form.Item
+              name="dataRowId"
+              label="本轮调试数据行"
+              initialValue={draft.content.dataRows[0]?.id}
+              rules={[{ required: true }]}
+            >
+              <Select
+                disabled={pending || Boolean(receipt) || uncertain}
+                options={draft.content.dataRows.map((row) => ({
+                  value: row.id,
+                  label: `${row.name} · ${row.id}`,
+                }))}
+              />
+            </Form.Item>
+          ) : null}
+          <Form.Item name="productBuild" label="被测版本/构建标识（可留空）">
+            <Input
+              maxLength={200}
+              disabled={pending || Boolean(receipt) || uncertain}
+            />
+          </Form.Item>
+        </Form>
+      )}
+      {draft && !candidateCurrent && (
+        <Alert
+          type="info"
+          showIcon
+          title="当前编辑已改变，原诊断仍可读取"
+          description="完整调试必须对应当前候选才能保存为回归资格。"
+        />
+      )}
+      {draft && (
+        <Collapse
+          items={[
+            {
+              key: 'current',
+              label: singleStep
+                ? '本次固定请求步骤'
+                : `本次固定草稿：${draft.content.title} · ${draft.content.steps.length} 个请求`,
+              children: (
+                <pre className="message-code">
+                  {JSON.stringify(
+                    singleStep
+                      ? draft.content.steps.find(
+                          (step) => step.stepId === singleStep,
+                        )
+                      : draft.content,
+                    null,
+                    2,
+                  )}
+                </pre>
+              ),
+            },
+          ]}
+        />
+      )}
+      {receipt && (
+        <Descriptions
+          bordered
+          size="small"
+          column={1}
+          items={[
+            { key: 'id', label: '原诊断轮次', children: receipt.runId },
+            { key: 'hash', label: '草稿摘要', children: receipt.draftHash },
+            {
+              key: 'state',
+              label: '开始回执',
+              children: 'prepared：仅已准备，实际进度以原诊断读取为准',
+            },
+            {
+              key: 'source',
+              label: '来源变化',
+              children: receipt.sourceChanged
+                ? '当前草稿与保存来源有变化'
+                : '服务端未标记来源变化',
+            },
+            {
+              key: 'cleanup',
+              label: '可用清理批准引用',
+              children:
+                receipt.cleanupApprovalSnapshotId ??
+                '无可用已审清理引用，不宣称清理会执行',
+            },
+          ]}
+        />
+      )}
+      {trace && (
+        <>
+          <Space wrap>
+            <Tag>{singleStep ? '单步诊断 · 仅供排查' : '完整草稿调试'}</Tag>
+            <Tag>轮次状态：{trace.state}</Tag>
+            <Tag>{evaluationLabels[trace.evaluationStatus]}</Tag>
+          </Space>
+          <Typography.Paragraph type="secondary">
+            {trace.qualificationRetained
+              ? '此诊断作为可回归资格证据保留。'
+              : `临时诊断于 ${trace.expiresAt} 到期。`}
+            {trace.state === 'completed' &&
+            draft &&
+            trace.qualificationEnvironment !== true
+              ? ' 当前环境配置未认可用于验证回归资格。'
+              : ''}
+          </Typography.Paragraph>
+          <Table
+            size="small"
+            rowKey="runItemId"
+            pagination={false}
+            dataSource={trace.facts}
+            {...(presentation === 'modal' ? { scroll: { x: 700 } } : {})}
+            columns={[
+              {
+                title: '原始判断',
+                render: (_, fact) =>
+                  fact.originalOutcome ?? '尚无判断（不等于通过）',
+              },
+              { title: '说明', dataIndex: 'reason' },
+              { title: '清理', dataIndex: 'cleanupState' },
+              { title: '副作用确定性', dataIndex: 'sideEffectCertainty' },
+            ]}
+          />
+          <List
+            className="api-attempt-list"
+            size="small"
+            header="运行步骤与清理"
+            dataSource={trace.steps}
+            locale={{ emptyText: '尚无实际请求意图或步骤回执。' }}
+            renderItem={(step) => (
+              <List.Item
+                key={step.id}
+                actions={[
+                  <Button
+                    key="read"
+                    type="link"
+                    size="small"
+                    loading={attemptLoading && !attempt}
+                    onClick={() => void readAttempt(step.id)}
+                  >
+                    查看证据
+                  </Button>,
+                ]}
+              >
+                <List.Item.Meta
+                  title={step.stepId}
+                  description={
+                    <div className="api-attempt-summary">
+                      <Tag>{step.phase}</Tag>
+                      <span>{step.outcome ?? step.state}</span>
+                      {step.sideEffectCertainty === 'unknown' && (
+                        <Tag color="warning">待核实</Tag>
+                      )}
+                      {step.reason && <div>{step.reason}</div>}
+                    </div>
+                  }
+                />
+              </List.Item>
+            )}
+          />
+          {attempt && (
+            <Card
+              size="small"
+              title="原请求与响应"
+              extra={<Tag>{attempt.state}</Tag>}
+            >
+              <ApiAttemptEvidence
+                key={attempt.id}
+                attempt={attempt}
+                {...(onRule
+                  ? {
+                      onRule: (rule: ResponseRule) =>
+                        onRule(attempt.step_id, rule),
+                    }
+                  : {})}
+              />
+            </Card>
+          )}
+          <details>
+            <summary>运行与回执记录</summary>
+            <pre className="message-code">
+              {JSON.stringify(
+                trace.steps.map(({ id, phase, stepId, state, reason }) => ({
+                  id,
+                  phase,
+                  stepId,
+                  state,
+                  reason,
+                })),
+                null,
+                2,
+              )}
+            </pre>
+          </details>
+        </>
+      )}
+      {(receipt || restoredRunId || uncertain) && (
+        <Typography.Paragraph>
+          <a
+            href={`/#api-regression?projectId=${encodeURIComponent(projectId)}&${receipt || restoredRunId ? 'debugRunId' : 'debugCommandId'}=${encodeURIComponent(receipt?.runId ?? restoredRunId ?? commandId.current)}`}
+          >
+            打开此原诊断的只读找回页（可保留链接后刷新）
+          </a>
+        </Typography.Paragraph>
+      )}
+      {(!restoration || restoration.kind === 'command') && (
+        <Typography.Text type="secondary">
+          {restoration ? '原提交标识' : '本次提交标识'}：{commandId.current}
+        </Typography.Text>
+      )}
+    </Space>
+  );
+
+  if (presentation === 'inline') {
+    return (
+      <Card size="small" className="api-workbench-evidence" title="调试与证据">
+        {draft || restoration ? (
+          <div className="stack">
+            {actions}
+            {evidence}
+          </div>
+        ) : (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description="运行调试、单步诊断或打开原回执后，可在此查看请求、响应和判断。"
+          />
+        )}
+      </Card>
+    );
+  }
   return (
     <Modal
       zIndex={uiLayers.nestedDialog}
@@ -406,289 +843,10 @@ export function ApiDraftDebugger({
       maskClosable={!pending && !savingQualification}
       keyboard={!pending && !savingQualification}
       width={1000}
-      footer={
-        <Space>
-          <Button disabled={pending || savingQualification} onClick={onClose}>
-            关闭诊断
-          </Button>
-          {receipt || restoredRunId ? (
-            <Button loading={loading} onClick={() => void readTrace()}>
-              只读刷新原诊断
-            </Button>
-          ) : restoration ? (
-            <Button loading={loading} onClick={() => void recoverReceipt()}>
-              只读查询原提交
-            </Button>
-          ) : (
-            <Button
-              type="primary"
-              loading={pending}
-              disabled={
-                loading ||
-                uncertain ||
-                !environments.length ||
-                Boolean(qualificationCommand)
-              }
-              onClick={() => form.submit()}
-            >
-              明确开始一次草稿诊断
-            </Button>
-          )}
-          {qualificationCommand ? (
-            <Button
-              loading={savingQualification}
-              onClick={() => void readQualificationReceipt()}
-            >
-              查询原资格保存回执
-            </Button>
-          ) : eligible && !trace?.qualificationRetained ? (
-            <Button
-              type="primary"
-              loading={savingQualification}
-              onClick={() => void saveQualification()}
-            >
-              保存为可回归
-            </Button>
-          ) : null}
-        </Space>
-      }
+      footer={actions}
       destroyOnHidden
     >
-      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        {draft ? (
-          <Alert
-            type="warning"
-            showIcon
-            title="诊断会向所选环境发起真实接口请求"
-            description="当前候选已固定。所选环境认可且完整调试通过后可保存为可回归。业务请求和清理遵循当前执行策略。"
-          />
-        ) : (
-          <Alert
-            type="info"
-            showIcon
-            title="按当前项目权限只读找回原诊断"
-            description="查询原提交/轮次不会启动接口或重发未知请求。找回原回执后，再读取实际进度和安全请求事实；prepared 不等于执行完成。"
-          />
-        )}
-        {error && <Alert type="error" title={error} showIcon />}
-        {uncertain && (
-          <Alert
-            type="warning"
-            showIcon
-            title={`本次开始回执未知：${commandId.current}`}
-            description="已禁重复开始。请保留此提交标识核对原诊断记录，不新建提交来推断原操作未发生。"
-            action={
-              <Button loading={loading} onClick={() => void recoverReceipt()}>
-                只读找回原开始回执
-              </Button>
-            }
-          />
-        )}
-        {receiptStatus && (
-          <Typography.Text type="secondary">
-            原提交查询状态：{receiptStatus}；只按取得的原轮次读取实际进度。
-          </Typography.Text>
-        )}
-        {draft && (
-          <Form
-            form={form}
-            layout="vertical"
-            onFinish={(values) => void start(values)}
-          >
-            <Form.Item
-              name="environmentId"
-              label="明确的诊断环境"
-              rules={[
-                { required: true, message: '请选择本次真实请求的目标环境' },
-              ]}
-            >
-              <Select
-                loading={loading && !receipt}
-                disabled={pending || Boolean(receipt) || uncertain}
-                options={environments.map((entry) => ({
-                  value: entry.id,
-                  label:
-                    entry.content.kind === 'environment' &&
-                    'allowApiRegressionQualification' in entry.content &&
-                    entry.content.allowApiRegressionQualification
-                      ? `${entry.content.name} · 可验证回归资格`
-                      : entry.content.name,
-                }))}
-                placeholder="请选择已确认的隔离目标"
-              />
-            </Form.Item>
-            {draft.content.dataRows?.length ? (
-              <Form.Item
-                name="dataRowId"
-                label="本轮调试数据行"
-                initialValue={draft.content.dataRows[0]?.id}
-                rules={[{ required: true }]}
-              >
-                <Select
-                  disabled={pending || Boolean(receipt) || uncertain}
-                  options={draft.content.dataRows.map((row) => ({
-                    value: row.id,
-                    label: `${row.name} · ${row.id}`,
-                  }))}
-                />
-              </Form.Item>
-            ) : null}
-            <Form.Item name="productBuild" label="被测版本/构建标识（可留空）">
-              <Input
-                maxLength={200}
-                disabled={pending || Boolean(receipt) || uncertain}
-              />
-            </Form.Item>
-          </Form>
-        )}
-        {draft && (
-          <Collapse
-            items={[
-              {
-                key: 'current',
-                label: `本次固定草稿：${draft.content.title} · ${draft.content.steps.length} 个请求`,
-                children: (
-                  <pre className="message-code">
-                    {JSON.stringify(draft.content, null, 2)}
-                  </pre>
-                ),
-              },
-            ]}
-          />
-        )}
-        {receipt && (
-          <Descriptions
-            bordered
-            size="small"
-            column={1}
-            items={[
-              { key: 'id', label: '原诊断轮次', children: receipt.runId },
-              { key: 'hash', label: '草稿摘要', children: receipt.draftHash },
-              {
-                key: 'state',
-                label: '开始回执',
-                children: 'prepared：仅已准备，实际进度以原诊断读取为准',
-              },
-              {
-                key: 'source',
-                label: '来源变化',
-                children: receipt.sourceChanged
-                  ? '当前草稿与保存来源有变化'
-                  : '服务端未标记来源变化',
-              },
-              {
-                key: 'cleanup',
-                label: '可用清理批准引用',
-                children:
-                  receipt.cleanupApprovalSnapshotId ??
-                  '无可用已审清理引用，不宣称清理会执行',
-              },
-            ]}
-          />
-        )}
-        {trace && (
-          <>
-            <Space wrap>
-              <Tag>非正式诊断</Tag>
-              <Tag>轮次状态：{trace.state}</Tag>
-              <Tag>{evaluationLabels[trace.evaluationStatus]}</Tag>
-            </Space>
-            <Typography.Paragraph type="secondary">
-              {trace.qualificationRetained
-                ? '此诊断作为可回归资格证据保留。'
-                : `临时诊断于 ${trace.expiresAt} 到期。`}
-              {trace.state === 'completed' &&
-              draft &&
-              trace.qualificationEnvironment !== true
-                ? ' 当前环境配置未认可用于验证回归资格。'
-                : ''}
-            </Typography.Paragraph>
-            <Table
-              size="small"
-              rowKey="runItemId"
-              pagination={false}
-              dataSource={trace.facts}
-              scroll={{ x: 700 }}
-              columns={[
-                {
-                  title: '原始判断',
-                  render: (_, fact) =>
-                    fact.originalOutcome ?? '尚无判断（不等于通过）',
-                },
-                { title: '说明', dataIndex: 'reason' },
-                { title: '清理', dataIndex: 'cleanupState' },
-                { title: '副作用确定性', dataIndex: 'sideEffectCertainty' },
-              ]}
-            />
-            {attempt && (
-              <Collapse
-                defaultActiveKey={['attempt']}
-                items={[
-                  {
-                    key: 'attempt',
-                    label: `原安全请求回执：${attempt.id} · ${attempt.state} · ${attempt.outcome ?? '尚无判断'}`,
-                    children: (
-                      <Space direction="vertical" style={{ width: '100%' }}>
-                        <Typography.Text type="secondary">
-                          仅展示服务端脱敏后的请求、响应、断言和提取；未取得响应不能当请求成功。
-                        </Typography.Text>
-                        <pre className="message-code">
-                          {JSON.stringify(attempt, null, 2)}
-                        </pre>
-                      </Space>
-                    ),
-                  },
-                ]}
-              />
-            )}
-            <Table
-              size="small"
-              rowKey="id"
-              pagination={false}
-              dataSource={trace.steps}
-              scroll={{ x: 800 }}
-              columns={[
-                { title: '请求意图 ID', dataIndex: 'id' },
-                { title: '阶段', dataIndex: 'phase' },
-                { title: '步骤', dataIndex: 'stepId' },
-                { title: '状态', dataIndex: 'state' },
-                {
-                  title: '实际判断',
-                  render: (_, step) => step.outcome ?? '尚无判断',
-                },
-                { title: '副作用确定性', dataIndex: 'sideEffectCertainty' },
-                { title: '说明', dataIndex: 'reason' },
-                {
-                  title: '安全回执',
-                  render: (_, step) => (
-                    <Button
-                      loading={attemptLoading && !attempt}
-                      onClick={() => void readAttempt(step.id)}
-                    >
-                      查看原请求/响应
-                    </Button>
-                  ),
-                },
-              ]}
-              locale={{ emptyText: '尚无实际请求意图或步骤回执。' }}
-            />
-          </>
-        )}
-        {(receipt || restoredRunId || uncertain) && (
-          <Typography.Paragraph>
-            <a
-              href={`/#api-regression?projectId=${encodeURIComponent(projectId)}&${receipt || restoredRunId ? 'debugRunId' : 'debugCommandId'}=${encodeURIComponent(receipt?.runId ?? restoredRunId ?? commandId.current)}`}
-            >
-              打开此原诊断的只读找回页（可保留链接后刷新）
-            </a>
-          </Typography.Paragraph>
-        )}
-        {(!restoration || restoration.kind === 'command') && (
-          <Typography.Text type="secondary">
-            {restoration ? '原提交标识' : '本次提交标识'}：{commandId.current}
-          </Typography.Text>
-        )}
-      </Space>
+      {evidence}
     </Modal>
   );
 }
