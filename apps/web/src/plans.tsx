@@ -105,14 +105,12 @@ function readPlanHandoff(projectId?: string): PlanHandoff | null {
   )
     return null;
   if (kind === 'API' && approvalIds.length) return null;
-  const basis = z
-    .array(uiPlanApprovalBasisSchema)
-    .safeParse(
-      approvalIds.map((approvalSnapshotId, index) => ({
-        caseId: caseIds[index],
-        approvalSnapshotId,
-      })),
-    );
+  const basis = z.array(uiPlanApprovalBasisSchema).safeParse(
+    approvalIds.map((approvalSnapshotId, index) => ({
+      caseId: caseIds[index],
+      approvalSnapshotId,
+    })),
+  );
   if (!basis.success) return null;
   return {
     kind,

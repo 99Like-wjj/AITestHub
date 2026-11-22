@@ -303,7 +303,7 @@ export function UiCaseWorkbench({
   const activeRevision = active?.revisionId;
   const displayedRows = cases.filter(
     (asset) =>
-      (filter === 'all' || caseStage(asset) === filter) &&
+      (meetingId || filter === 'all' || caseStage(asset) === filter) &&
       [asset.title, asset.id, scenarios.get(asset.parentId ?? '') ?? ''].some(
         (value) =>
           value.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()),
@@ -562,7 +562,9 @@ export function UiCaseWorkbench({
             onClick={() => setScopePlan(true)}
           >
             预览执行范围
-            {eligibleCount === undefined ? '' : ' · ' + eligibleCount}
+            {meetingId || eligibleCount === undefined
+              ? ''
+              : ' · ' + eligibleCount}
           </Button>
         </header>
         {(error || readError) && (
@@ -581,29 +583,31 @@ export function UiCaseWorkbench({
         ) : (
           available && (
             <>
-              <div className="ui-case-metrics">
-                {(Object.entries(filters) as [Filter, string][]).map(
-                  ([key, label]) => (
-                    <button
-                      type="button"
-                      key={key}
-                      aria-pressed={filter === key}
-                      onClick={() => setFilter(key)}
-                    >
-                      <span className="ui-case-measure" data-stage={key}>
-                        <i aria-hidden="true" />
-                        {label}
-                      </span>
-                      <strong>
-                        {key === 'all'
-                          ? cases.length
-                          : cases.filter((asset) => caseStage(asset) === key)
-                              .length}
-                      </strong>
-                    </button>
-                  ),
-                )}
-              </div>
+              {!meetingId && (
+                <div className="ui-case-metrics">
+                  {(Object.entries(filters) as [Filter, string][]).map(
+                    ([key, label]) => (
+                      <button
+                        type="button"
+                        key={key}
+                        aria-pressed={filter === key}
+                        onClick={() => setFilter(key)}
+                      >
+                        <span className="ui-case-measure" data-stage={key}>
+                          <i aria-hidden="true" />
+                          {label}
+                        </span>
+                        <strong>
+                          {key === 'all'
+                            ? cases.length
+                            : cases.filter((asset) => caseStage(asset) === key)
+                                .length}
+                        </strong>
+                      </button>
+                    ),
+                  )}
+                </div>
+              )}
               <div className="ui-case-workbench-grid">
                 <aside
                   className="ui-case-workbench-column ui-case-directory"
@@ -666,7 +670,13 @@ export function UiCaseWorkbench({
                               >
                                 {asset.id}
                               </span>
-                              <UiCaseStageBadge stage={caseStage(asset)} />
+                              {meetingId ? (
+                                <span className="ui-case-snapshot-label">
+                                  会话保存
+                                </span>
+                              ) : (
+                                <UiCaseStageBadge stage={caseStage(asset)} />
+                              )}
                             </button>
                           ))}
                         </details>
@@ -685,7 +695,7 @@ export function UiCaseWorkbench({
                         ? '当前用例在筛选之外'
                         : '目录仅作用于当前工作台范围'}
                     </span>
-                    {(search || filter !== 'all') && (
+                    {(search || (!meetingId && filter !== 'all')) && (
                       <Button
                         size="small"
                         type="text"
@@ -749,6 +759,10 @@ export function UiCaseWorkbench({
                           </span>
                           {earlier ? (
                             <Tag>历史修订</Tag>
+                          ) : meetingId ? (
+                            <span className="ui-case-snapshot-label">
+                              会话保存
+                            </span>
                           ) : (
                             <UiCaseStageBadge stage={caseStage(active)} />
                           )}
@@ -900,6 +914,10 @@ export function UiCaseWorkbench({
                       <div className="ui-case-review-summary">
                         {earlier ? (
                           <Tag>历史修订</Tag>
+                        ) : meetingId ? (
+                          <span className="ui-case-snapshot-label">
+                            会话保存
+                          </span>
                         ) : (
                           <UiCaseStageBadge stage={caseStage(active)} />
                         )}
