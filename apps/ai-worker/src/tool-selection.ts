@@ -92,6 +92,11 @@ export function createModelToolSelection(
   const authorizedNames = new Set(availableNames);
   const requested = new Set<string>();
   const sizes = new WeakMap<NamedTool, number>();
+  const discoveryQueries = new Set<string>();
+  let discoveredInStep = false;
+  let discoveryPaused = false;
+  let currentNames: readonly string[] = [];
+  let planNext: (() => Set<string>) | undefined;
   const discovery = tool(
     async ({ names, offset = 0 }) => {
       const invocationId = randomUUID();
@@ -103,12 +108,48 @@ export function createModelToolSelection(
       emit({ ...event, state: 'started' });
       try {
         await authorize();
-        const requestedNames = names?.filter((name) =>
+        const distinctNames = names ? [...new Set(names)] : undefined;
+        const queryKey = JSON.stringify([
+          currentNames,
+          distinctNames ?? offset,
+        ]);
+        const reply = (result: object) => {
+          emit({ ...event, state: 'completed' });
+          return JSON.stringify(result);
+        };
+        if (distinctNames && discoveredInStep)
+          return reply({
+            status: 'alreadyPlanned',
+            instruction:
+              'A request for definitions already set the next selection. Check the attached definitions on the next step.',
+          });
+        if (discoveryQueries.has(queryKey)) {
+          discoveryPaused = true;
+          return reply({
+            status: 'alreadyAnswered',
+            instruction:
+              'This discovery already returned a result. Use a tool whose definition is attached, or finish with the information available.',
+          });
+        }
+        discoveryQueries.add(queryKey);
+        if (!distinctNames)
+          return reply({
+            availableTools: availableNames.slice(
+              offset,
+              offset + catalogPageSize,
+            ),
+            nextOffset:
+              offset + catalogPageSize < availableNames.length
+                ? offset + catalogPageSize
+                : null,
+            instruction:
+              'This catalog lists eligible names. Only attached definitions can be called.',
+          });
+        discoveredInStep = true;
+        const eligible = distinctNames.filter((name) =>
           authorizedNames.has(name),
         );
-        for (const name of requestedNames ?? []) {
-          // Only recent requests take priority. Tools not selected by the current
-          // model call remain discoverable and may be requested again.
+        for (const name of eligible) {
           requested.delete(name);
           requested.add(name);
         }
@@ -117,26 +158,16 @@ export function createModelToolSelection(
           if (first === undefined) break;
           requested.delete(first);
         }
-        emit({ ...event, state: 'completed' });
-        return JSON.stringify(
-          names
-            ? {
-                requested: requestedNames,
-                unavailable: names.filter((name) => !authorizedNames.has(name)),
-                instruction:
-                  'Use these tools after their schemas appear. If one does not fit with the others, request only that tool.',
-              }
-            : {
-                availableTools: availableNames.slice(
-                  offset,
-                  offset + catalogPageSize,
-                ),
-                nextOffset:
-                  offset + catalogPageSize < availableNames.length
-                    ? offset + catalogPageSize
-                    : null,
-              },
-        );
+        const next = planNext?.();
+        return reply({
+          selectedForNextStep: eligible.filter((name) => next?.has(name)),
+          deferred: eligible.filter((name) => !next?.has(name)),
+          unavailable: distinctNames.filter(
+            (name) => !authorizedNames.has(name),
+          ),
+          instruction:
+            'Use only attached definitions. For a deferred tool, request it alone if still needed. Do not repeat an unchanged discovery request.',
+        });
       } catch (error) {
         emit({ ...event, state: 'failed' });
         throw error;
@@ -153,7 +184,7 @@ export function createModelToolSelection(
           .optional(),
       }),
       description:
-        'List the tool names authorized for this message (continue with offset when nextOffset is returned), or request up to 3 exact names for the next model step. This only loads definitions; existing permissions, write safety and human approvals still apply. Use a tool only after it is included in the current request.',
+        'List eligible tool names (continue with nextOffset) or request up to 3 exact definitions once per model step. The reply separates selected, deferred, and unavailable tools. Use only tools with definitions attached to the current request. Existing permissions, write safety and human approvals still apply.',
     },
   );
 
@@ -167,6 +198,11 @@ export function createModelToolSelection(
 
   return {
     discovery,
+    recordAcceptedCalls(names: readonly string[]) {
+      if (!names.some((name) => name !== AI_TOOL_DISCOVERY_NAME)) return;
+      discoveryQueries.clear();
+      discoveryPaused = false;
+    },
     select<T extends NamedTool>(
       candidates: readonly T[],
       context: ToolContext,
@@ -174,7 +210,6 @@ export function createModelToolSelection(
       const byName = new Map(
         candidates.map((candidate) => [candidate.name, candidate]),
       );
-      const selected = new Set(coreTools.filter((name) => byName.has(name)));
       const prompts = context.prompts.map((prompt) => prompt.slice(0, 4_000));
       const explicit = new Set(
         prompts.join('\n').match(/\b(?:ath_|ext_)[\w-]+\b/g),
@@ -199,7 +234,6 @@ export function createModelToolSelection(
         return [];
       });
       const priorities = [
-        ...[...requested].reverse(),
         ...explicit,
         ...referenced,
         ...matched,
@@ -213,30 +247,51 @@ export function createModelToolSelection(
             ]
           : defaultTools),
       ];
-      let bytes = candidates.reduce(
-        (total, candidate) =>
-          total + (selected.has(candidate.name) ? size(candidate) : 0),
-        0,
-      );
-      let additionalCount = 0;
-      for (const name of priorities) {
-        const candidate = byName.get(name);
-        if (!candidate || selected.has(name)) continue;
-        const total = bytes + size(candidate);
-        if (
-          total > preferredSchemaBytes &&
-          !(
-            (requested.has(name) || explicit.has(name)) &&
-            additionalCount === 0
+      planNext = () => {
+        const selected = new Set(
+          coreTools.filter(
+            (name) =>
+              byName.has(name) &&
+              (name !== AI_TOOL_DISCOVERY_NAME || !discoveryPaused),
+          ),
+        );
+        let bytes = candidates.reduce(
+          (total, candidate) =>
+            total + (selected.has(candidate.name) ? size(candidate) : 0),
+          0,
+        );
+        let additionalCount = 0;
+        for (const name of [...[...requested].reverse(), ...priorities]) {
+          const candidate = byName.get(name);
+          if (
+            !candidate ||
+            selected.has(name) ||
+            name === AI_TOOL_DISCOVERY_NAME
           )
-        )
-          continue;
-        selected.add(name);
-        bytes = total;
-        if (++additionalCount === additionalToolsLimit) break;
-      }
+            continue;
+          const total = bytes + size(candidate);
+          if (
+            total > preferredSchemaBytes &&
+            !(
+              (requested.has(name) || explicit.has(name)) &&
+              additionalCount === 0
+            )
+          )
+            continue;
+          selected.add(name);
+          bytes = total;
+          if (++additionalCount === additionalToolsLimit) break;
+        }
+        return selected;
+      };
+      const selected = planNext();
+      discoveredInStep = false;
       // Stable registration order keeps repeated schema prefixes reusable.
-      return candidates.filter((candidate) => selected.has(candidate.name));
+      const tools = candidates.filter((candidate) =>
+        selected.has(candidate.name),
+      );
+      currentNames = tools.map((candidate) => candidate.name);
+      return tools;
     },
   };
 }

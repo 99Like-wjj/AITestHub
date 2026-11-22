@@ -1,6 +1,8 @@
-# PDF and Office document input
+# Document input
 
 `AgentDocumentsService` loads only files permitted by the existing file service. Internal AI reads also require the trusted task's `authorizeResource` callback. The callback and file access are checked again after parsing; parsed-content caching never caches permission.
+
+`ath_document_read` also reads verified Markdown and UTF-8 plain text. A generic `application/octet-stream` upload with a `.md`, `.markdown`, or `.txt` name still has to pass UTF-8 and text-content validation. Text reads work without a sandbox. They load at most 1 MiB and return up to four Unicode-aware chunks per call, with line ranges for citations. Use `nextOffset` to continue through the same resource. The `section` option applies to Office documents.
 
 `SandboxDocumentParser` runs a fixed parser through the independent sandbox broker. Its immutable execution image must contain the dependencies in `deploy/local/requirements.documents.txt`. Build `deploy/local/Dockerfile.documents` from the repository root and configure its exact image ID in the sandbox broker. The default wheel hashes cover Linux amd64 and CPython 3.13. Other platforms need separately reviewed wheel hashes, not an unpinned installer fallback.
 

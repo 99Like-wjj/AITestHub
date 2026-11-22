@@ -45,9 +45,10 @@ async function main() {
   const configuration = new ConfigurationService(database, broker);
   const files = new FilesService(database, storage);
   const sandbox = await createSandboxClientFromEnvironment();
-  const documents = sandbox
-    ? new AgentDocumentsService(files, new SandboxDocumentParser(sandbox))
-    : undefined;
+  const documents = new AgentDocumentsService(
+    files,
+    sandbox ? new SandboxDocumentParser(sandbox) : undefined,
+  );
   const calculation = sandbox
     ? new AgentCalculationService(
         database,
@@ -99,7 +100,7 @@ async function main() {
       officeSchedules,
       ...(retrieval ? { retrieval } : {}),
       ...(repository ? { repository } : {}),
-      ...(documents ? { documents } : {}),
+      documents,
       ...(calculation ? { calculation } : {}),
       ...(process.env.AITESTHUB_SEARCH_ENDPOINT
         ? { searchEndpoint: process.env.AITESTHUB_SEARCH_ENDPOINT }

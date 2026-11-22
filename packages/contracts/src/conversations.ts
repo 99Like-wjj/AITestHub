@@ -5,6 +5,7 @@ import { workspaceAccessModeSchema } from './workspace-access.js';
 import { aiContextResetReasonSchema } from './ai-context.js';
 import {
 commandIdSchema,
+errorCodeSchema,
 idSchema,
 persistedRowVersionSchema,
 rowVersionSchema,
@@ -28,6 +29,12 @@ sharedSkillRuleReadMetadataSchema,
 } from './skill-guidance.js';
 
 export const dataScopeSchema = modelDataScopeSchema;
+export const aiToolFailureReasonSchema = z.enum([
+  'unsupportedDocumentFormat',
+  'invalidUtf8Text',
+  'documentSizeLimit',
+  'toolNotDispatched',
+]);
 export const executionOriginSchema = z.enum([
   'fixture',
   'liveProvider',
@@ -412,6 +419,20 @@ const referenceAvailabilitySchema = z.enum([
   'notParsed',
   'notIntegrated',
 ]);
+export const aiToolEventPayloadSchema = z.strictObject({
+  type: z.literal('tool'),
+  invocationId: idSchema,
+  name: z.string().max(200),
+  state: z.enum(['started', 'completed', 'failed', 'waitingConfirmation', 'notDispatched']),
+  confirmationId: idSchema.optional(),
+  externalInvocationId: idSchema.optional(),
+  sourceRefs: z.array(aiToolSourceReferenceSchema).optional(),
+  unknownEffect: z.boolean().optional(),
+  failure: z.strictObject({
+    code: errorCodeSchema,
+    reason: aiToolFailureReasonSchema.optional(),
+  }).optional(),
+});
 export const aiTaskEventSchema = z.discriminatedUnion('type', [
   ...aiPresentationEventSchemas,
   z.strictObject({
@@ -507,16 +528,7 @@ export const aiTaskEventSchema = z.discriminatedUnion('type', [
   z.strictObject({
     ...eventBase,
     type: z.literal('ai.tool'),
-    payload: z.strictObject({
-      type: z.literal('tool'),
-      invocationId: idSchema,
-      name: z.string().max(200),
-      state: z.enum(['started', 'completed', 'failed', 'waitingConfirmation']),
-      confirmationId: idSchema.optional(),
-      externalInvocationId: idSchema.optional(),
-      sourceRefs: z.array(aiToolSourceReferenceSchema).optional(),
-      unknownEffect: z.boolean().optional(),
-    }),
+    payload: aiToolEventPayloadSchema,
   }),
   z.strictObject({
     ...eventBase,

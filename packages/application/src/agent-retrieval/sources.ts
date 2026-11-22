@@ -5,6 +5,12 @@ import type { RetrievalSource } from '../../../contracts/src/agent-retrieval.js'
 import { documentMediaTypeSchema } from '../../../contracts/src/agent-documents.js';
 import type { Database } from '../../../persistence/src/database.js';
 import { FilesService } from '../files/service.js';
+import {
+  decodeUtf8Source,
+  isTextSource,
+  maximumTextSourceBytes,
+  readBoundedSource,
+} from '../files/source-content.js';
 import { KnowledgeService } from '../knowledge/service.js';
 import type { AgentDocumentsService } from '../agent-documents/service.js';
 import type { ConversationReferences } from '../conversations/references.js';
@@ -39,14 +45,6 @@ export interface SourceBody {
   incomplete: boolean;
   nextOffset: number | null;
 }
-const textTypes = new Set([
-  'text/plain',
-  'text/markdown',
-  'text/csv',
-  'text/html',
-  'application/json',
-]);
-
 /** Reads only the explicit source selection. Authorization is never cached with its content. */
 export class RetrievalSources {
   constructor(
@@ -235,7 +233,7 @@ export class RetrievalSources {
     if (source.kind !== 'resource' || !header.resource)
       throw new DomainError('NOT_FOUND', '来源内容不存在。', 404);
     if (documentMediaTypeSchema.safeParse(header.resource.mediaType).success) {
-      if (!this.documents)
+      if (!this.documents?.parser)
         throw new DomainError(
           'DEPENDENCY_UNAVAILABLE',
           '文档解析服务未配置，不能建立真实文档索引。',
@@ -314,7 +312,7 @@ export class RetrievalSources {
         nextOffset,
       };
     }
-    if (!textTypes.has(header.resource.mediaType))
+    if (!isTextSource(header.resource))
       return {
         ...base,
         blocks: [],
@@ -328,32 +326,19 @@ export class RetrievalSources {
       { ...actor, entrypoint: 'web' },
       source.resourceId,
     );
-    const chunks: Buffer[] = [];
-    let size = 0;
-    try {
-      for await (const raw of downloaded.body) {
-        const chunk: unknown = raw;
-        if (!(chunk instanceof Uint8Array))
-          throw new DomainError(
-            'VALIDATION_ERROR',
-            '文字来源字节类型不受支持。',
-            400,
-          );
-        size += chunk.length;
-        if (size > 1_048_576)
-          throw new DomainError(
-            'PRECONDITIONS_MISSING',
-            '文字资料超过1MiB，请拆分后检索。',
-            422,
-          );
-        chunks.push(Buffer.from(chunk));
-      }
-    } finally {
-      downloaded.body.destroy();
-    }
-    let text: string;
+    const { bytes, truncated } = await readBoundedSource(
+      downloaded.body,
+      maximumTextSourceBytes,
+      scope.signal,
+    );
+    if (truncated)
+      throw new DomainError(
+        'PRECONDITIONS_MISSING',
+        '文字资料超过 1 MiB，请拆分后检索。',
+        422,
+      );
     if (
-      createHash('sha256').update(Buffer.concat(chunks)).digest('hex') !==
+      createHash('sha256').update(bytes).digest('hex') !==
       header.resource.sha256
     )
       throw new DomainError(
@@ -361,14 +346,7 @@ export class RetrievalSources {
         '来源字节与已验证摘要不符。',
         409,
       );
-    try {
-      text = new TextDecoder('utf-8', { fatal: true }).decode(
-        Buffer.concat(chunks),
-      );
-    } catch {
-      throw new DomainError('VALIDATION_ERROR', '文字资料不是有效UTF-8。', 400);
-    }
-    const lines = text.split(/\r?\n/u);
+    const lines = decodeUtf8Source(bytes).split(/\r?\n/u);
     const next = Math.min(lines.length, source.offset + source.maxUnits);
     return {
       ...base,

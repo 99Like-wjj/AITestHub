@@ -1585,7 +1585,12 @@ export function Workspace({
           : undefined);
       const response = await dispatchConversationCreate(attempt, {
         useDefaultTarget: !chosenGroup && selectedTarget === undefined,
-        ...chosenGroup,
+        ...(chosenGroup
+          ? {
+              projectId: chosenGroup.projectId,
+              requirementId: chosenGroup.requirementId,
+            }
+          : {}),
       });
       const draft = creationDrafts.current.get(attempt.commandId);
       if (current() && draft && !drafts.current.has(response.conversation.id))

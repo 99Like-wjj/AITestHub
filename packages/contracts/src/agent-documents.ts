@@ -32,7 +32,7 @@ export const documentBlockSchema = z.strictObject({
   text: z.string().max(60_000),
   imageIndexes: z.array(z.number().int().min(0).max(5)).max(6).default([]),
 });
-export const documentReadResultSchema = z.strictObject({
+export const sandboxDocumentReadResultSchema = z.strictObject({
   format: z.enum(['pdf', 'docx', 'xlsx', 'pptx']),
   state: z.enum(['readable', 'partial']),
   totalUnits: z.number().int().min(0).max(100_000),
@@ -43,12 +43,18 @@ export const documentReadResultSchema = z.strictObject({
   images: z.array(modelImageBlockSchema).max(6),
   warnings: z.array(z.string().max(1000)).max(100),
 });
+export const documentReadResultSchema = sandboxDocumentReadResultSchema.extend({
+  format: z.enum(['pdf', 'docx', 'xlsx', 'pptx', 'markdown', 'text']),
+});
 export type DocumentReadResult = z.infer<typeof documentReadResultSchema>;
+export type DocumentParserResult = z.infer<
+  typeof sandboxDocumentReadResultSchema
+>;
 export interface DocumentParserPort {
   read(
     bytes: Uint8Array,
     mediaType: z.infer<typeof documentMediaTypeSchema>,
     query: DocumentReadQuery,
     signal?: AbortSignal,
-  ): Promise<DocumentReadResult>;
+  ): Promise<DocumentParserResult>;
 }
