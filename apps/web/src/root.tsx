@@ -683,7 +683,7 @@ function SignedIn({
     <Layout className="app-shell">
       {!reportWorkspace && (
         <Layout.Sider
-          width={224}
+          width={179.2}
           collapsedWidth={56}
           collapsed={collapsed}
           theme="light"

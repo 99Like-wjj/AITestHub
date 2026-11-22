@@ -981,8 +981,8 @@ body {
   gap: 0;
 }
 .topbar.globalbar {
-  height: 72px;
-  min-height: 72px;
+  height: 61.2px;
+  min-height: 61.2px;
   padding: 0 30px;
   background: var(--surface);
   gap: 16px;
@@ -2085,13 +2085,17 @@ body {
 }
 @media (max-width: 1150px) {
   .mainnav:not(.rail) {
-    flex: 0 0 190px !important;
-    width: 190px !important;
-    min-width: 190px !important;
-    max-width: 190px !important;
+    flex: 0 0 152px !important;
+    width: 152px !important;
+    min-width: 152px !important;
+    max-width: 152px !important;
   }
   .mainnav .brand-slot {
     padding: 0 5px;
+  }
+  .mainnav:not(.rail) .ant-menu-item {
+    padding-inline: 9px !important;
+    gap: 8px;
   }
   .workspace-sidebar.live-sidebar {
     flex-basis: 242px;
@@ -2210,8 +2214,11 @@ body {
   .topbar.globalbar {
     flex-wrap: nowrap;
   }
+  .topbar.globalbar > .ant-space {
+    flex-wrap: nowrap;
+  }
   .globalbar .global-project-context .project-select {
-    max-width: 145px;
+    max-width: min(145px, 100%);
     min-width: 0;
   }
   .globalbar .profile-caption {
