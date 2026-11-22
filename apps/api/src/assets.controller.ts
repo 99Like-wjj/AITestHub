@@ -114,10 +114,6 @@ export class AssetsController {
           req.query.operation,
         ),
       );
-    if (path === 'sets' && req.method === 'POST')
-      return res
-        .status(201)
-        .json(await this.assets.createSet(actor, projectId, req.body));
     if (path === 'scenarios' && req.method === 'POST')
       return res
         .status(201)
@@ -126,10 +122,6 @@ export class AssetsController {
       return res
         .status(201)
         .json(await this.assets.createScopedCase(actor, projectId, req.body));
-    if (path === 'cases' && req.method === 'POST')
-      return res
-        .status(201)
-        .json(await this.assets.createCase(actor, projectId, req.body));
     if (path === 'submissions' && req.method === 'POST')
       return res.json(await this.assets.submit(actor, projectId, req.body));
     if (path === 'approval-previews' && req.method === 'POST')
@@ -230,8 +222,9 @@ export class AssetsController {
       /^([^/]+)(?:\/(opinions|optimization-notes|latest-approved)(?:\/([^/]+))?)?$/.exec(
         path,
       );
-    if (target?.[1]) {
-      const id = idSchema.parse(target[1]);
+    const targetId = idSchema.safeParse(target?.[1]);
+    if (target && targetId.success) {
+      const id = targetId.data;
       if (!target[2]) {
         if (req.method === 'GET')
           return res.json(await this.assets.detail(actor, projectId, id));

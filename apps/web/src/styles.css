@@ -882,8 +882,12 @@ body {
 }
 .main-sidebar.mainnav {
   background: var(--surface) !important;
+  position: sticky;
+  top: 0;
   height: 100dvh;
   padding: 26px 12px 12px;
+  overflow: hidden auto;
+  scrollbar-width: thin;
 }
 .main-sidebar .ant-layout-sider-children {
   display: flex;
@@ -1155,70 +1159,6 @@ body {
 .asset-toolbar > .searchbox {
   max-width: 245px;
 }
-.api-inline-fields.ant-space {
-  display: flex;
-  gap: 0 !important;
-}
-.api-inline-fields > .ant-space-item:has(> .request-steps) {
-  width: 100%;
-}
-.api-inline-fields .workbench-request-card.ant-card {
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-.api-inline-fields .workbench-request-card > .ant-card-head {
-  background: var(--subtle);
-  min-height: 38px;
-  font-size: 11px;
-  padding: 0 22px;
-  border-bottom: 1px solid var(--line);
-}
-.api-inline-fields .workbench-request-card > .ant-card-body {
-  padding: 18px 22px 0;
-}
-.api-inline-fields
-  .workbench-request-card
-  > .ant-card-body
-  > .ant-space-compact {
-  margin: 0 0 10px;
-}
-.api-inline-fields .request-section-tabs > .ant-tabs-nav {
-  margin-bottom: 20px;
-}
-.api-inline-fields .request-section-tabs > .ant-tabs-nav .ant-tabs-tab {
-  font-size: 12px;
-  padding-block: 9px;
-}
-.api-inline-fields .request-section-tabs > .ant-tabs-nav .ant-tabs-nav-list {
-  gap: 19px;
-}
-.api-inline-fields
-  .request-section-tabs
-  > .ant-tabs-nav
-  .ant-tabs-tab
-  + .ant-tabs-tab {
-  margin-left: 0;
-}
-.api-documentation-fields .field-label {
-  margin-bottom: 17px;
-}
-.api-documentation-fields .field-label > .ant-input,
-.api-documentation-fields .field-label > .ant-input-textarea {
-  margin-top: 6px;
-}
-.api-editor-footer {
-  margin: 22px;
-  padding-top: 17px;
-  border-top: 1px solid var(--line);
-}
-.api-inline-fields .ant-space-compact > .ant-btn-text {
-  margin-left: 10px;
-}
-.api-inline-fields .ant-space-compact > .ant-input {
-  font-family: Consolas, monospace;
-}
 .named-values-editor .kv {
   margin-bottom: 8px;
 }
@@ -1353,6 +1293,130 @@ body {
 }
 .page-heading .page-actions {
   justify-content: flex-end;
+}
+
+.page-content:has(> .requirements-page) {
+  padding: 28px clamp(16px, 2.2%, 32px) 38px;
+}
+
+.requirements-page {
+  max-width: 1780px;
+  margin-inline: auto;
+}
+
+.requirements-page > .page-heading {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.requirements-page > .page-heading > .grow {
+  flex: 0 1 auto;
+}
+
+.requirements-page > .page-heading h1 {
+  margin: 0 0 5px;
+  font-size: 28px;
+  line-height: 1.25;
+  letter-spacing: -0.025em;
+}
+
+.requirements-page > .page-heading p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.requirements-page > .page-heading .page-actions .ant-btn,
+.requirements-page .result-filters > .ant-btn {
+  min-height: 32px;
+  height: auto;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.requirements-page > .page-heading .page-actions .ant-btn {
+  gap: 6px;
+  font-weight: 650;
+}
+
+.requirements-page > .page-heading .page-actions .anticon {
+  font-size: 16px;
+}
+
+.requirements-page > .requirement-filters {
+  margin-bottom: 14px;
+}
+
+.requirements-page .result-filters {
+  border-radius: 9px;
+}
+
+.requirements-page .result-filters .result-filter-search,
+.requirements-page .result-filters .ant-select {
+  height: 32px;
+  font-size: 14px;
+}
+
+.requirements-page .result-filters .ant-input-prefix {
+  color: var(--muted);
+}
+
+.requirements-page .result-filters .segmented {
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--subtle);
+}
+
+.requirements-page .result-filters .segmented .tab {
+  min-height: 28px;
+  padding: 3px 8px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.requirements-page .requirement-list-card table {
+  min-width: 680px;
+}
+
+.requirements-page .requirement-list-card :is(th, td) {
+  padding: 11px 14px;
+  vertical-align: middle;
+}
+
+.requirements-page .requirement-list-card th {
+  font-weight: 550;
+}
+
+.requirements-page .requirement-list-card td {
+  font-size: 14px;
+}
+
+@media (max-width: 656px) {
+  .page-content:has(> .requirements-page) {
+    padding: 18px 13px 24px;
+  }
+
+  .requirements-page > .page-heading {
+    margin-bottom: 16px;
+  }
+
+  .requirements-page > .page-heading h1 {
+    font-size: 24px;
+  }
+
+  .requirements-page .result-filters .result-filter-search {
+    flex-basis: 100%;
+    max-width: none;
+  }
+
+  .requirements-page .result-filter-summary {
+    margin-inline-start: 0;
+  }
 }
 .page-content > .ant-space-vertical {
   width: 100%;

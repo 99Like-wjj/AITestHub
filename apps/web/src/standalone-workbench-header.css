@@ -17,11 +17,31 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
+  min-width: 0;
 }
 
 .standalone-workbench-header-left img {
+  display: block;
+  flex: none;
   width: 106px;
   height: auto;
+}
+
+.standalone-workbench-header-left > .ant-btn {
+  gap: 7px;
+  height: 32px;
+  padding: 4px 11px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.standalone-workbench-header-left > .ant-btn .anticon {
+  font-size: 15px;
+}
+
+.standalone-workbench-header-left .ant-typography {
+  line-height: 1.6;
 }
 
 :root[data-theme='dark'] .standalone-workbench-header-left img {
@@ -29,9 +49,12 @@
 }
 
 .standalone-workbench-project {
+  flex: 0 1 32%;
   min-width: 0;
-  max-width: 44%;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
 }
 
 @media (max-width: 650px) {

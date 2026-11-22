@@ -392,9 +392,9 @@ export class ExecutionGateway {
     configuration: FrozenConfiguration,
     step: z.infer<typeof apiRequestStepSchema>,
     variables: RuntimeVariables,
-    token?: string,
-    transaction?: SqlExecutor,
-    resolveMultipartFile?: (id: string) => Promise<MultipartAttachment>,
+    token: string | undefined,
+    transaction: SqlExecutor,
+    resolveMultipartFile: (id: string) => Promise<MultipartAttachment>,
   ): Promise<HttpTransport> {
     const context = await this.runtimeContext(
       configuration,
@@ -511,12 +511,6 @@ export class ExecutionGateway {
           });
           continue;
         }
-        if (!resolveMultipartFile)
-          throw new DomainError(
-            'DEPENDENCY_UNAVAILABLE',
-            '本实例未开放请求文件读取，未发送。',
-            503,
-          );
         parts.push({
           ...part,
           ...(await resolveMultipartFile(part.fileResourceId)),

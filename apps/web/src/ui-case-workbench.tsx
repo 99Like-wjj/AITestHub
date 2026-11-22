@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Checkbox,
+  Dropdown,
   Empty,
   Input,
   Modal,
@@ -10,7 +11,12 @@ import {
   Space,
   Tag,
 } from 'antd';
-import { AimOutlined } from '@ant-design/icons';
+import {
+  AimOutlined,
+  CalendarOutlined,
+  EllipsisOutlined,
+  SearchOutlined,
+} from '@ant-design/icons';
 import { z } from 'zod';
 import {
   assetDetailSchema,
@@ -26,6 +32,7 @@ import { uiPlanEligibilitySchema } from '../../../packages/contracts/src/plans';
 import { api, describeError } from './api';
 import { formatBeijingTime } from './beijing-time';
 import { StandaloneWorkbenchHeader } from './standalone-workbench-header';
+import { AppIcon } from './app-icon';
 import { UiCaseReader } from './ui-case-reader';
 import { UiReviewWorkspace, assessmentLabels } from './ui-review-workspace';
 import type { CaseScope } from './requirements';
@@ -44,6 +51,64 @@ const filters: Record<Filter, string> = {
   waitingHuman: '待人工复审',
   approved: '已批准',
 };
+
+export function uiStageForReviewState(
+  state: Asset['reviewState'],
+): CaseStage['stage'] {
+  return state === 'aiOptimized' ? 'waitingHuman' : state;
+}
+
+export function useUiCaseStages(
+  scope: CaseScope | null,
+  assets: Asset[],
+  enabled: boolean,
+) {
+  const [stages, setStages] = useState<CaseStage[]>([]);
+  const projectId = scope?.projectId;
+  const versionId = scope?.requirementVersionId;
+  useEffect(() => {
+    if (
+      !enabled ||
+      !projectId ||
+      !versionId ||
+      !assets.some((asset) => asset.targetType === 'case')
+    )
+      return;
+    const controller = new AbortController();
+    const query = new URLSearchParams({ requirementVersionId: versionId });
+    void api(
+      '/projects/' + projectId + '/assets/ui-case-review-stages?' + query,
+      { signal: controller.signal },
+      uiCaseReviewStageListSchema,
+    )
+      .then(({ items }) => {
+        if (!controller.signal.aborted) setStages(items);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setStages([]);
+      });
+    return () => controller.abort();
+  }, [projectId, versionId, enabled, assets]);
+  const stageByCase = useMemo(
+    () => new Map(stages.map((item) => [item.caseId, item])),
+    [stages],
+  );
+  return (asset: Asset): CaseStage['stage'] => {
+    const authoritative = enabled ? stageByCase.get(asset.id) : undefined;
+    return authoritative?.revisionId === asset.revisionId
+      ? authoritative.stage
+      : uiStageForReviewState(asset.reviewState);
+  };
+}
+
+export function UiCaseStageBadge({ stage }: { stage: CaseStage['stage'] }) {
+  return (
+    <span className="ui-case-stage" data-stage={stage}>
+      <i aria-hidden="true" />
+      {filters[stage]}
+    </span>
+  );
+}
 
 export function UiReviewHistory({
   projectId,
@@ -137,6 +202,7 @@ export function UiCaseWorkbench({
   onApprove,
   onEdit,
   onDetails,
+  onOpenTeam,
   onSupplement,
   onChanged,
   inlineDrafts,
@@ -159,6 +225,7 @@ export function UiCaseWorkbench({
   onApprove: (ids: string[]) => Promise<void>;
   onEdit: (asset: Asset) => void;
   onDetails: (asset: Asset) => void;
+  onOpenTeam: (meetingId: string) => void;
   onSupplement: (
     asset: Asset,
     origin?: { meetingId: string; opinionId: string; round: number },
@@ -171,7 +238,6 @@ export function UiCaseWorkbench({
   const [snapshot, setSnapshot] = useState<Meeting>();
   const [detail, setDetail] = useState<Detail>();
   const [liveReview, setLiveReview] = useState<Meeting>();
-  const [stages, setStages] = useState<CaseStage[]>([]);
   const [originRecord, setOriginRecord] = useState<{
     assetId: string;
     origin: SavedOrigin;
@@ -188,6 +254,7 @@ export function UiCaseWorkbench({
   }>();
   const [readError, setReadError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const [reviewActions, setReviewActions] = useState<HTMLElement | null>(null);
   const [scopePlan, setScopePlan] = useState(false);
   const [planItems, setPlanItems] = useState<PlanEligibility[]>();
   const [planError, setPlanError] = useState<string>();
@@ -214,15 +281,11 @@ export function UiCaseWorkbench({
     [assets],
   );
   const cases = meetingId ? (snapshot?.cases ?? []) : currentCases;
-  const stageByCase = new Map(stages.map((item) => [item.caseId, item]));
-  const caseStage = (asset: Asset): CaseStage['stage'] => {
-    const authoritative = meetingId ? undefined : stageByCase.get(asset.id);
-    if (authoritative?.revisionId === asset.revisionId)
-      return authoritative.stage;
-    return asset.reviewState === 'aiOptimized'
-      ? 'waitingHuman'
-      : asset.reviewState;
-  };
+  const caseStage = useUiCaseStages(
+    scope,
+    currentCases,
+    !meetingId && available,
+  );
   const active = requestedCase
     ? cases.find((asset) => asset.id === requestedCase)
     : cases[0];
@@ -237,31 +300,6 @@ export function UiCaseWorkbench({
       ),
   );
   const position = displayedRows.findIndex((asset) => asset.id === activeId);
-  useEffect(() => {
-    if (meetingId || !available || !currentCases.length) return;
-    const controller = new AbortController();
-    const query = new URLSearchParams({
-      requirementVersionId: scope.requirementVersionId,
-    });
-    void api(
-      '/projects/' + scope.projectId + '/assets/ui-case-review-stages?' + query,
-      { signal: controller.signal },
-      uiCaseReviewStageListSchema,
-    )
-      .then(({ items }) => {
-        if (!controller.signal.aborted) setStages(items);
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) setStages([]);
-      });
-    return () => controller.abort();
-  }, [
-    scope.projectId,
-    scope.requirementVersionId,
-    meetingId,
-    available,
-    currentCases,
-  ]);
   useEffect(() => {
     setFilter('all');
     setSearch('');
@@ -418,6 +456,38 @@ export function UiCaseWorkbench({
   const assessments = review?.state.assessments?.filter(
     (item) => item.caseId === activeId,
   );
+  const caseRound = review?.cases.some((row) => row.id === activeId)
+    ? Math.max(
+        1,
+        ...(texts ?? []).map((item) => item.round),
+        ...(assessments ?? []).map((item) => item.round),
+      )
+    : null;
+  const [eligibleCount, setEligibleCount] = useState<number>();
+  useEffect(() => {
+    if (readonly || !available || !tester || !currentCases.length) {
+      setEligibleCount(undefined);
+      return;
+    }
+    const controller = new AbortController();
+    void api(
+      '/projects/' + scope.projectId + '/plans/ui-eligibility',
+      { signal: controller.signal },
+      uiPlanEligibilitySchema,
+    )
+      .then(({ items }) => {
+        if (!controller.signal.aborted)
+          setEligibleCount(
+            currentCases.filter((row) =>
+              items.some((item) => item.caseId === row.id && item.eligible),
+            ).length,
+          );
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setEligibleCount(undefined);
+      });
+    return () => controller.abort();
+  }, [readonly, available, tester, currentCases, scope.projectId]);
   const origin =
     originRecord?.assetId === activeId ? originRecord?.origin : undefined;
   const sourceInScope =
@@ -458,17 +528,22 @@ export function UiCaseWorkbench({
           <div>
             <h1>{scope.title}</h1>
             <p className="caption">
-              需求版本 v{scope.versionNo} · {cases.length} 条 UI 用例
+              需求版本 v{scope.versionNo} ·{' '}
+              {new Set(cases.map((asset) => asset.parentId)).size} 个场景 ·{' '}
+              {cases.length} 条 UI 用例
               {meetingId && ' · 评审会话快照'}
               {readonly && ' · 只读'}
             </p>
           </div>
           <Button
             type="primary"
+            icon={<CalendarOutlined />}
+            aria-label="预览执行范围"
             disabled={!tester || readonly || earlier || busy || !cases.length}
             onClick={() => setScopePlan(true)}
           >
             预览执行范围
+            {eligibleCount === undefined ? '' : ' · ' + eligibleCount}
           </Button>
         </header>
         {(error || readError) && (
@@ -496,82 +571,127 @@ export function UiCaseWorkbench({
                       aria-pressed={filter === key}
                       onClick={() => setFilter(key)}
                     >
+                      <span className="ui-case-measure" data-stage={key}>
+                        <i aria-hidden="true" />
+                        {label}
+                      </span>
                       <strong>
                         {key === 'all'
                           ? cases.length
                           : cases.filter((asset) => caseStage(asset) === key)
                               .length}
                       </strong>
-                      <span>{label}</span>
                     </button>
                   ),
                 )}
               </div>
               <div className="ui-case-workbench-grid">
                 <aside
-                  className="panel pad ui-case-directory"
+                  className="ui-case-workbench-column ui-case-directory"
                   aria-label="场景与用例"
                 >
-                  <h2>场景与用例</h2>
-                  <Space.Compact block>
+                  <header className="ui-case-column-head">
+                    <h2>场景与用例</h2>
+                    <span aria-live="polite" className="caption">
+                      {displayedRows.length} / {cases.length} 条
+                    </span>
+                  </header>
+                  <div className="ui-case-directory-search">
                     <Input
+                      size="small"
                       allowClear
+                      prefix={<SearchOutlined />}
                       aria-label="搜索用例目录"
                       placeholder="搜索场景、编号或标题"
                       value={search}
                       onChange={(event) => setSearch(event.target.value)}
                     />
                     <Button
+                      size="small"
                       icon={<AimOutlined />}
                       title="定位当前用例"
                       aria-label="定位当前用例"
                       onClick={locate}
                     />
-                  </Space.Compact>
-                  <p className="caption">
-                    {displayedRows.length} / {cases.length} 条
-                    {activeId && position < 0 ? ' · 当前用例在筛选之外' : ''}
-                  </p>
-                  {[
-                    ...new Set(displayedRows.map((asset) => asset.parentId)),
-                  ].map((parentId) => (
-                    <details key={parentId ?? 'unknown'} open>
-                      <summary>
-                        {scenarios.get(parentId ?? '') ?? '用例场景'}
-                      </summary>
-                      {displayedRows
-                        .filter((asset) => asset.parentId === parentId)
-                        .map((asset) => (
-                          <button
-                            key={asset.id}
-                            type="button"
-                            className="ui-review-entry"
-                            aria-current={asset.id === activeId}
-                            disabled={busy}
-                            onClick={() => select(asset.id)}
-                          >
-                            <strong>{asset.title}</strong>
-                            <small>
-                              r{asset.revisionNo} · {filters[caseStage(asset)]}
-                            </small>
-                          </button>
-                        ))}
-                    </details>
-                  ))}
-                  {!displayedRows.length && (
-                    <Empty
-                      image={Empty.PRESENTED_IMAGE_SIMPLE}
-                      description="没有匹配用例。"
-                    />
-                  )}
+                  </div>
+                  <div className="ui-case-pane-scroll ui-case-tree">
+                    {[
+                      ...new Set(displayedRows.map((asset) => asset.parentId)),
+                    ].map((parentId) => {
+                      const group = displayedRows.filter(
+                        (asset) => asset.parentId === parentId,
+                      );
+                      return (
+                        <details key={parentId ?? 'unknown'} open>
+                          <summary>
+                            <AppIcon name="folder-closed" />
+                            {scenarios.get(parentId ?? '') ?? '用例场景'}{' '}
+                            <small>{group.length}</small>
+                          </summary>
+                          {group.map((asset) => (
+                            <button
+                              key={asset.id}
+                              type="button"
+                              className="ui-case-directory-case"
+                              aria-current={asset.id === activeId}
+                              disabled={busy}
+                              onClick={() => select(asset.id)}
+                            >
+                              <strong>{asset.title}</strong>
+                              <span className="ui-case-directory-revision">
+                                r{asset.revisionNo}
+                              </span>
+                              <span
+                                className="ui-case-asset-code"
+                                title={asset.id}
+                              >
+                                {asset.id}
+                              </span>
+                              <UiCaseStageBadge stage={caseStage(asset)} />
+                            </button>
+                          ))}
+                        </details>
+                      );
+                    })}
+                    {!displayedRows.length && (
+                      <Empty
+                        image={Empty.PRESENTED_IMAGE_SIMPLE}
+                        description="没有匹配用例。"
+                      />
+                    )}
+                  </div>
+                  <footer className="ui-case-column-foot">
+                    <span>
+                      {activeId && position < 0
+                        ? '当前用例在筛选之外'
+                        : '目录仅作用于当前工作台范围'}
+                    </span>
+                    {(search || filter !== 'all') && (
+                      <Button
+                        size="small"
+                        type="text"
+                        onClick={() => {
+                          setFilter('all');
+                          setSearch('');
+                        }}
+                      >
+                        清除筛选
+                      </Button>
+                    )}
+                  </footer>
                 </aside>
                 <section
-                  className="panel pad ui-case-workbench-reader"
+                  className="ui-case-workbench-column ui-case-workbench-reader"
                   aria-label="用例内容"
                 >
-                  <div className="ui-case-reader-head">
-                    <h2>{displayTitle ?? '用例内容'}</h2>
-                    <Space>
+                  <header className="ui-case-column-head">
+                    <h2>
+                      用例内容
+                      {position < 0
+                        ? ''
+                        : ' · ' + (position + 1) + ' / ' + displayedRows.length}
+                    </h2>
+                    <Space size={4}>
                       <Button
                         size="small"
                         disabled={busy || position <= 0}
@@ -591,216 +711,290 @@ export function UiCaseWorkbench({
                         下一条
                       </Button>
                     </Space>
-                  </div>
-                  {active ? (
-                    <>
-                      <p className="caption">
-                        {scenarios.get(active.parentId ?? '') ?? '用例场景'} ·{' '}
-                        {active.id}
-                      </p>
-                      {latestRevision && revisionId && revisions.length ? (
-                        <UiCaseReader
-                          key={active.id}
-                          revisions={[...revisions].sort(
-                            (a, b) => b.revisionNo - a.revisionNo,
+                  </header>
+                  <div
+                    className="ui-case-pane-scroll ui-case-reader-content"
+                    tabIndex={0}
+                  >
+                    {active ? (
+                      <>
+                        <div className="ui-case-reading-meta">
+                          <span
+                            className="ui-case-asset-code"
+                            title={active.id}
+                          >
+                            {active.id}
+                          </span>
+                          <span>
+                            {scenarios.get(active.parentId ?? '') ?? '用例场景'}
+                          </span>
+                          {earlier ? (
+                            <Tag>历史修订</Tag>
+                          ) : (
+                            <UiCaseStageBadge stage={caseStage(active)} />
                           )}
-                          currentRevisionId={latestRevision}
-                          revisionId={revisionId}
-                          onRevision={(id) => {
-                            if (!busy)
-                              onRevision(
-                                id === latestRevision ? undefined : id,
-                              );
-                          }}
-                          frozen={Boolean(meetingId)}
-                          comparison={
-                            comparison?.assetId === active.id
-                              ? comparison
-                              : undefined
-                          }
-                          timeline={
-                            origin ||
-                            originError?.assetId === active.id ||
-                            texts?.length ||
-                            opinions?.length ||
-                            assessments?.length ? (
-                              <Space direction="vertical">
-                                {origin && (
-                                  <article className="ui-review-opinion">
-                                    <h3>补充来源</h3>
-                                    <p className="caption">
-                                      {origin.caseId} · 修订 {origin.revisionId}
-                                      {origin.round &&
-                                        ' · 第 ' + origin.round + ' 轮'}
-                                    </p>
-                                    <p className="preserve-lines">
-                                      {origin.note}
-                                    </p>
-                                    {sourceInScope && !meetingId && (
-                                      <Button
-                                        size="small"
-                                        disabled={busy}
-                                        onClick={() => {
-                                          onCase(origin.caseId);
-                                          onRevision(origin.revisionId);
-                                        }}
-                                      >
-                                        查看源用例修订
-                                      </Button>
-                                    )}
-                                  </article>
-                                )}
-                                {originError?.assetId === active.id && (
-                                  <Alert
-                                    type="error"
-                                    showIcon
-                                    title={originError.message}
-                                  />
-                                )}
-                                {opinions?.map((opinion) => (
-                                  <p
-                                    className="preserve-lines"
-                                    key={opinion.id}
-                                  >
-                                    {opinion.body}
-                                  </p>
-                                ))}
-                                {texts?.map((item) => (
-                                  <article
-                                    key={item.opinionId + ':' + item.round}
-                                  >
-                                    <b>
-                                      第 {item.round} 轮 · r
-                                      {item.basis.revisionNo}
-                                    </b>
-                                    {item.reply && (
-                                      <p className="preserve-lines">
-                                        {item.reply.body}
+                        </div>
+                        <h2 className="ui-case-reading-title">
+                          {displayTitle}
+                        </h2>
+                        {latestRevision && revisionId && revisions.length ? (
+                          <UiCaseReader
+                            key={active.id}
+                            revisions={[...revisions].sort(
+                              (a, b) => b.revisionNo - a.revisionNo,
+                            )}
+                            currentRevisionId={latestRevision}
+                            revisionId={revisionId}
+                            onRevision={(id) => {
+                              if (!busy)
+                                onRevision(
+                                  id === latestRevision ? undefined : id,
+                                );
+                            }}
+                            frozen={Boolean(meetingId)}
+                            comparison={
+                              comparison?.assetId === active.id
+                                ? comparison
+                                : undefined
+                            }
+                            timeline={
+                              origin ||
+                              originError?.assetId === active.id ||
+                              texts?.length ||
+                              opinions?.length ||
+                              assessments?.length ? (
+                                <Space direction="vertical">
+                                  {origin && (
+                                    <article className="ui-review-opinion">
+                                      <h3>补充来源</h3>
+                                      <p className="caption">
+                                        {origin.caseId} · 修订{' '}
+                                        {origin.revisionId}
+                                        {origin.round &&
+                                          ' · 第 ' + origin.round + ' 轮'}
                                       </p>
-                                    )}
-                                    {item.instruction && (
                                       <p className="preserve-lines">
-                                        {item.instruction}
+                                        {origin.note}
                                       </p>
-                                    )}
-                                  </article>
-                                ))}
-                                {assessments?.map((entry) => (
-                                  <article
-                                    key={entry.caseId + ':' + entry.time}
-                                  >
-                                    <b>
-                                      第 {entry.round} 轮 ·{' '}
-                                      {assessmentLabels[entry.outcome]}
-                                    </b>
-                                    <p className="preserve-lines">
-                                      {entry.note}
+                                      {sourceInScope && !meetingId && (
+                                        <Button
+                                          size="small"
+                                          disabled={busy}
+                                          onClick={() => {
+                                            onCase(origin.caseId);
+                                            onRevision(origin.revisionId);
+                                          }}
+                                        >
+                                          查看源用例修订
+                                        </Button>
+                                      )}
+                                    </article>
+                                  )}
+                                  {originError?.assetId === active.id && (
+                                    <Alert
+                                      type="error"
+                                      showIcon
+                                      title={originError.message}
+                                    />
+                                  )}
+                                  {opinions?.map((opinion) => (
+                                    <p
+                                      className="preserve-lines"
+                                      key={opinion.id}
+                                    >
+                                      {opinion.body}
                                     </p>
-                                    {entry.instruction && (
+                                  ))}
+                                  {texts?.map((item) => (
+                                    <article
+                                      key={item.opinionId + ':' + item.round}
+                                    >
+                                      <b>
+                                        第 {item.round} 轮 · r
+                                        {item.basis.revisionNo}
+                                      </b>
+                                      {item.reply && (
+                                        <p className="preserve-lines">
+                                          {item.reply.body}
+                                        </p>
+                                      )}
+                                      {item.instruction && (
+                                        <p className="preserve-lines">
+                                          {item.instruction}
+                                        </p>
+                                      )}
+                                    </article>
+                                  ))}
+                                  {assessments?.map((entry) => (
+                                    <article
+                                      key={entry.caseId + ':' + entry.time}
+                                    >
+                                      <b>
+                                        第 {entry.round} 轮 ·{' '}
+                                        {assessmentLabels[entry.outcome]}
+                                      </b>
                                       <p className="preserve-lines">
-                                        {entry.instruction}
+                                        {entry.note}
                                       </p>
-                                    )}
-                                  </article>
-                                ))}
-                              </Space>
-                            ) : undefined
-                          }
-                        />
-                      ) : readError ? null : (
-                        <Skeleton active />
-                      )}
-                    </>
-                  ) : (
-                    <Empty
-                      description={
-                        requestedCase
-                          ? '所选用例不在此范围。'
-                          : '此需求版本暂无 UI 用例。'
-                      }
-                    />
-                  )}
+                                      {entry.instruction && (
+                                        <p className="preserve-lines">
+                                          {entry.instruction}
+                                        </p>
+                                      )}
+                                    </article>
+                                  ))}
+                                </Space>
+                              ) : undefined
+                            }
+                          />
+                        ) : readError ? null : (
+                          <Skeleton active />
+                        )}
+                      </>
+                    ) : (
+                      <Empty
+                        description={
+                          requestedCase
+                            ? '所选用例不在此范围。'
+                            : '此需求版本暂无 UI 用例。'
+                        }
+                      />
+                    )}
+                  </div>
                 </section>
                 <aside
-                  className="panel pad ui-case-workbench-review"
+                  className="ui-case-workbench-column ui-case-workbench-review"
                   aria-label="评审与复审"
                 >
-                  <h2>评审与复审</h2>
-                  {active && (
-                    <Tag>
-                      {earlier ? '历史修订' : filters[caseStage(active)]}
-                    </Tag>
-                  )}
-                  {readonly || earlier ? (
-                    <Alert
-                      type="info"
-                      showIcon
-                      title={
-                        earlier ? '当前阅读的是历史修订。' : '当前范围只读。'
-                      }
-                    />
-                  ) : (
-                    active &&
-                    focusedDetail?.asset.revisionId === active.revisionId && (
-                      <>
-                        {writable && (
-                          <Space wrap>
-                            <Button
-                              size="small"
-                              disabled={busy}
-                              onClick={() => onSupplement(active)}
-                            >
-                              请 AI 补充用例
-                            </Button>
-                            <Button
-                              size="small"
-                              disabled={busy}
-                              onClick={() => onEdit(active)}
-                            >
-                              编辑当前内容
-                            </Button>
-                          </Space>
+                  <header className="ui-case-column-head">
+                    <h2>评审与复审</h2>
+                    {(readonly || earlier || caseRound) && (
+                      <span className="ui-case-round">
+                        {readonly || earlier
+                          ? '只读'
+                          : '第 ' + caseRound + ' 轮'}
+                      </span>
+                    )}
+                  </header>
+                  <div className="ui-case-pane-scroll ui-case-review-content">
+                    {active && (
+                      <div className="ui-case-review-summary">
+                        {earlier ? (
+                          <Tag>历史修订</Tag>
+                        ) : (
+                          <UiCaseStageBadge stage={caseStage(active)} />
                         )}
-                        <Button
-                          size="small"
-                          disabled={busy}
-                          onClick={() => onDetails(active)}
-                        >
-                          查看资产详情
-                        </Button>
-                        <UiReviewWorkspace
-                          key={active.id}
-                          projectId={scope.projectId}
-                          userId={userId}
-                          requirementVersionId={scope.requirementVersionId}
-                          requirementTitle={scope.title}
-                          versionNo={scope.versionNo}
-                          assets={currentCases}
-                          scenarioTitles={scenarios}
-                          initialCases={[active.id]}
-                          inlineCaseId={active.id}
-                          inlineDrafts={inlineDrafts}
-                          onRead={setLiveReview}
-                          onCompare={(from, to) =>
-                            setComparison({
-                              assetId: active.id,
-                              from,
-                              to,
-                              key: crypto.randomUUID(),
-                            })
-                          }
-                          tester={writable}
-                          onReturn={onBack}
-                          onApprove={onApprove}
-                          updated={onChanged}
-                          onBusyChange={setBusy}
-                          onSupplement={(origin) =>
-                            onSupplement(active, origin)
-                          }
-                        />
-                      </>
-                    )
-                  )}
+                        <span className="ui-case-asset-code" title={active.id}>
+                          {active.id} · r
+                          {openedRevision?.revisionNo ?? active.revisionNo}
+                        </span>
+                      </div>
+                    )}
+                    {readonly || earlier ? (
+                      <Alert
+                        type="info"
+                        showIcon
+                        title={
+                          earlier ? '当前阅读的是历史修订。' : '当前范围只读。'
+                        }
+                      />
+                    ) : (
+                      active &&
+                      focusedDetail?.asset.revisionId === active.revisionId && (
+                        <>
+                          <Space wrap size={6}>
+                            {writable && (
+                              <Button
+                                size="small"
+                                icon={<AppIcon name="spark" />}
+                                disabled={busy}
+                                onClick={() => onSupplement(active)}
+                              >
+                                请 AI 补充用例
+                              </Button>
+                            )}
+                            <Dropdown
+                              trigger={['click']}
+                              menu={{
+                                items: [
+                                  ...(writable
+                                    ? [{ key: 'edit', label: '编辑当前内容' }]
+                                    : []),
+                                  { key: 'details', label: '查看资产详情' },
+                                ],
+                                onClick: ({ key }) =>
+                                  key === 'edit'
+                                    ? onEdit(active)
+                                    : onDetails(active),
+                              }}
+                            >
+                              <Button
+                                size="small"
+                                icon={<EllipsisOutlined />}
+                                aria-label="更多资产操作"
+                                disabled={busy}
+                              />
+                            </Dropdown>
+                          </Space>
+                          {caseStage(active) === 'approved' && (
+                            <article className="ui-case-approved-note">
+                              <strong>当前修订已批准</strong>
+                              <p>
+                                批准修订 r{active.revisionNo}
+                                。通过执行范围预览核对本轮可带入的用例。
+                              </p>
+                            </article>
+                          )}
+                          <UiReviewWorkspace
+                            key={active.id}
+                            projectId={scope.projectId}
+                            userId={userId}
+                            requirementVersionId={scope.requirementVersionId}
+                            requirementTitle={scope.title}
+                            versionNo={scope.versionNo}
+                            assets={currentCases}
+                            scenarioTitles={scenarios}
+                            initialCases={[active.id]}
+                            inlineCaseId={active.id}
+                            inlineActions={reviewActions}
+                            onOpenTeam={onOpenTeam}
+                            inlineDrafts={inlineDrafts}
+                            onRead={setLiveReview}
+                            onCompare={(from, to) =>
+                              setComparison({
+                                assetId: active.id,
+                                from,
+                                to,
+                                key: crypto.randomUUID(),
+                              })
+                            }
+                            tester={writable}
+                            onApprove={onApprove}
+                            updated={onChanged}
+                            onBusyChange={setBusy}
+                            onSupplement={(origin) =>
+                              onSupplement(active, origin)
+                            }
+                          />
+                        </>
+                      )
+                    )}
+                  </div>
+                  <footer
+                    ref={setReviewActions}
+                    className="ui-case-column-foot ui-case-review-actions"
+                  >
+                    {writable && active && caseStage(active) === 'approved' && (
+                      <Button
+                        size="small"
+                        type="primary"
+                        aria-label="从当前用例预览执行范围"
+                        onClick={() => setScopePlan(true)}
+                      >
+                        预览执行范围
+                      </Button>
+                    )}
+                  </footer>
                 </aside>
               </div>
             </>

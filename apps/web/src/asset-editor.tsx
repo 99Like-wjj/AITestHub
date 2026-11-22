@@ -1,5 +1,3 @@
-import { AuxiliaryAction } from './auxiliary-action';
-import { apiCaseContentSchema } from '../../../packages/contracts/src/domain';
 import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
@@ -17,9 +15,7 @@ import {
   assetReceiptSchema,
   assetOperationStatusSchema,
   assetReceiptOperationSchema,
-  createCaseInputSchema,
   createScenarioInputSchema,
-  createSetInputSchema,
   reviseAssetInputSchema,
 } from '../../../packages/contracts/src/assets';
 import type {
@@ -29,25 +25,17 @@ import type {
 import { basisRefSchema } from '../../../packages/contracts/src/domain';
 import { api, isUncertainMutationError, describeError } from './api';
 import { idSchema } from '../../../packages/contracts/src/base';
-import {
-  ApiCaseFields,
-  apiDraftFromContent,
-  emptyApiDraft,
-  serializeApiDraft,
-} from './api-case-fields';
-import type { ApiDraft } from './api-case-fields';
-import { ApiDraftDebugger } from './api-draft-debugger';
-import type { DiagnosticDraft } from './api-draft-debugger';
 import { uiLayers } from './ui-layers';
 
-export interface AssetEditorTarget {
+export type AssetEditorTarget = {
   targetType: AssetTargetType;
-  kind: 'UI' | 'API';
   requirementVersionId: string;
   setId: string | null;
   scenarioId: string | null;
-  asset: Asset | null;
-}
+} & (
+  | { kind: 'UI'; asset: Asset }
+  | { kind: 'API'; asset: null; targetType: 'scenario' }
+);
 type Basis = z.infer<typeof basisRefSchema>;
 interface Fields {
   title: string;
@@ -90,7 +78,6 @@ export function AssetEditor({
 }) {
   const [form] = Form.useForm<Fields>();
   const [basis, setBasis] = useState<Basis[]>([]);
-  const [apiDraft, setApiDraft] = useState<ApiDraft | null>(null);
   const [pending, setPending] = useState(false);
   const [uncertain, setUncertain] = useState(false);
   const [recovering, setRecovering] = useState(false);
@@ -104,8 +91,6 @@ export function AssetEditor({
   const [error, setError] = useState<string>();
   const [dirty, setDirty] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
-  const [diagnosticDraft, setDiagnosticDraft] =
-    useState<DiagnosticDraft | null>(null);
   const commandId = useRef<string>(crypto.randomUUID());
   useEffect(() => {
     if (!target) return;
@@ -113,11 +98,7 @@ export function AssetEditor({
     commandId.current = crypto.randomUUID();
     pendingOperation.current = target.asset
       ? 'assets.revise'
-      : target.targetType === 'set'
-        ? 'assets.create-set'
-        : target.targetType === 'scenario'
-          ? 'assets.create-scenario'
-          : 'assets.create-case';
+      : 'assets.create-scenario';
     busy.current = false;
     setUncertain(false);
     setRecovering(false);
@@ -148,7 +129,6 @@ export function AssetEditor({
     setError(undefined);
     setDirty(false);
     setDiscardOpen(false);
-    setDiagnosticDraft(null);
     const content = target.asset?.content;
     form.setFieldsValue({
       title: content?.title ?? '',
@@ -170,15 +150,6 @@ export function AssetEditor({
           : [{ action: '' }],
     });
     setBasis(content?.basisRefs ?? []);
-    setApiDraft(
-      content && 'dslVersion' in content
-        ? apiDraftFromContent(content)
-        : target.kind === 'API' &&
-            target.targetType === 'case' &&
-            target.scenarioId
-          ? emptyApiDraft(target.scenarioId)
-          : null,
-    );
     return () => {
       generation.current += 1;
     };
@@ -187,38 +158,6 @@ export function AssetEditor({
     if (pending) return;
     if (dirty || uncertain) setDiscardOpen(true);
     else onClose();
-  }
-  async function prepareDiagnostic() {
-    if (
-      !target ||
-      !apiDraft ||
-      target.targetType !== 'case' ||
-      target.kind !== 'API'
-    )
-      return;
-    setError(undefined);
-    try {
-      const values = await form.validateFields();
-      const content = serializeApiDraft({
-        ...apiDraft,
-        base: { ...apiDraft.base, ...caseCommon(values, basis) },
-      });
-      setDiagnosticDraft({
-        content,
-        sourceCaseId: target.asset?.id ?? null,
-        sourceCaseRevisionId: target.asset?.revisionId ?? null,
-      });
-    } catch (failure) {
-      setError(
-        failure instanceof z.ZodError
-          ? failure.issues
-              .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
-              .join('；')
-          : failure instanceof Error
-            ? describeError(failure)
-            : '请先补齐当前草稿的必填信息，再准备诊断。',
-      );
-    }
   }
   async function save(values: Fields) {
     if (!target || busy.current || uncertain) return;
@@ -240,25 +179,16 @@ export function AssetEditor({
           sharedPreconditions: lines(values.preconditions),
           basisRefs: basis,
         };
-      else {
-        const common = caseCommon(values, basis);
-        if (target.kind === 'API') {
-          if (!apiDraft) throw new Error('接口请求草稿尚未就绪。');
-          content = serializeApiDraft({
-            ...apiDraft,
-            base: { ...apiDraft.base, ...common },
-          });
-        } else
-          content = {
-            kind: 'UI',
-            scenarioId: target.scenarioId,
-            ...common,
-            steps: values.steps.map(({ action, expected }) => ({
-              action,
-              ...(expected?.trim() ? { expected } : {}),
-            })),
-          };
-      }
+      else
+        content = {
+          kind: 'UI',
+          scenarioId: target.scenarioId,
+          ...caseCommon(values, basis),
+          steps: values.steps.map(({ action, expected }) => ({
+            action,
+            ...(expected?.trim() ? { expected } : {}),
+          })),
+        };
       let body: unknown;
       let path: string;
       if (target.asset) {
@@ -269,28 +199,13 @@ export function AssetEditor({
           content,
         });
         path = `/${target.asset.id}`;
-      } else if (target.targetType === 'set') {
-        body = createSetInputSchema.parse({
-          commandId: commandId.current,
-          kind: target.kind,
-          requirementVersionId: target.requirementVersionId,
-          content,
-        });
-        path = '/sets';
-      } else if (target.targetType === 'scenario') {
+      } else {
         body = createScenarioInputSchema.parse({
           commandId: commandId.current,
           setId: target.setId,
           content,
         });
         path = '/scenarios';
-      } else {
-        body = createCaseInputSchema.parse({
-          commandId: commandId.current,
-          scenarioId: target.scenarioId,
-          content,
-        });
-        path = '/cases';
       }
       const response = await api(
         `/projects/${projectId}/assets${path}`,
@@ -372,11 +287,7 @@ export function AssetEditor({
           commandId.current = crypto.randomUUID();
           pendingOperation.current = target?.asset
             ? 'assets.revise'
-            : target?.targetType === 'set'
-              ? 'assets.create-set'
-              : target?.targetType === 'scenario'
-                ? 'assets.create-scenario'
-                : 'assets.create-case';
+            : 'assets.create-scenario';
           return;
         }
         setUncertain(false);
@@ -409,23 +320,13 @@ export function AssetEditor({
             ? `${target.asset ? '保存新修订' : '新建'} · ${target.kind} ${targetTypeLabels[target.targetType]}`
             : '资产编辑'
         }
-        width={
-          target?.kind === 'API' && target.targetType === 'case' ? 1150 : 850
-        }
+        width={850}
         onCancel={requestClose}
         closable={!pending}
         maskClosable={!pending}
         keyboard={!pending}
         footer={
           <Space>
-            {apiDraft && target?.targetType === 'case' && (
-              <Button
-                disabled={pending || uncertain}
-                onClick={() => void prepareDiagnostic()}
-              >
-                诊断当前 API 草稿
-              </Button>
-            )}
             <Button disabled={pending} onClick={requestClose}>
               取消
             </Button>
@@ -442,9 +343,8 @@ export function AssetEditor({
         destroyOnHidden
       >
         <Typography.Paragraph type="secondary">
-          保存保留历史修订与已审快照，不自动批准。UI
-          用例描述业务目标，不强制预写点击步骤；UI/API
-          的批次、场景和用例身份独立。
+          保存时建立待确认内容，旧修订及已审快照继续可查。UI
+          用例步骤使用业务语言。
         </Typography.Paragraph>
         {target?.asset && (
           <Alert
@@ -694,50 +594,6 @@ export function AssetEditor({
             添加明确依据说明
           </Button>
         </Space>
-        {apiDraft && target?.targetType === 'case' && (
-          <div className="section-alert">
-            {target.asset &&
-              apiCaseContentSchema.safeParse(target.asset.content).success && (
-                <Space wrap>
-                  {(() => {
-                    const content = apiCaseContentSchema.parse(
-                      target.asset.content,
-                    );
-                    return content.cleanup.mode === 'none'
-                      ? null
-                      : content.cleanup.steps
-                          .filter((step) => step.type === 'sql')
-                          .map((step) => (
-                            <AuxiliaryAction
-                              key={step.cleanupStepId}
-                              label={`AI审核SQL · ${step.cleanupStepId}`}
-                              disabled={dirty || pending || uncertain}
-                              source={() => ({
-                                purpose: 'sqlReview',
-                                projectId,
-                                caseId: target.asset!.id,
-                                caseRevisionId: target.asset!.revisionId,
-                                cleanupStepId: step.cleanupStepId,
-                              })}
-                            />
-                          ));
-                  })()}
-                  <Typography.Text type="secondary">
-                    可选审核使用已保存修订；有未保存修改时请先保存，审核不执行SQL，也不锁定保存或运行。
-                  </Typography.Text>
-                </Space>
-              )}
-            <ApiCaseFields
-              projectId={projectId}
-              value={apiDraft}
-              disabled={pending || uncertain}
-              onChange={(value) => {
-                setApiDraft(value);
-                setDirty(true);
-              }}
-            />
-          </div>
-        )}
         {uncertain && (
           <Alert
             className="section-alert"
@@ -761,11 +617,7 @@ export function AssetEditor({
                       commandId.current = crypto.randomUUID();
                       pendingOperation.current = target?.asset
                         ? 'assets.revise'
-                        : target?.targetType === 'set'
-                          ? 'assets.create-set'
-                          : target?.targetType === 'scenario'
-                            ? 'assets.create-scenario'
-                            : 'assets.create-case';
+                        : 'assets.create-scenario';
                       setUncertain(false);
                       setKnownFailed(false);
                       setError(undefined);
@@ -787,11 +639,6 @@ export function AssetEditor({
           </p>
         )}
       </Modal>
-      <ApiDraftDebugger
-        projectId={projectId}
-        draft={diagnosticDraft}
-        onClose={() => setDiagnosticDraft(null)}
-      />
       <Modal
         open={discardOpen}
         zIndex={uiLayers.confirmation}

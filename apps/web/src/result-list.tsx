@@ -9,6 +9,7 @@ interface ResultSearch {
   onCompositionChange?: (composing: boolean) => void;
   placeholder?: string;
   maxLength?: number;
+  prefix?: ReactNode;
 }
 
 export function ResultFilters({
@@ -29,6 +30,7 @@ export function ResultFilters({
         aria-label={search.label}
         placeholder={search.placeholder ?? search.label}
         value={search.value}
+        prefix={search.prefix}
         allowClear
         maxLength={search.maxLength ?? 200}
         onChange={(event) => search.onChange(event.target.value)}

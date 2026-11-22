@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import {
   Alert,
   App,
@@ -64,9 +64,13 @@ function responseFields(value: JsonValue) {
 export function ApiAttemptEvidence({
   attempt,
   onRule,
+  cleanup,
+  logs,
 }: {
   attempt: Attempt;
   onRule?: (rule: ResponseRule) => string | undefined;
+  cleanup?: ReactNode;
+  logs?: ReactNode;
 }) {
   const { message } = App.useApp();
   const [raw, setRaw] = useState(false);
@@ -224,7 +228,7 @@ export function ApiAttemptEvidence({
           },
           {
             key: 'request',
-            label: '实际请求',
+            label: cleanup ? '请求' : '实际请求',
             children: (
               <div className="stack">
                 {request.success && (
@@ -270,6 +274,10 @@ export function ApiAttemptEvidence({
               </pre>
             ),
           },
+          ...(cleanup
+            ? [{ key: 'cleanup', label: '清理', children: cleanup }]
+            : []),
+          ...(logs ? [{ key: 'logs', label: '日志', children: logs }] : []),
         ]}
       />
       <Modal

@@ -20,35 +20,50 @@ export function UiCaseText({ content }: { content: AssetContent }) {
   if (!value) return null;
   return (
     <dl className="ui-review-case-text">
-      <dt>测试点</dt>
-      <dd>{value.testPoint}</dd>
+      <div>
+        <dt>测试点</dt>
+        <dd>{value.testPoint}</dd>
+      </div>
       {value.preconditions.length > 0 && (
-        <>
+        <div>
           <dt>前置条件</dt>
-          <dd>{value.preconditions.join('\n')}</dd>
-        </>
+          <dd>
+            <ul>
+              {value.preconditions.map((condition, index) => (
+                <li key={index}>{condition}</li>
+              ))}
+            </ul>
+          </dd>
+        </div>
       )}
-      <dt>业务步骤与逐步预期</dt>
-      <dd>
-        {value.steps?.length ? (
-          <ol>
-            {value.steps.map((step, index) => (
-              <li key={index}>
-                {step.action}
-                {step.expected && (
-                  <div className="muted">预期 {step.expected}</div>
-                )}
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <span className="muted">该修订未记录文字业务步骤</span>
-        )}
-      </dd>
-      <dt>用例整体预期</dt>
-      <dd>{value.expected}</dd>
+      <div>
+        <dt>业务步骤与逐步预期</dt>
+        <dd>
+          {value.steps?.length ? (
+            <ol className="ui-case-steps">
+              {value.steps.map((step, index) => (
+                <li key={index} className="ui-case-step-text">
+                  <span aria-hidden="true">{index + 1}</span>
+                  <div>
+                    {step.action}
+                    {step.expected && (
+                      <div className="muted">预期 {step.expected}</div>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <span className="muted">该修订未记录文字业务步骤</span>
+          )}
+        </dd>
+      </div>
+      <div className="ui-case-expected-block">
+        <dt>用例整体预期</dt>
+        <dd>{value.expected}</dd>
+      </div>
       {value.basisRefs.length > 0 && (
-        <>
+        <div>
           <dt>需求依据</dt>
           <dd>
             <ul>
@@ -57,7 +72,7 @@ export function UiCaseText({ content }: { content: AssetContent }) {
               ))}
             </ul>
           </dd>
-        </>
+        </div>
       )}
     </dl>
   );
@@ -243,6 +258,7 @@ export function UiCaseReader({
         <b>用例修订</b>
         <Select
           aria-label="用例修订"
+          size="small"
           disabled={revisions.length < 2}
           value={selected.id}
           options={revisions.map((entry) => ({

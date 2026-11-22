@@ -31,6 +31,7 @@ export function ApiCleanupFields({
   disabled,
   previewEnvironmentId,
   preparationVariables,
+  expanded = false,
 }: {
   projectId: string;
   value: ApiDraft;
@@ -38,6 +39,7 @@ export function ApiCleanupFields({
   disabled: boolean;
   previewEnvironmentId?: string | undefined;
   preparationVariables?: ApiPreparationVariables | undefined;
+  expanded?: boolean;
 }) {
   const [configurations, setConfigurations] = useState<TestConfigurationView[]>(
     [],
@@ -135,6 +137,7 @@ export function ApiCleanupFields({
   }
   return (
     <Collapse
+      {...(expanded ? { defaultActiveKey: ['cleanup'] } : {})}
       items={[
         {
           key: 'cleanup',

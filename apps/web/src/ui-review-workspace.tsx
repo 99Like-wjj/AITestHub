@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Alert,
   Button,
@@ -24,7 +25,6 @@ import {
 import { api, describeError, isUncertainMutationError } from './api';
 import { PageHeading } from './page-heading';
 import { UiCaseText } from './ui-case-reader';
-export { UiCaseText } from './ui-case-reader';
 import './ui-review-workspace.css';
 
 export type UiReviewRoom = z.infer<typeof uiReviewMeetingDetailSchema>;
@@ -70,10 +70,11 @@ export function UiReviewWorkspace({
   scenarioTitles,
   initialCases,
   tester,
-  onReturn,
   onApprove,
   updated,
   inlineCaseId,
+  inlineActions,
+  onOpenTeam,
   inlineDrafts,
   onBusyChange,
   onSupplement,
@@ -89,10 +90,11 @@ export function UiReviewWorkspace({
   scenarioTitles: Map<string, string>;
   initialCases: string[];
   tester: boolean;
-  onReturn: () => void;
   onApprove: (ids: string[]) => Promise<void>;
   updated: () => Promise<void>;
   inlineCaseId?: string;
+  inlineActions?: HTMLElement | null;
+  onOpenTeam?: (id: string) => void;
   inlineDrafts?: Map<string, string>;
   onBusyChange?: (busy: boolean) => void;
   onSupplement?: (origin: {
@@ -137,6 +139,7 @@ export function UiReviewWorkspace({
     useState<AssessmentOutcome>();
   const [assessmentNote, setAssessmentNote] = useState('');
   const [assessmentInstruction, setAssessmentInstruction] = useState('');
+  const [assessmentError, setAssessmentError] = useState<string>();
   const [confirmAssessment, setConfirmAssessment] = useState(false);
 
   useEffect(() => {
@@ -436,7 +439,7 @@ export function UiReviewWorkspace({
     resetEditor();
   }
   async function saveOpinion() {
-    if (!room || !targetId || !affectedCaseIds.length) return;
+    if (!room || !targetId || !affectedCaseIds.length) return false;
     const result = await update({
       action: room.state.finalized ? 'supplement' : 'save-draft',
       opinion: {
@@ -451,6 +454,7 @@ export function UiReviewWorkspace({
       if (inlineCaseId) inlineDrafts?.delete(inlineCaseId);
       resetEditor();
     }
+    return result;
   }
   const currentAssessment = room?.state.assessments?.findLast(
     (entry) =>
@@ -508,9 +512,102 @@ export function UiReviewWorkspace({
       (currentAssessment?.outcome === 'resolved' && !assessmentChanged)),
   );
   const blocked = submitting || Boolean(uncertain);
+  const assessmentSave = assessmentAllowed && (
+    <Button
+      size="small"
+      disabled={blocked}
+      onClick={() => {
+        if (!assessmentOutcome) setAssessmentError('请选择复审结论。');
+        else if (!assessmentNote.trim()) setAssessmentError('请填写评审说明。');
+        else if (
+          assessmentOutcome === 'needsRework' &&
+          !assessmentInstruction.trim()
+        )
+          setAssessmentError('请填写下一轮补改意见。');
+        else {
+          setAssessmentError(undefined);
+          if (assessmentOutcome === 'needsRework') setConfirmAssessment(true);
+          else void saveAssessment();
+        }
+      }}
+    >
+      保存评审结果
+    </Button>
+  );
+  const inlineControls = room && active && (
+    <Space wrap size={6}>
+      {!!outstanding.filter((item) => item.basis.caseId === active.id).length &&
+        room.state.finalized && (
+          <Button size="small" onClick={() => setHandoff(true)}>
+            查看交接说明
+          </Button>
+        )}
+      {tester &&
+        !frozenFocus &&
+        room.state.finalized &&
+        active.reviewState !== 'approved' && (
+          <>
+            {assessmentSave}
+            <Button
+              size="small"
+              type="primary"
+              disabled={blocked || !checkReady}
+              onClick={() => void onApprove([active.id])}
+            >
+              批准当前修订
+            </Button>
+          </>
+        )}
+      {tester && !frozenFocus && !room.state.finalized && (
+        <>
+          <Button
+            size="small"
+            disabled={
+              blocked ||
+              room.state.noChange.some((basis) => basis.caseId === active.id)
+            }
+            onClick={() =>
+              void update({ action: 'no-change', caseId: active.id })
+            }
+          >
+            {room.state.noChange.some((basis) => basis.caseId === active.id)
+              ? '已记录无需修改'
+              : '记录无需修改'}
+          </Button>
+          {room.cases.length > 1 ? (
+            <Button
+              size="small"
+              disabled={blocked}
+              onClick={() => onOpenTeam?.(room.meeting.id)}
+            >
+              打开团队评审
+            </Button>
+          ) : (
+            <Button
+              size="small"
+              type="primary"
+              disabled={
+                blocked ||
+                (!body.trim() &&
+                  !room.state.draftOpinions.length &&
+                  !room.state.noChange.length)
+              }
+              onClick={() =>
+                void (async () => {
+                  if (body.trim() && !(await saveOpinion())) return;
+                  setFinalize(true);
+                })()
+              }
+            >
+              预览意见定稿
+            </Button>
+          )}
+        </>
+      )}
+    </Space>
+  );
   const controls = (
     <Space wrap>
-      {!inlineCaseId && <Button onClick={onReturn}>返回用例库</Button>}
       {room?.state.finalized && (
         <Button onClick={() => setHandoff(true)} disabled={!outstanding.length}>
           查看交接说明
@@ -545,39 +642,47 @@ export function UiReviewWorkspace({
           加入执行范围（{eligible.length}）
         </Button>
       )}
-      {inlineCaseId &&
-        room &&
-        active &&
-        tester &&
-        !frozenFocus &&
-        (room.state.finalized ? (
-          <Button
-            type="primary"
-            size="small"
-            disabled={
-              blocked || !checkReady || active.reviewState === 'approved'
-            }
-            onClick={() => void onApprove([active.id])}
-          >
-            {active.reviewState === 'approved' ? '已批准' : '批准当前修订'}
-          </Button>
-        ) : (
-          <Button
-            size="small"
-            disabled={
-              blocked ||
-              room.state.noChange.some((basis) => basis.caseId === active.id)
-            }
-            onClick={() =>
-              void update({ action: 'no-change', caseId: active.id })
-            }
-          >
-            {room.state.noChange.some((basis) => basis.caseId === active.id)
-              ? '已记录无需修改'
-              : '记录无需修改'}
-          </Button>
-        ))}
     </Space>
+  );
+  const sessionPicker = (
+    <div className={inlineCaseId ? 'ui-review-inline-session' : 'panel pad mb'}>
+      <Space wrap>
+        <Select
+          aria-label="评审会话"
+          style={inlineCaseId ? { maxWidth: '100%' } : { minWidth: 280 }}
+          value={roomId ?? ''}
+          disabled={loading || blocked}
+          options={[
+            { value: '', label: '新建评审会议' },
+            ...meetings.map((item) => ({
+              value: item.id,
+              label: `${new Date(item.createdAt).toLocaleString('zh-CN')} · ${item.caseCount} 条用例 · ${item.finalized ? '已定稿' : '记录中'}`,
+            })),
+          ]}
+          onChange={(id: string) => {
+            activateRoom(id || undefined);
+            if (!inlineCaseId) resetEditor();
+          }}
+        />
+        {room && (
+          <Button
+            onClick={() =>
+              void (focus
+                ? api(
+                    path + '/' + room.meeting.id + '?caseId=' + focus,
+                    {},
+                    uiReviewMeetingDetailSchema,
+                  )
+                    .then(setRoom)
+                    .catch((err: unknown) => setError(describeError(err)))
+                : updated())
+            }
+          >
+            刷新
+          </Button>
+        )}
+      </Space>
+    </div>
   );
   const startingAssets = inlineCaseId
     ? assets.filter((asset) => asset.id === inlineCaseId)
@@ -585,7 +690,9 @@ export function UiReviewWorkspace({
   return (
     <>
       {inlineCaseId ? (
-        controls
+        inlineActions &&
+        inlineControls &&
+        createPortal(inlineControls, inlineActions)
       ) : (
         <PageHeading
           eyebrow="UI CASE REVIEW"
@@ -625,46 +732,13 @@ export function UiReviewWorkspace({
       {receiptNotice && (
         <Alert className="mb" type="success" showIcon title={receiptNotice} />
       )}
-      <div
-        className={inlineCaseId ? 'ui-review-inline-session' : 'panel pad mb'}
-      >
-        <Space wrap>
-          <Select
-            aria-label="评审会话"
-            style={inlineCaseId ? { maxWidth: '100%' } : { minWidth: 280 }}
-            value={roomId ?? ''}
-            disabled={loading || blocked}
-            options={[
-              { value: '', label: '新建评审会议' },
-              ...meetings.map((item) => ({
-                value: item.id,
-                label: `${new Date(item.createdAt).toLocaleString('zh-CN')} · ${item.caseCount} 条用例 · ${item.finalized ? '已定稿' : '记录中'}`,
-              })),
-            ]}
-            onChange={(id: string) => {
-              activateRoom(id || undefined);
-              if (!inlineCaseId) resetEditor();
-            }}
-          />
-          {room && (
-            <Button
-              onClick={() =>
-                void (focus
-                  ? api(
-                      path + '/' + room.meeting.id + '?caseId=' + focus,
-                      {},
-                      uiReviewMeetingDetailSchema,
-                    )
-                      .then(setRoom)
-                      .catch((err: unknown) => setError(describeError(err)))
-                  : updated())
-              }
-            >
-              刷新
-            </Button>
-          )}
-        </Space>
-      </div>
+      {!inlineCaseId && sessionPicker}
+      {inlineCaseId && !room && Boolean(meetings.length) && (
+        <details className="ui-review-inline-session">
+          <summary>评审会话</summary>
+          {sessionPicker}
+        </details>
+      )}
       {roomId && !room ? (
         <Skeleton active />
       ) : !room ? (
@@ -724,29 +798,30 @@ export function UiReviewWorkspace({
         </section>
       ) : (
         <>
-          <div
-            className="ui-review-stages panel pad mb"
-            aria-label="评审进程"
-            hidden={Boolean(inlineCaseId)}
-          >
-            {stepLabels.map((label, i) => (
-              <div key={label} className={stage === i ? 'selected' : ''}>
-                <strong>{label}</strong>
-                <small>
-                  {i === 0
-                    ? room.state.finalized
-                      ? '意见已定稿'
-                      : '记录意见与范围'
-                    : i === 1
-                      ? outstanding.length
-                        ? outstanding.length + ' 项待回传'
-                        : '经官方 MCP 交接'
-                      : '逐条确认、批准或退回补改'}
-                </small>
-              </div>
-            ))}
-          </div>
-          {room.state.finalized && currentRound > 0 && (
+          {!inlineCaseId && (
+            <div
+              className="ui-review-stages panel pad mb"
+              aria-label="评审进程"
+            >
+              {stepLabels.map((label, i) => (
+                <div key={label} className={stage === i ? 'selected' : ''}>
+                  <strong>{label}</strong>
+                  <small>
+                    {i === 0
+                      ? room.state.finalized
+                        ? '意见已定稿'
+                        : '记录意见与范围'
+                      : i === 1
+                        ? outstanding.length
+                          ? outstanding.length + ' 项待回传'
+                          : '经官方 MCP 交接'
+                        : '逐条确认、批准或退回补改'}
+                  </small>
+                </div>
+              ))}
+            </div>
+          )}
+          {!inlineCaseId && room.state.finalized && currentRound > 0 && (
             <p className="caption mb" role="status">
               第 {currentRound} 轮 · 人工复审可退回 AI 补改，已批准{' '}
               {eligible.length} / {reviewedCases.size} 条
@@ -925,7 +1000,9 @@ export function UiReviewWorkspace({
                 inlineCaseId ? 'ui-review-inline-opinions' : 'panel pad'
               }
             >
-              <h2>{room.state.finalized ? '评审意见与复审' : '会议意见'}</h2>
+              {!inlineCaseId && (
+                <h2>{room.state.finalized ? '评审意见与复审' : '会议意见'}</h2>
+              )}
               {assessmentAllowed && (
                 <section className="ui-review-opinion ui-review-opinion-form">
                   <h3>人工评审结果</h3>
@@ -935,25 +1012,38 @@ export function UiReviewWorkspace({
                       {currentAssessment.note}
                     </p>
                   )}
-                  <Select
-                    aria-label="复审结论"
-                    placeholder="复审结论"
-                    value={assessmentOutcome}
-                    options={uiCaseAssessmentOutcomeSchema.options.map(
-                      (value) => ({ value, label: assessmentLabels[value] }),
-                    )}
-                    onChange={setAssessmentOutcome}
-                    disabled={blocked}
-                  />
-                  <Input.TextArea
-                    aria-label="评审说明"
-                    placeholder="填写复核依据和说明"
-                    rows={2}
-                    maxLength={10000}
-                    value={assessmentNote}
-                    disabled={blocked}
-                    onChange={(event) => setAssessmentNote(event.target.value)}
-                  />
+                  <label>
+                    复审结论
+                    <Select
+                      aria-label="复审结论"
+                      placeholder="请选择复审结论"
+                      size={inlineCaseId ? 'small' : 'middle'}
+                      value={assessmentOutcome}
+                      options={uiCaseAssessmentOutcomeSchema.options.map(
+                        (value) => ({ value, label: assessmentLabels[value] }),
+                      )}
+                      onChange={(value) => {
+                        setAssessmentError(undefined);
+                        setAssessmentOutcome(value);
+                      }}
+                      disabled={blocked}
+                    />
+                  </label>
+                  <label>
+                    评审说明
+                    <Input.TextArea
+                      aria-label="评审说明"
+                      placeholder="记录复核依据及观察"
+                      rows={2}
+                      maxLength={10000}
+                      value={assessmentNote}
+                      disabled={blocked}
+                      onChange={(event) => {
+                        setAssessmentError(undefined);
+                        setAssessmentNote(event.target.value);
+                      }}
+                    />
+                  </label>
                   {assessmentOutcome === 'needsRework' && (
                     <Input.TextArea
                       aria-label="下一轮补改意见"
@@ -962,33 +1052,24 @@ export function UiReviewWorkspace({
                       maxLength={10000}
                       value={assessmentInstruction}
                       disabled={blocked}
-                      onChange={(event) =>
-                        setAssessmentInstruction(event.target.value)
-                      }
+                      onChange={(event) => {
+                        setAssessmentError(undefined);
+                        setAssessmentInstruction(event.target.value);
+                      }}
                     />
                   )}
-                  <Button
-                    size="small"
-                    disabled={
-                      blocked ||
-                      !assessmentOutcome ||
-                      !assessmentNote.trim() ||
-                      (assessmentOutcome === 'needsRework' &&
-                        !assessmentInstruction.trim())
-                    }
-                    onClick={() =>
-                      assessmentOutcome === 'needsRework'
-                        ? setConfirmAssessment(true)
-                        : void saveAssessment()
-                    }
-                  >
-                    保存评审结果
-                  </Button>
-                  {openItems.some((item) => item.state === 'returned') && (
-                    <p className="caption">
-                      请同时确认下方各项已回传意见的处理结果。
+                  {assessmentError && (
+                    <p className="ui-review-assessment-error" role="alert">
+                      {assessmentError}
                     </p>
                   )}
+                  {!inlineCaseId && assessmentSave}
+                  {currentAssessment?.outcome === 'resolved' &&
+                    openItems.some((item) => item.state === 'returned') && (
+                      <p className="caption">
+                        请同时确认下方各项已回传意见的处理结果。
+                      </p>
+                    )}
                 </section>
               )}
               {active && (
@@ -1004,7 +1085,8 @@ export function UiReviewWorkspace({
                       );
                       return (
                         <article key={opinion.id} className="ui-review-opinion">
-                          <Space wrap>
+                          {inlineCaseId && <h3>本轮原意见</h3>}
+                          <Space wrap size={5}>
                             <Tag>
                               {opinion.target === 'case'
                                 ? '用例意见'
@@ -1038,9 +1120,15 @@ export function UiReviewWorkspace({
                             </p>
                           )}
                           {assessment?.reply && (
-                            <>
+                            <div
+                              className={
+                                inlineCaseId ? 'ui-case-return-card' : undefined
+                              }
+                            >
+                              {inlineCaseId && <h4>AI 回传说明</h4>}
                               <p className="preserve-lines">
-                                处理说明 {assessment.reply.body}
+                                {inlineCaseId ? '' : '处理说明 '}
+                                {assessment.reply.body}
                               </p>
                               {onCompare && (
                                 <Button
@@ -1056,36 +1144,40 @@ export function UiReviewWorkspace({
                                   查看本轮修订差异
                                 </Button>
                               )}
-                            </>
+                            </div>
                           )}
-                          {tester && !room.state.finalized && (
-                            <Space wrap>
-                              <Button
-                                size="small"
-                                disabled={blocked}
-                                onClick={() => {
-                                  setEditId(opinion.id);
-                                  setBody(opinion.body);
-                                  setTarget(opinion.target);
-                                  setAffected(opinion.caseIds);
-                                }}
-                              >
-                                编辑
-                              </Button>
-                              <Button
-                                size="small"
-                                disabled={blocked}
-                                onClick={() =>
-                                  void update({
-                                    action: 'remove-draft',
-                                    opinionId: opinion.id,
-                                  })
-                                }
-                              >
-                                移除
-                              </Button>
-                            </Space>
-                          )}
+                          {tester &&
+                            !room.state.finalized &&
+                            (!inlineCaseId ||
+                              (opinion.target === 'case' &&
+                                opinion.caseIds.length === 1)) && (
+                              <Space wrap>
+                                <Button
+                                  size="small"
+                                  disabled={blocked}
+                                  onClick={() => {
+                                    setEditId(opinion.id);
+                                    setBody(opinion.body);
+                                    setTarget(opinion.target);
+                                    setAffected(opinion.caseIds);
+                                  }}
+                                >
+                                  编辑
+                                </Button>
+                                <Button
+                                  size="small"
+                                  disabled={blocked}
+                                  onClick={() =>
+                                    void update({
+                                      action: 'remove-draft',
+                                      opinionId: opinion.id,
+                                    })
+                                  }
+                                >
+                                  移除
+                                </Button>
+                              </Space>
+                            )}
                           {tester &&
                             assessment &&
                             room.state.finalized &&
@@ -1140,19 +1232,21 @@ export function UiReviewWorkspace({
                             ? '补充修改意见'
                             : '记录评审意见'}
                       </h3>
-                      <Radio.Group
-                        aria-label="意见对象"
-                        value={target}
-                        onChange={(event) => {
-                          setTarget(event.target.value as Target);
-                          setAffected([active.id]);
-                        }}
-                      >
-                        <Radio.Button value="case">用例</Radio.Button>
-                        <Radio.Button value="scenario">场景</Radio.Button>
-                        <Radio.Button value="set">测试集</Radio.Button>
-                      </Radio.Group>
-                      {target !== 'case' && (
+                      {!inlineCaseId && (
+                        <Radio.Group
+                          aria-label="意见对象"
+                          value={target}
+                          onChange={(event) => {
+                            setTarget(event.target.value as Target);
+                            setAffected([active.id]);
+                          }}
+                        >
+                          <Radio.Button value="case">用例</Radio.Button>
+                          <Radio.Button value="scenario">场景</Radio.Button>
+                          <Radio.Button value="set">测试集</Radio.Button>
+                        </Radio.Group>
+                      )}
+                      {!inlineCaseId && target !== 'case' && (
                         <Checkbox.Group
                           aria-label="受影响用例"
                           className="ui-review-start-list"
@@ -1183,18 +1277,23 @@ export function UiReviewWorkspace({
                             取消编辑
                           </Button>
                         )}
-                        <Button
-                          type="primary"
-                          size="small"
-                          disabled={
-                            blocked || !body.trim() || !affectedCaseIds.length
-                          }
-                          onClick={() => void saveOpinion()}
-                        >
-                          {room.state.finalized
-                            ? '记录并退回 AI'
-                            : '保存评审意见'}
-                        </Button>
+                        {(!inlineCaseId ||
+                          room.cases.length > 1 ||
+                          room.state.finalized ||
+                          editId) && (
+                          <Button
+                            type="primary"
+                            size="small"
+                            disabled={
+                              blocked || !body.trim() || !affectedCaseIds.length
+                            }
+                            onClick={() => void saveOpinion()}
+                          >
+                            {room.state.finalized
+                              ? '记录并退回 AI'
+                              : '保存评审意见'}
+                          </Button>
+                        )}
                       </Space>
                     </div>
                   )}
@@ -1202,6 +1301,12 @@ export function UiReviewWorkspace({
               )}
             </aside>
           </div>
+          {inlineCaseId && (
+            <details className="ui-review-inline-session">
+              <summary>评审会话</summary>
+              {sessionPicker}
+            </details>
+          )}
         </>
       )}
       <Modal

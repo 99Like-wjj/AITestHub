@@ -35,6 +35,7 @@ export function StandaloneWorkbenchHeader(
       <Typography.Text
         type="secondary"
         className="standalone-workbench-project"
+        title={props.projectName}
       >
         {props.projectName}
       </Typography.Text>

@@ -1,14 +1,5 @@
 import { useState } from 'react';
-import {
-  Alert,
-  Button,
-  Collapse,
-  Input,
-  Modal,
-  Select,
-  Space,
-  Table,
-} from 'antd';
+import { Alert, Button, Input, Modal, Select, Space, Table } from 'antd';
 import { z } from 'zod';
 import {
   apiDataRowSchema,
@@ -138,162 +129,148 @@ export function ApiCaseComposition({
     }
   };
   return (
-    <Collapse
-      items={[
-        {
-          key: 'composition',
-          label: `数据行 ${value.dataRows?.length ?? 0} · 固定准备 ${value.preparations?.length ?? 0}`,
-          children: (
-            <div className="stack">
-              <label className="field-label">
-                数据行参数
-                <Input.TextArea
-                  rows={4}
-                  aria-label="数据行参数"
-                  spellCheck={false}
-                  disabled={disabled}
-                  value={rows}
-                  onChange={(event) => {
-                    setRows(event.target.value);
-                    setDirty(true);
-                  }}
-                />
-              </label>
-              <Space wrap>
-                <Button
-                  size="small"
-                  disabled={disabled || rows.trim() !== '[]'}
-                  onClick={() => {
-                    setRows(
-                      JSON.stringify(
-                        [{ id: 'normal', name: '正常数据', values: {} }],
-                        null,
-                        2,
-                      ),
-                    );
-                    setDirty(true);
-                  }}
-                >
-                  填入数据行示例
-                </Button>
-                <Button
-                  size="small"
-                  disabled={disabled}
-                  onClick={() => setImportOpen(true)}
-                >
-                  导入 CSV / JSON
-                </Button>
-                <span className="caption">
-                  每行独立执行，values 按名称覆盖用例变量。
-                </span>
-              </Space>
-              <label className="field-label">
-                插入准备用例的可用固定修订
-                <Select<string>
-                  aria-label="插入准备用例固定修订"
-                  showSearch
-                  optionFilterProp="label"
-                  disabled={disabled}
-                  onSelect={appendPreparation}
-                  options={cases.map((asset) => ({
-                    value: asset.id,
-                    label: `${asset.title} · r${asset.revisionNo}`,
-                  }))}
-                />
-              </label>
-              <label className="field-label">
-                准备步骤及固定参数
-                <Input.TextArea
-                  rows={4}
-                  aria-label="准备步骤及固定参数"
-                  spellCheck={false}
-                  disabled={disabled}
-                  value={preparations}
-                  onChange={(event) => {
-                    setPreparations(event.target.value);
-                    setDirty(true);
-                  }}
-                />
-              </label>
-              <span className="caption">
-                引用保存时固定修订，parameters
-                可补充准备变量。本用例维护最终清理。
-              </span>
-              {issue && <Alert type="error" showIcon title={issue} />}
-              <Modal
-                title={importPreview ? '预览测试数据行' : '导入测试数据行'}
-                open={importOpen}
-                onCancel={resetImport}
-                onOk={importRows}
-                okText={importPreview ? '追加至数据草稿' : '预览数据'}
-                destroyOnHidden
-              >
-                <div className="stack">
-                  {importPreview ? (
-                    <>
-                      <Alert
-                        showIcon
-                        title={
-                          importPreview.format +
-                          ' · 新增 ' +
-                          importPreview.rows.length +
-                          ' 行'
-                        }
-                        description="保留已有行。导入后仍可修改数据，应用到用例草稿后再显式保存。"
-                      />
-                      <Table
-                        size="small"
-                        rowKey="name"
-                        dataSource={importPreview.rows}
-                        pagination={{ pageSize: 8 }}
-                        columns={[
-                          { title: '名称', dataIndex: 'name' },
-                          {
-                            title: '变量',
-                            render: (_, row) => (
-                              <pre className="message-code">
-                                {JSON.stringify(row.values, null, 2)}
-                              </pre>
-                            ),
-                          },
-                        ]}
-                      />
-                      <Button onClick={() => setImportPreview(undefined)}>
-                        返回修改
-                      </Button>
-                    </>
-                  ) : (
-                    <>
-                      <Input.TextArea
-                        aria-label="CSV 或 JSON 数据行文本"
-                        rows={8}
-                        maxLength={30000}
-                        value={importText}
-                        onChange={(event) => setImportText(event.target.value)}
-                        spellCheck={false}
-                      />
-                      <p className="caption">
-                        CSV 首列 name，其余列为变量名，字段按文本导入。JSON
-                        每行含 name 和
-                        values。重名行、无效字段及凭据输入需修正后再预览。
-                      </p>
-                    </>
-                  )}
-                  {importIssue && (
-                    <Alert type="error" showIcon title={importIssue} />
-                  )}
-                </div>
-              </Modal>
+    <div className="stack">
+      <label className="field-label">
+        数据行参数
+        <Input.TextArea
+          rows={4}
+          aria-label="数据行参数"
+          spellCheck={false}
+          disabled={disabled}
+          value={rows}
+          onChange={(event) => {
+            setRows(event.target.value);
+            setDirty(true);
+          }}
+        />
+      </label>
+      <Space wrap>
+        <Button
+          size="small"
+          disabled={disabled || rows.trim() !== '[]'}
+          onClick={() => {
+            setRows(
+              JSON.stringify(
+                [{ id: 'normal', name: '正常数据', values: {} }],
+                null,
+                2,
+              ),
+            );
+            setDirty(true);
+          }}
+        >
+          填入数据行示例
+        </Button>
+        <Button
+          size="small"
+          disabled={disabled}
+          onClick={() => setImportOpen(true)}
+        >
+          导入 CSV / JSON
+        </Button>
+        <span className="caption">
+          每行独立执行，values 按名称覆盖用例变量。
+        </span>
+      </Space>
+      <label className="field-label">
+        插入准备用例的可用固定修订
+        <Select<string>
+          aria-label="插入准备用例固定修订"
+          showSearch
+          optionFilterProp="label"
+          disabled={disabled}
+          onSelect={appendPreparation}
+          options={cases.map((asset) => ({
+            value: asset.id,
+            label: `${asset.title} · r${asset.revisionNo}`,
+          }))}
+        />
+      </label>
+      <label className="field-label">
+        准备步骤及固定参数
+        <Input.TextArea
+          rows={4}
+          aria-label="准备步骤及固定参数"
+          spellCheck={false}
+          disabled={disabled}
+          value={preparations}
+          onChange={(event) => {
+            setPreparations(event.target.value);
+            setDirty(true);
+          }}
+        />
+      </label>
+      <span className="caption">
+        引用保存时固定修订，parameters 可补充准备变量。本用例维护最终清理。
+      </span>
+      {issue && <Alert type="error" showIcon title={issue} />}
+      <Modal
+        title={importPreview ? '预览测试数据行' : '导入测试数据行'}
+        open={importOpen}
+        onCancel={resetImport}
+        onOk={importRows}
+        okText={importPreview ? '追加至数据草稿' : '预览数据'}
+        destroyOnHidden
+      >
+        <div className="stack">
+          {importPreview ? (
+            <>
+              <Alert
+                showIcon
+                title={
+                  importPreview.format +
+                  ' · 新增 ' +
+                  importPreview.rows.length +
+                  ' 行'
+                }
+                description="保留已有行。导入后仍可修改数据，应用到用例草稿后再显式保存。"
+              />
+              <Table
+                size="small"
+                rowKey="name"
+                dataSource={importPreview.rows}
+                pagination={{ pageSize: 8 }}
+                columns={[
+                  { title: '名称', dataIndex: 'name' },
+                  {
+                    title: '变量',
+                    render: (_, row) => (
+                      <pre className="message-code">
+                        {JSON.stringify(row.values, null, 2)}
+                      </pre>
+                    ),
+                  },
+                ]}
+              />
+              <Button onClick={() => setImportPreview(undefined)}>
+                返回修改
+              </Button>
+            </>
+          ) : (
+            <>
+              <Input.TextArea
+                aria-label="CSV 或 JSON 数据行文本"
+                rows={8}
+                maxLength={30000}
+                value={importText}
+                onChange={(event) => setImportText(event.target.value)}
+                spellCheck={false}
+              />
+              <p className="caption">
+                CSV 首列 name，其余列为变量名，字段按文本导入。JSON 每行含 name
+                和 values。重名行、无效字段及凭据输入需修正后再预览。
+              </p>
+            </>
+          )}
+          {importIssue && <Alert type="error" showIcon title={importIssue} />}
+        </div>
+      </Modal>
 
-              <div>
-                <Button disabled={disabled || !dirty} onClick={apply}>
-                  应用到本用例草稿
-                </Button>
-              </div>
-            </div>
-          ),
-        },
-      ]}
-    />
+      <div>
+        <Button disabled={disabled || !dirty} onClick={apply}>
+          应用到本用例草稿
+        </Button>
+      </div>
+    </div>
   );
 }

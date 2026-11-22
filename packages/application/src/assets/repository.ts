@@ -82,7 +82,7 @@ export async function lockSet(
     [projectId, id],
   );
   if (!row.rowCount)
-    throw new DomainError('NOT_FOUND', '此范围内没有该测试批次。', 404);
+    throw new DomainError('NOT_FOUND', '此范围内没有该资产归属。', 404);
 }
 export async function ancestors(
   transaction: SqlExecutor,

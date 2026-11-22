@@ -19,6 +19,7 @@ import {
   EyeOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SearchOutlined,
 } from '@ant-design/icons';
 import { z } from 'zod';
 import { idSchema } from '../../../packages/contracts/src/base';
@@ -600,7 +601,6 @@ export function RequirementsPage({
     <>
       <section className="requirements-page">
         <PageHeading
-          eyebrow="REQUIREMENTS"
           title="需求管理"
           description="集中管理资料版本与协作范围，并进入对应需求的测试资产。"
           actions={
@@ -656,12 +656,13 @@ export function RequirementsPage({
           </div>
         )}
 
-        <div className="mb">
+        <div className="requirement-filters">
           <ResultFilters
             search={{
               label: '搜索需求名称或编号',
               value: search,
               onChange: setSearch,
+              prefix: <SearchOutlined aria-hidden />,
             }}
             onReset={clearResultFilters}
             summary={

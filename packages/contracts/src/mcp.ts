@@ -133,7 +133,7 @@ export const MCP_TOOL_CATALOG: readonly McpToolDeclaration[] = [
   ),
   declareTool(
     'ath_assets',
-    '按类型、需求版本和批次查询或维护独立资产，提交含基准。',
+    '按类型和需求版本查询及维护场景与用例，支持追溯资产归属，提交含基准。',
     [
       read('list'),
       read('get'),

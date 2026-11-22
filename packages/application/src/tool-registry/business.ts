@@ -207,7 +207,7 @@ export function createBusinessRegistry(
     };
   };
   const assetDescription =
-    '独立UI/API批次、场景和用例；生成或优化写草稿，不自动批准。固定projectId、kind、版本和基准，缺席不删除。';
+    '按项目、需求版本和 UI/API 类型维护场景与用例。setId 用于追溯资产归属。生成或优化写入待审内容，提交须保持当前基准；未提交项保留。';
   add(
     'ath_assets',
     assetDescription,

@@ -400,7 +400,6 @@ export async function createApp(db: Database) {
     db,
     plans,
     broker,
-    process.env,
     new ApiMultipartFiles(storage),
   );
   const schedules = new ScheduleService(db, plans);

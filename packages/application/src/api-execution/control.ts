@@ -352,8 +352,8 @@ export class ApiExecutionControlService {
     db: Database,
     plans: PlanService,
     secrets: SecretBroker,
+    multipartFiles: ApiMultipartFiles,
     environment: NodeJS.ProcessEnv = process.env,
-    multipartFiles?: ApiMultipartFiles,
   ) {
     const root =
       environment.AITESTHUB_LOCAL_ROOT ??

@@ -4,11 +4,8 @@ import {
   App,
   Button,
   Card,
-  Checkbox,
-  Collapse,
   Descriptions,
   Empty,
-  Input,
   Modal,
   Select,
   Skeleton,
@@ -19,12 +16,7 @@ import {
   Typography,
 } from 'antd';
 import type { TreeDataNode } from 'antd';
-import {
-  DeleteOutlined,
-  EditOutlined,
-  PlusOutlined,
-  ReloadOutlined,
-} from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
 import { z } from 'zod';
 import {
   approvalCommitReceiptSchema,
@@ -39,10 +31,7 @@ import type {
   Asset,
   AssetContent,
 } from '../../../packages/contracts/src/assets';
-import {
-  precisePreviewSchema,
-  type requestBodySchema,
-} from '../../../packages/contracts/src/domain';
+import { precisePreviewSchema } from '../../../packages/contracts/src/domain';
 import { api, describeError, isUncertainMutationError } from './api';
 import { AssetEditor, targetTypeLabels } from './asset-editor';
 import type { AssetEditorTarget } from './asset-editor';
@@ -52,19 +41,21 @@ import { formatBeijingTime } from './beijing-time';
 import { DetailDrawer } from './detail-drawer';
 import type { CaseScope } from './requirements';
 import type { Project } from './types';
-import { PageHeading } from './page-heading';
-import { AppIcon } from './app-icon';
 import {
   RequirementDirectory,
   RequirementDirectoryLabel,
 } from './requirement-directory';
-import './assets-layout.css';
-import { UiCaseText, UiReviewWorkspace } from './ui-review-workspace';
-import { AssetCoverage } from './asset-coverage';
-import { UiCaseWorkbench, UiReviewHistory } from './ui-case-workbench';
+import { UiCaseText } from './ui-case-reader';
+import { UiReviewWorkspace } from './ui-review-workspace';
+import {
+  UiCaseWorkbench,
+  UiReviewHistory,
+  useUiCaseStages,
+} from './ui-case-workbench';
 import { StandaloneWorkbenchHeader } from './standalone-workbench-header';
 import { UiCaseActionDialog, type UiSupplementSource } from './ui-case-actions';
 import { UiCoverageCheck } from './ui-coverage-check';
+import { UiCaseLibraryPane } from './ui-case-library-pane';
 import {
   assertApprovalReceipt,
   forgetApproval,
@@ -75,31 +66,6 @@ import {
 } from './ui-case-approval';
 import type { CoverageCheckpoint } from '../../../packages/contracts/src/coverage-checkpoints';
 
-function assetRequestBodyText(body: z.infer<typeof requestBodySchema>) {
-  switch (body.format) {
-    case 'none':
-      return '';
-    case 'json':
-      return JSON.stringify(body.value, null, 2);
-    case 'text':
-      return body.value;
-    case 'multipart':
-      return body.parts
-        .map(
-          (part) =>
-            part.name +
-            ': ' +
-            (part.kind === 'file'
-              ? '文件引用 ' + part.fileResourceId
-              : '文本字段'),
-        )
-        .join('\n');
-    case 'form':
-      return body.fields
-        .map((part) => part.name + ': ' + part.value)
-        .join('\n');
-  }
-}
 type Navigation = z.infer<typeof assetNavigationSchema>;
 type Detail = z.infer<typeof assetDetailSchema>;
 type Preview = z.infer<typeof precisePreviewSchema>;
@@ -139,14 +105,8 @@ function reviewFromUrl() {
     ? value
     : 'all';
 }
-function kindFromUrl(): 'UI' | 'API' {
-  return new URLSearchParams(window.location.hash.split('?')[1]).get('kind') ===
-    'API'
-    ? 'API'
-    : 'UI';
-}
-
 function ContentView({ content }: { content: AssetContent }) {
+  if ('testPoint' in content) return <UiCaseText content={content} />;
   return (
     <>
       {'objective' in content && (
@@ -165,8 +125,8 @@ function ContentView({ content }: { content: AssetContent }) {
               label: '共享前提',
               children: content.sharedPreconditions.length ? (
                 <ul>
-                  {content.sharedPreconditions.map((item, index) => (
-                    <li key={index}>{item}</li>
+                  {content.sharedPreconditions.map((value, index) => (
+                    <li key={index}>{value}</li>
                   ))}
                 </ul>
               ) : (
@@ -176,240 +136,15 @@ function ContentView({ content }: { content: AssetContent }) {
           ]}
         />
       )}
-      {'testPoint' in content && content.kind === 'UI' && (
-        <UiCaseText content={content} />
-      )}
-      {'testPoint' in content && content.kind === 'API' && (
-        <Descriptions
-          column={1}
-          items={[
-            {
-              key: 'testPoint',
-              label: '测试点',
-              children: (
-                <span className="preserve-lines">{content.testPoint}</span>
-              ),
-            },
-            {
-              key: 'preconditions',
-              label: '前提',
-              children: content.preconditions.length ? (
-                <ul>
-                  {content.preconditions.map((item, index) => (
-                    <li key={index}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                '未设置'
-              ),
-            },
-            {
-              key: 'expected',
-              label: '业务预期',
-              children: (
-                <span className="preserve-lines">{content.expected}</span>
-              ),
-            },
-          ]}
-        />
-      )}
-      <Typography.Paragraph type="secondary">
-        依据：
-        {content.basisRefs.length
-          ? content.basisRefs.map((basis) => basis.description).join('；')
-          : '未登记依据引用'}
-      </Typography.Paragraph>
-      {'dslVersion' in content && (
-        <Collapse
-          items={content.steps.map((step, index) => ({
-            key: step.stepId,
-            label: `请求 ${index + 1} · ${step.method} · ${step.name}`,
-            children: (
-              <Space direction="vertical" style={{ width: '100%' }}>
-                <Typography.Text code>{step.url}</Typography.Text>
-                <Typography.Text>
-                  断言 {step.assertions.length} 项 · 提取{' '}
-                  {step.extractors.length} 项
-                </Typography.Text>
-                {step.assertions.map((assertion) => (
-                  <Typography.Paragraph key={assertion.id}>
-                    {assertion.source}
-                    {assertion.path ? `.${assertion.path}` : ''}{' '}
-                    {assertion.operator}{' '}
-                    {assertion.expected === undefined
-                      ? ''
-                      : JSON.stringify(assertion.expected)}
-                  </Typography.Paragraph>
-                ))}
-                <Typography.Text type="secondary">
-                  Body：{step.body.format}；脚本扩展：
-                  {step.preScript || step.postScript ? '已配置' : '未配置'}
-                  ；账号用途：{step.purposeRef ?? '未指定'}
-                </Typography.Text>
-                {!!step.query.length && (
-                  <Descriptions
-                    size="small"
-                    column={1}
-                    title="Query"
-                    items={step.query.map((entry, at) => ({
-                      key: String(at),
-                      label: entry.name,
-                      children: entry.value,
-                    }))}
-                  />
-                )}
-                {!!step.headers.length && (
-                  <Descriptions
-                    size="small"
-                    column={1}
-                    title="Header"
-                    items={step.headers.map((entry, at) => ({
-                      key: String(at),
-                      label: entry.name,
-                      children:
-                        /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key)$/i.test(
-                          entry.name,
-                        )
-                          ? '敏感字段已隐藏；认证应使用账号用途配置'
-                          : entry.value,
-                    }))}
-                  />
-                )}
-                {step.body.format !== 'none' && (
-                  <pre className="material-text-preview">
-                    {assetRequestBodyText(step.body)}
-                  </pre>
-                )}
-                {!!step.extractors.length && (
-                  <Descriptions
-                    size="small"
-                    column={1}
-                    title="提取规则"
-                    items={step.extractors.map((extractor, at) => ({
-                      key: String(at),
-                      label: extractor.name,
-                      children: `${extractor.source}${extractor.path ? `.${extractor.path}` : ''} · ${extractor.required ? '必须提取' : '可选'}`,
-                    }))}
-                  />
-                )}
-                {step.preScript && (
-                  <>
-                    <Typography.Text strong>前处理脚本（只读）</Typography.Text>
-                    <pre className="material-text-preview">
-                      {step.preScript}
-                    </pre>
-                  </>
-                )}
-                {step.postScript && (
-                  <>
-                    <Typography.Text strong>
-                      响应处理脚本（只读）
-                    </Typography.Text>
-                    <pre className="material-text-preview">
-                      {step.postScript}
-                    </pre>
-                  </>
-                )}
-              </Space>
-            ),
-          }))}
-        />
-      )}
-      {'cleanup' in content && (
-        <Card
-          size="small"
-          title={`清理定义（只读）· ${content.cleanup.mode}`}
-          className="section-alert"
-        >
-          <Typography.Paragraph type="secondary">
-            本处展示已保存定义供评审，不发送清理请求或执行
-            SQL。清理目标、清理结果和测试结论分别记录。
-          </Typography.Paragraph>
-          {content.cleanup.mode === 'none' ? (
-            <Typography.Text>此修订未启用清理。</Typography.Text>
-          ) : (
-            <Collapse
-              items={content.cleanup.steps.map((step, index) => ({
-                key: step.cleanupStepId,
-                label: `清理 ${index + 1} · ${step.type === 'sql' ? step.driver : `${step.request.method} ${step.request.name}`}`,
-                children: (
-                  <>
-                    <Typography.Paragraph>
-                      必须具备的本轮目标：{step.requiredTargets.join('、')}
-                    </Typography.Paragraph>
-                    {step.type === 'sql' ? (
-                      <>
-                        <Descriptions
-                          size="small"
-                          column={1}
-                          items={[
-                            {
-                              key: 'environment',
-                              label: '环境 ID',
-                              children: step.environmentId,
-                            },
-                            {
-                              key: 'connection',
-                              label: '连接 ID',
-                              children: step.connectionId,
-                            },
-                            {
-                              key: 'parameters',
-                              label: '受控参数绑定',
-                              children: step.parameters
-                                .map(
-                                  (parameter) =>
-                                    `${parameter.name} ← ${parameter.valueRef}`,
-                                )
-                                .join('；'),
-                            },
-                          ]}
-                        />
-                        <pre className="material-text-preview">
-                          {step.statement}
-                        </pre>
-                      </>
-                    ) : (
-                      <>
-                        <Typography.Paragraph code>
-                          {step.request.url}
-                        </Typography.Paragraph>
-                        <Typography.Paragraph>
-                          账号用途：{step.request.purposeRef ?? '未指定'}
-                          ；认证配置：{step.request.authProfileRef ?? '未指定'}
-                        </Typography.Paragraph>
-                        <Typography.Paragraph>
-                          断言：
-                          {step.request.assertions
-                            .map(
-                              (assertion) =>
-                                `${assertion.source}${assertion.path ? `.${assertion.path}` : ''} ${assertion.operator} ${assertion.expected === undefined ? '' : JSON.stringify(assertion.expected)}`,
-                            )
-                            .join('；') || '无'}
-                        </Typography.Paragraph>
-                        {step.request.body.format !== 'none' && (
-                          <pre className="material-text-preview">
-                            {assetRequestBodyText(step.request.body)}
-                          </pre>
-                        )}
-                        {step.request.preScript && (
-                          <pre className="material-text-preview">
-                            {step.request.preScript}
-                          </pre>
-                        )}
-                        {step.request.postScript && (
-                          <pre className="material-text-preview">
-                            {step.request.postScript}
-                          </pre>
-                        )}
-                      </>
-                    )}
-                  </>
-                ),
-              }))}
-            />
-          )}
-        </Card>
+      {content.basisRefs.length > 0 && (
+        <section>
+          <b>需求依据</b>
+          <ul>
+            {content.basisRefs.map((ref, index) => (
+              <li key={index}>{ref.description}</li>
+            ))}
+          </ul>
+        </section>
       )}
     </>
   );
@@ -427,7 +162,6 @@ export function AssetsPage({
   onScopeChange: (scope: CaseScope | null) => void;
 }) {
   const { modal, message } = App.useApp();
-  const [localKind, setLocalKind] = useState<'UI' | 'API'>(kindFromUrl);
   const [coverage, setCoverage] = useState(false);
   const [caseRoute, setCaseRoute] = useState(caseWorkbenchRoute);
   const [reviewHistory, setReviewHistory] = useState(false);
@@ -435,11 +169,10 @@ export function AssetsPage({
     id: string;
     versionId: string;
   }>();
-  const [collapsedScenes, setCollapsedScenes] = useState<Set<string>>(
-    new Set(),
-  );
+  const [expandedLibrary, setExpandedLibrary] = useState<string[]>([]);
   const [caseAction, setCaseAction] = useState<{
     kind: 'new' | 'import' | 'generate' | 'supplement';
+    scenarioId?: string;
     source?: UiSupplementSource;
     checkpoint?: CoverageCheckpoint;
   }>();
@@ -448,16 +181,14 @@ export function AssetsPage({
   const libraryScroll = useRef(0);
   const reviewWorkspace = caseRoute.mode === 'meeting';
   const readerWorkspace = caseRoute.mode === 'workbench';
-  const kind = scope?.kind ?? localKind;
-  const immersive =
-    kind === 'UI' && Boolean(scope) && (reviewWorkspace || readerWorkspace);
+  const kind = 'UI';
+  const immersive = Boolean(scope) && (reviewWorkspace || readerWorkspace);
   const [navigation, setNavigation] = useState<Navigation>({
     requirements: [],
   });
   const [assets, setAssets] = useState<Asset[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
-  const [batchId, setBatchId] = useState<string>('all');
   const [search, setSearch] = useState('');
   const [directorySearch, setDirectorySearch] = useState('');
   const [reviewFilter, setReviewFilter] = useState<string>(reviewFromUrl);
@@ -487,8 +218,7 @@ export function AssetsPage({
   const detailEpoch = useRef(0);
   const browseContext = useRef<string | null>(null);
   const tester = project?.roles.includes('tester') ?? false;
-  const batches = assets.filter((asset) => asset.targetType === 'set');
-  const batch = batches.find((asset) => asset.id === batchId) ?? null;
+  const sets = assets.filter((asset) => asset.targetType === 'set');
   const selectedRequirement = navigation.requirements.find(
     (requirement) => requirement.id === scope?.requirementId,
   );
@@ -504,11 +234,7 @@ export function AssetsPage({
         (version) => version.id === scope.requirementVersionId,
       ),
     );
-  const visibleAssets =
-    kind === 'UI'
-      ? assets
-      : assets.filter((asset) => batchId === 'all' || asset.setId === batchId);
-  const scenarios = visibleAssets.filter(
+  const scenarios = assets.filter(
     (asset) =>
       asset.targetType === 'scenario' && (!sceneId || asset.id === sceneId),
   );
@@ -516,14 +242,22 @@ export function AssetsPage({
     (asset) => asset.targetType === 'scenario',
   );
   const keyword = search.trim().toLocaleLowerCase();
-  const cases = visibleAssets.filter(
+  const libraryStage = useUiCaseStages(
+    scope,
+    assets,
+    !immersive && scopeExists,
+  );
+  const cases = assets.filter(
     (asset) =>
       asset.targetType === 'case' &&
       (!sceneId || asset.parentId === sceneId) &&
       (reviewFilter === 'all' ||
         (reviewFilter === 'unapproved'
-          ? asset.reviewState !== 'approved'
-          : asset.reviewState === reviewFilter)) &&
+          ? libraryStage(asset) !== 'approved'
+          : libraryStage(asset) ===
+            (reviewFilter === 'aiOptimized'
+              ? 'waitingHuman'
+              : reviewFilter))) &&
       `${asset.id} ${asset.title} ${'testPoint' in asset.content ? asset.content.testPoint : ''} ${assets.find((parent) => parent.id === asset.parentId)?.title ?? ''}`
         .toLocaleLowerCase()
         .includes(keyword),
@@ -629,7 +363,6 @@ export function AssetsPage({
     const changedContext = browseContext.current !== context;
     browseContext.current = context;
     setAssets([]);
-    setBatchId('all');
     setSelectedKeys([]);
     setPreview(null);
     if (changedContext) {
@@ -650,7 +383,6 @@ export function AssetsPage({
   useEffect(() => {
     const update = () => {
       setReviewFilter(reviewFromUrl());
-      setLocalKind(kindFromUrl());
       const route = caseWorkbenchRoute();
       setCaseRoute(route);
       if (route.archived) setIncludeArchivedRequirements(true);
@@ -700,6 +432,43 @@ export function AssetsPage({
     return () => controller.abort();
   }, [project?.id, detail?.asset.id, detail?.asset.rowVersion, kind]);
 
+  useEffect(() => {
+    if (!scope) return;
+    const key = 'requirement:' + scope.requirementId;
+    setExpandedLibrary((before) =>
+      before.includes(key) ? before : [...before, key],
+    );
+  }, [kind, scope?.requirementId]);
+  function libraryReview(value: string) {
+    setReviewFilter(value);
+    const query = new URLSearchParams(window.location.hash.split('?')[1]);
+    if (value === 'all') query.delete('review');
+    else query.set('review', value);
+    window.history.replaceState(
+      null,
+      '',
+      '#cases' + (query.size ? '?' + query.toString() : ''),
+    );
+  }
+  function openScopedWorkbench() {
+    if (!scope) return;
+    const previous = recentCase.current.get(scope.requirementVersionId);
+    const inScene = assets.find(
+      (row) =>
+        row.targetType === 'case' && !row.removedAt && row.parentId === sceneId,
+    );
+    const availablePrevious = assets.some(
+      (row) =>
+        row.id === previous &&
+        !row.removedAt &&
+        (!sceneId || row.parentId === sceneId),
+    );
+    openWorkspace(
+      scope,
+      'workbench',
+      (availablePrevious ? previous : undefined) ?? inScene?.id,
+    );
+  }
   function selectRequirement(id: string) {
     if (!project) return;
     if (id === 'all') {
@@ -785,7 +554,7 @@ export function AssetsPage({
       if (caseId) query.set('caseId', caseId);
       if (meetingId) {
         query.set('meetingId', meetingId);
-        query.set('history', '1');
+        if (mode === 'workbench') query.set('history', '1');
       }
     });
     requestAnimationFrame(() => window.scrollTo(0, 0));
@@ -803,9 +572,8 @@ export function AssetsPage({
     });
     requestAnimationFrame(() => window.scrollTo(0, libraryScroll.current));
   }
-  function setMeeting(open: boolean) {
-    if (open && scope) openWorkspace(scope, 'meeting');
-    else returnToLibrary();
+  function openTeamReview() {
+    if (scope) openWorkspace(scope, 'meeting');
   }
   function browseCase(id: string) {
     if (scope && !caseRoute.history)
@@ -861,9 +629,7 @@ export function AssetsPage({
     setSelectedKeys([]);
   }
   function selectAsset(asset: Asset) {
-    if (asset.setId !== batchId) setSelectedKeys([]);
     setSelectedId(asset.id);
-    setBatchId(asset.setId);
     const query = new URLSearchParams(window.location.hash.split('?')[1]);
     if (query.has('assetId') && query.get('assetId') !== asset.id) {
       query.set('assetId', asset.id);
@@ -877,32 +643,33 @@ export function AssetsPage({
   }
   async function saved(asset: Asset) {
     await load();
-    setBatchId(asset.setId);
+    if (
+      readerWorkspace &&
+      asset.kind === 'UI' &&
+      asset.targetType === 'case' &&
+      asset.requirementVersionId === scope?.requirementVersionId
+    ) {
+      setSelectedId(null);
+      browseCase(asset.id);
+      return;
+    }
     setSelectedId(asset.id);
     if (selectedId === asset.id) await loadDetail(asset.id);
   }
-  function openEditor(targetType: 'set' | 'scenario' | 'case', source?: Asset) {
-    if (!scope) {
-      void message.info('先选择明确需求版本。');
+  function addToScene(asset: Asset) {
+    if (
+      asset.kind !== 'UI' ||
+      asset.targetType !== 'scenario' ||
+      asset.removedAt ||
+      !scope ||
+      scope.requirementVersionId !== asset.requirementVersionId
+    )
       return;
-    }
-    const setId = source?.setId ?? batch?.id ?? null;
-    const scenarioId =
-      source?.targetType === 'scenario'
-        ? source.id
-        : source?.targetType === 'case'
-          ? source.parentId
-          : null;
-    setEditor({
-      targetType,
-      kind,
-      requirementVersionId: scope.requirementVersionId,
-      setId,
-      scenarioId,
-      asset: null,
-    });
+    setSelectedId(null);
+    setCaseAction({ kind: 'new', scenarioId: asset.id });
   }
   function edit(asset: Asset) {
+    if (asset.kind !== 'UI') return;
     setEditor({
       targetType: asset.targetType,
       kind: asset.kind,
@@ -1073,8 +840,7 @@ export function AssetsPage({
             asset.targetType === 'scenario' &&
             requirement.versions.some(
               (version) => version.id === asset.requirementVersionId,
-            ) &&
-            (kind === 'UI' || batchId === 'all' || asset.setId === batchId),
+            ),
         )
         .flatMap((scenario) => {
           const scenarioMatches =
@@ -1093,20 +859,14 @@ export function AssetsPage({
           const version = requirement.versions.find(
             (item) => item.id === scenario.requirementVersionId,
           );
-          const set = assets.find((item) => item.id === scenario.setId);
-          const detail = [
-            version && `v${version.versionNo}`,
-            kind === 'API' ? set?.title : undefined,
-          ]
-            .filter(Boolean)
-            .join(' · ');
+          const detail = version ? 'v' + version.versionNo : undefined;
           return [
             {
               key: `scenario:${scenario.id}`,
               title: (
                 <RequirementDirectoryLabel
                   title={scenario.title}
-                  detail={detail}
+                  {...(detail ? { detail } : {})}
                 />
               ),
               children: cases.map((asset) => ({
@@ -1132,19 +892,16 @@ export function AssetsPage({
         },
       ];
     });
-  }, [navigation, assets, batchId, directorySearch, kind]);
+  }, [navigation, assets, directorySearch]);
   if (!project)
     return (
       <Card>
         <Empty description="请先选择当前有效项目，再浏览和维护用例。" />
       </Card>
     );
-  const batchMembers = batch
-    ? assets.filter((asset) => asset.setId === batch.id && !asset.removedAt)
-    : [];
   return (
     <>
-      {readerWorkspace && scope && kind === 'UI' && (
+      {readerWorkspace && scope && (
         <UiCaseWorkbench
           key={project.id + ':' + scope.requirementVersionId}
           scope={{ ...scope, title: selectedRequirement?.title ?? scope.title }}
@@ -1170,6 +927,7 @@ export function AssetsPage({
           onApprove={startPreview}
           onEdit={edit}
           onDetails={selectAsset}
+          onOpenTeam={(id) => openWorkspace(scope, 'meeting', undefined, id)}
           onSupplement={(asset, origin) => {
             setCaseAction({
               kind: 'supplement',
@@ -1186,7 +944,7 @@ export function AssetsPage({
           inlineDrafts={inlineDrafts.current}
         />
       )}
-      {reviewWorkspace && scope && kind === 'UI' && (
+      {reviewWorkspace && scope && (
         <>
           <StandaloneWorkbenchHeader
             title="UI 用例评审"
@@ -1213,14 +971,13 @@ export function AssetsPage({
               }
               initialCases={selectedKeys}
               tester={canWrite}
-              onReturn={() => setMeeting(false)}
               onApprove={startPreview}
               updated={changed}
             />
           </main>
         </>
       )}
-      {scope && kind === 'UI' && (
+      {scope && (
         <>
           <UiReviewHistory
             projectId={project.id}
@@ -1257,7 +1014,7 @@ export function AssetsPage({
               userId={userId}
               action={caseAction.kind}
               assets={assets}
-              scenarioId={sceneId}
+              scenarioId={caseAction.scenarioId ?? sceneId}
               source={caseAction.source}
               checkpoint={caseAction.checkpoint}
               onClose={() => setCaseAction(undefined)}
@@ -1270,102 +1027,11 @@ export function AssetsPage({
           )}
         </>
       )}
-      <div hidden={immersive}>
-        <PageHeading
-          eyebrow="TEST ASSETS"
-          title={kind === 'UI' ? 'UI 用例管理' : '接口用例管理'}
-          description="按需求、版本与场景维护文字用例，逐条评审和批准。"
-          actions={
-            <>
-              {scope && (
-                <Button
-                  disabled={!scopeExists || loading}
-                  onClick={() => setCoverage((value) => !value)}
-                >
-                  {kind === 'UI'
-                    ? '用例覆盖检查'
-                    : coverage
-                      ? '返回用例库'
-                      : '覆盖矩阵'}
-                </Button>
-              )}
-              {scope && kind === 'UI' && (
-                <>
-                  <Button
-                    disabled={loading || !scopeExists}
-                    onClick={() => setReviewHistory(true)}
-                  >
-                    评审历史
-                  </Button>
-                  <Button
-                    disabled={
-                      loading ||
-                      !scopeExists ||
-                      !assets.some(
-                        (row) => row.targetType === 'case' && !row.removedAt,
-                      )
-                    }
-                    onClick={() => {
-                      const previous = recentCase.current.get(
-                        scope.requirementVersionId,
-                      );
-                      const inScene = assets.find(
-                        (row) =>
-                          row.targetType === 'case' &&
-                          !row.removedAt &&
-                          row.parentId === sceneId,
-                      );
-                      const availablePrevious = assets.some(
-                        (row) =>
-                          row.id === previous &&
-                          !row.removedAt &&
-                          (!sceneId || row.parentId === sceneId),
-                      );
-                      openWorkspace(
-                        scope,
-                        'workbench',
-                        (availablePrevious ? previous : undefined) ??
-                          inScene?.id,
-                      );
-                    }}
-                  >
-                    打开工作台
-                  </Button>
-                  <Button
-                    disabled={loading || !scopeExists}
-                    onClick={() => setMeeting(true)}
-                  >
-                    团队评审
-                  </Button>
-                </>
-              )}
-              {kind === 'API' && (
-                <Button
-                  icon={<PlusOutlined />}
-                  disabled={
-                    !tester || !scope || !batch || Boolean(batch.removedAt)
-                  }
-                  onClick={() => openEditor('scenario')}
-                >
-                  新增场景
-                </Button>
-              )}
-              <Button
-                type="primary"
-                icon={<AppIcon name="spark" />}
-                disabled={
-                  kind === 'API' ? !tester : !canWrite || !scope || !scopeExists
-                }
-                onClick={() => {
-                  if (kind === 'API') window.location.hash = 'workspace';
-                  else setCaseAction({ kind: 'generate' });
-                }}
-              >
-                生成用例
-              </Button>
-            </>
-          }
-        />
+      <div hidden={immersive} className="ui-case-library">
+        <header className="ui-case-library-heading">
+          <h1>UI 用例管理</h1>
+          <p>按需求、版本与场景维护用例，逐条评审和批准。</p>
+        </header>
         {error && (
           <Alert
             type="error"
@@ -1384,462 +1050,114 @@ export function AssetsPage({
             className="section-alert"
           />
         )}
-        {coverage && scope && kind === 'API' && (
-          <AssetCoverage
-            projectId={project.id}
-            versionId={scope.requirementVersionId}
-            kind={kind}
-            assets={assets}
-            scenarioTitles={new Map(scenarios.map((s) => [s.id, s.title]))}
-            onCase={selectAsset}
-          />
-        )}
-        <div hidden={coverage && Boolean(scope) && kind === 'API'}>
-          <div className="asset-workspace live-asset-workspace requirement-directory-layout">
-            <RequirementDirectory
-              includeArchived={includeArchivedRequirements}
-              archiveDisabled={
-                editor !== null || preview !== null || committing
+        <div className="asset-workspace live-asset-workspace requirement-directory-layout">
+          <RequirementDirectory
+            includeArchived={includeArchivedRequirements}
+            archiveDisabled={editor !== null || preview !== null || committing}
+            onIncludeArchivedChange={(value) => {
+              loadEpoch.current += 1;
+              if (!value && selectedRequirement?.archived) {
+                selectRequirement('all');
+                setSelectedId(null);
               }
-              onIncludeArchivedChange={(value) => {
-                loadEpoch.current += 1;
-                if (!value && selectedRequirement?.archived) {
-                  selectRequirement('all');
-                  setSelectedId(null);
-                }
-                setAssets([]);
-                setNavigation({ requirements: [] });
-                setSelectedKeys([]);
-                setLoading(true);
-                setIncludeArchivedRequirements(value);
-                updateCaseLink((query) => {
-                  if (value) query.set('archived', '1');
-                  else query.delete('archived');
-                }, true);
-              }}
-              search={directorySearch}
-              onSearchChange={setDirectorySearch}
-              searchPlaceholder="搜索需求、场景或用例"
+              setAssets([]);
+              setNavigation({ requirements: [] });
+              setSelectedKeys([]);
+              setLoading(true);
+              setIncludeArchivedRequirements(value);
+              updateCaseLink((query) => {
+                if (value) query.set('archived', '1');
+                else query.delete('archived');
+              }, true);
+            }}
+            search={directorySearch}
+            onSearchChange={setDirectorySearch}
+            searchPlaceholder="搜索需求、场景或用例"
+          >
+            <button
+              type="button"
+              className={`tree-node requirement-directory-button ${scope ? '' : 'active'}`}
+              aria-pressed={!scope}
+              onClick={() => selectRequirement('all')}
             >
-              <button
-                type="button"
-                className={`tree-node requirement-directory-button ${scope ? '' : 'active'}`}
-                aria-pressed={!scope}
-                onClick={() => selectRequirement('all')}
-              >
-                <RequirementDirectoryLabel
-                  title="全部需求"
-                  count={`${navigation.requirements.reduce((n, r) => n + r.caseCount, 0)} 条用例`}
-                />
-              </button>
-              {loading ? (
-                <Skeleton active />
-              ) : (
-                <Tree
-                  key={`${kind}:${scope?.requirementVersionId ?? 'all'}:${batchId}:${directorySearch.trim()}`}
-                  treeData={tree}
-                  defaultExpandAll
-                  blockNode
-                  selectedKeys={
-                    selectedId
-                      ? [
-                          `${assets.find((asset) => asset.id === selectedId)?.targetType ?? 'case'}:${selectedId}`,
-                        ]
-                      : sceneId
-                        ? [`scenario:${sceneId}`]
-                        : scope
-                          ? [`requirement:${scope.requirementId}`]
-                          : []
-                  }
-                  onSelect={([key]) => {
-                    if (typeof key !== 'string') return;
-                    if (key.startsWith('requirement:'))
-                      selectRequirement(key.slice(12));
-                    else {
-                      const asset = assets.find(
-                        (item) => item.id === key.split(':')[1],
-                      );
-                      if (asset) selectDirectoryAsset(asset);
-                    }
-                  }}
-                />
-              )}
-            </RequirementDirectory>
-            <section className="asset-pane">
-              <div className="context-head">
-                <div>
-                  <h2>{scope?.title ?? '全部需求'}</h2>
-                  <p>
-                    {scope
-                      ? `v${scope.versionNo} · ${selectedRequirement?.archived ? '已归档需求' : '当前选定版本'}`
-                      : '跨版本只读浏览；新建前请选择明确需求版本。'}
-                  </p>
-                </div>
-                <div className="context-controls">
-                  <Select
-                    aria-label="用例需求范围"
-                    value={
-                      scope
-                        ? selectedRequirement
-                          ? scope.requirementId
-                          : null
-                        : 'all'
-                    }
-                    placeholder="当前历史需求未在浏览目录中"
-                    onChange={selectRequirement}
-                    options={[
-                      { value: 'all', label: '全部需求' },
-                      ...navigation.requirements.map((r) => ({
-                        value: r.id,
-                        label: r.title + (r.archived ? '（已归档）' : ''),
-                      })),
-                    ]}
-                    style={{ width: 190 }}
-                  />
-                  {scope && (
-                    <Select
-                      aria-label="需求版本"
-                      value={scopeExists ? scope.requirementVersionId : null}
-                      placeholder="版本未在浏览目录中"
-                      disabled={!selectedRequirement}
-                      onChange={selectVersion}
-                      options={(selectedRequirement?.versions ?? []).map(
-                        (v) => ({
-                          value: v.id,
-                          label: `v${v.versionNo}（${v.versionNo === Math.max(...(selectedRequirement?.versions ?? []).map((entry) => entry.versionNo)) ? '当前' : '历史'}） · ${v.caseCount} 条用例`,
-                        }),
-                      )}
-                      style={{ width: 130 }}
-                    />
-                  )}
-                  {kind === 'API' && (
-                    <Select
-                      aria-label="生成批次"
-                      value={batchId}
-                      onChange={(id) => {
-                        setBatchId(id);
-                        setSelectedKeys([]);
-                        setSelectedId(null);
-                      }}
-                      options={[
-                        { value: 'all', label: '全部批次' },
-                        ...batches.map((b) => ({
-                          value: b.id,
-                          label: b.title + (b.removedAt ? '（已移除）' : ''),
-                        })),
-                      ]}
-                      style={{ width: 170 }}
-                    />
-                  )}
-                  <Button
-                    size="small"
-                    icon={<ReloadOutlined />}
-                    loading={loading}
-                    onClick={() => void load()}
-                    aria-label="刷新资产"
-                  />
-                  {tester && kind === 'API' && (
-                    <Button
-                      size="small"
-                      disabled={!scope || !scopeExists}
-                      onClick={() => openEditor('set')}
-                    >
-                      新建批次
-                    </Button>
-                  )}
-                </div>
-              </div>
-              {tester && kind === 'API' && scope && !batch && (
-                <Alert
-                  type="info"
-                  showIcon
-                  className="mb"
-                  title="新增场景前，请先创建或选择生成批次。"
-                  action={
-                    <Button size="small" onClick={() => openEditor('set')}>
-                      新建批次
-                    </Button>
-                  }
-                />
-              )}
-              <div className="toolbar mb asset-toolbar">
-                <Input
-                  className="searchbox"
-                  aria-label="搜索用例"
-                  placeholder="搜索场景或用例"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  allowClear
-                />
-                <Select
-                  aria-label="评审状态筛选"
-                  value={reviewFilter}
-                  onChange={(value) => {
-                    setReviewFilter(value);
-                    const query = new URLSearchParams(
-                      window.location.hash.split('?')[1],
+              <RequirementDirectoryLabel
+                title="全部需求"
+                count={`${navigation.requirements.reduce((n, r) => n + r.caseCount, 0)} 条用例`}
+              />
+            </button>
+            {loading ? (
+              <Skeleton active />
+            ) : (
+              <Tree
+                key={scope?.requirementVersionId ?? 'all'}
+                treeData={tree}
+                expandedKeys={expandedLibrary}
+                onExpand={(keys) => setExpandedLibrary(keys.map(String))}
+                blockNode
+                selectedKeys={
+                  selectedId
+                    ? [
+                        `${assets.find((asset) => asset.id === selectedId)?.targetType ?? 'case'}:${selectedId}`,
+                      ]
+                    : sceneId
+                      ? [`scenario:${sceneId}`]
+                      : scope
+                        ? [`requirement:${scope.requirementId}`]
+                        : []
+                }
+                onSelect={([key]) => {
+                  if (typeof key !== 'string') return;
+                  if (key.startsWith('requirement:'))
+                    selectRequirement(key.slice(12));
+                  else {
+                    const asset = assets.find(
+                      (item) => item.id === key.split(':')[1],
                     );
-                    if (value === 'all') query.delete('review');
-                    else query.set('review', value);
-                    window.history.replaceState(
-                      null,
-                      '',
-                      `${window.location.pathname}${window.location.search}#cases${query.size ? '?' + query.toString() : ''}`,
-                    );
-                  }}
-                  options={[
-                    { value: 'all', label: '全部评审状态' },
-                    { value: 'unapproved', label: '全部待评审' },
-                    ...Object.entries(reviewLabels).map(([value, label]) => ({
-                      value,
-                      label,
-                    })),
-                  ]}
-                  style={{ minWidth: 128 }}
-                />
-                <span className="grow" />
-                {kind === 'API' && (
-                  <Button
-                    size="small"
-                    disabled={!batch}
-                    onClick={() => batch && setSelectedId(batch.id)}
-                  >
-                    测试集意见
-                  </Button>
-                )}
-                {kind === 'UI' && scope && canWrite && scopeExists && (
-                  <Space>
-                    <Button
-                      size="small"
-                      onClick={() => setCaseAction({ kind: 'new' })}
-                    >
-                      新增用例
-                    </Button>
-                    <Button
-                      size="small"
-                      onClick={() => setCaseAction({ kind: 'import' })}
-                    >
-                      导入用例
-                    </Button>
-                  </Space>
-                )}
-                <Button
-                  size="small"
-                  type="primary"
-                  disabled={!tester || !selectedKeys.length}
-                  loading={previewLoading}
-                  onClick={() => void startPreview(selectedKeys)}
-                >
-                  预览通过已选 {selectedKeys.length} 项
-                </Button>
-              </div>
-              {kind === 'API' && batch && (
-                <div className="batch-note mb">
-                  <div className="between">
-                    <div>
-                      <b className="small">
-                        {batch.title} · {reviewLabels[batch.reviewState]}
-                      </b>
-                      <p className="caption">
-                        本批有效对象 {batchMembers.length} 项，当前通过{' '}
-                        {
-                          batchMembers.filter(
-                            (a) => a.reviewState === 'approved',
-                          ).length
-                        }{' '}
-                        项；上层意见以批准预览判断，旧批准快照独立保留。
-                      </p>
-                    </div>
-                    <Button
-                      size="small"
-                      disabled={!tester || Boolean(batch.removedAt)}
-                      loading={previewLoading}
-                      onClick={() =>
-                        void startPreview(batchMembers.map((a) => a.id))
-                      }
-                    >
-                      预览整批对象
-                    </Button>
-                  </div>
-                </div>
-              )}
-              {loading ? (
-                <Skeleton active />
-              ) : !scopeExists || error ? (
-                <div className="card pad">
-                  <Empty
-                    description={
-                      error
-                        ? '资产尚未读取成功。'
-                        : includeArchivedRequirements
-                          ? '此需求版本不在当前项目目录，请重新选择范围。'
-                          : '此需求版本当前未展示，可开启“已归档需求”或另选范围。'
-                    }
-                  />
-                </div>
-              ) : (
-                <>
-                  {scenarios
-                    .filter(
-                      (scene) =>
-                        !keyword ||
-                        cases.some((c) => c.parentId === scene.id) ||
-                        scene.title.toLocaleLowerCase().includes(keyword),
-                    )
-                    .map((scene) => {
-                      const rows = cases.filter((c) => c.parentId === scene.id);
-                      const requirement = navigation.requirements.find((r) =>
-                        r.versions.some(
-                          (v) => v.id === scene.requirementVersionId,
-                        ),
-                      );
-                      return (
-                        <section className="card scene-card" key={scene.id}>
-                          <div className="scene-summary">
-                            <AppIcon name="folder-closed" />
-                            <div className="grow">
-                              <h3>
-                                <button
-                                  type="button"
-                                  className="ui-case-scene-toggle"
-                                  aria-expanded={!collapsedScenes.has(scene.id)}
-                                  onClick={() =>
-                                    setCollapsedScenes((before) => {
-                                      const next = new Set(before);
-                                      if (next.has(scene.id))
-                                        next.delete(scene.id);
-                                      else next.add(scene.id);
-                                      return next;
-                                    })
-                                  }
-                                >
-                                  {scene.title}
-                                </button>
-                              </h3>
-                              <p>
-                                {requirement?.title ?? '原需求未取得'} ·{' '}
-                                {kind === 'API'
-                                  ? (batches.find((b) => b.id === scene.setId)
-                                      ?.title ?? '原批次') + ' · '
-                                  : 'v' +
-                                    (requirement?.versions.find(
-                                      (version) =>
-                                        version.id ===
-                                        scene.requirementVersionId,
-                                    )?.versionNo ?? '—') +
-                                    ' · '}
-                                {rows.length} 条当前筛选用例
-                              </p>
-                            </div>
-                            <ReviewStateTag state={scene.reviewState} />
-                            <Button
-                              size="small"
-                              onClick={() => selectAsset(scene)}
-                            >
-                              场景意见
-                            </Button>
-                            {canWrite && (
-                              <Button
-                                size="small"
-                                disabled={!scope || Boolean(scene.removedAt)}
-                                onClick={() => openEditor('case', scene)}
-                              >
-                                新增用例
-                              </Button>
-                            )}
-                          </div>
-                          {!collapsedScenes.has(scene.id) &&
-                            rows.map((asset) => (
-                              <div className="case-row" key={asset.id}>
-                                <Checkbox
-                                  aria-label={`选择${asset.title}`}
-                                  disabled={!tester || Boolean(asset.removedAt)}
-                                  checked={selectedKeys.includes(asset.id)}
-                                  onChange={(e) =>
-                                    setSelectedKeys((keys) =>
-                                      e.target.checked
-                                        ? [...keys, asset.id]
-                                        : keys.filter((id) => id !== asset.id),
-                                    )
-                                  }
-                                />
-                                <div className="grow">
-                                  <h3>{asset.title}</h3>
-                                  <p>
-                                    {asset.id} · 编辑 r{asset.revisionNo}
-                                    {'dslVersion' in asset.content
-                                      ? ` · ${asset.content.steps.length} 个请求`
-                                      : ''}
-                                    {asset.removedAt
-                                      ? ' · 已移除，历史保留'
-                                      : ''}
-                                  </p>
-                                </div>
-                                <ReviewStateTag state={asset.reviewState} />
-                                <Button
-                                  size="small"
-                                  onClick={() => openCase(asset)}
-                                >
-                                  {kind === 'UI' && !asset.removedAt
-                                    ? '打开用例'
-                                    : '查看'}
-                                </Button>
-                                {canWrite &&
-                                  asset.reviewState !== 'approved' &&
-                                  !asset.removedAt && (
-                                    <Button
-                                      size="small"
-                                      onClick={() =>
-                                        void startPreview([asset.id])
-                                      }
-                                    >
-                                      通过
-                                    </Button>
-                                  )}
-                              </div>
-                            ))}
-                          {!collapsedScenes.has(scene.id) && !rows.length && (
-                            <div className="case-row">
-                              <p className="caption">
-                                此场景在当前筛选下暂无具体用例，场景本身仍独立保留。
-                              </p>
-                            </div>
-                          )}
-                        </section>
-                      );
-                    })}
-                  {!scenarios.length && (
-                    <div className="card pad">
-                      <Empty description="此范围尚无场景或用例。UI 与接口资产各自维护。" />
-                      {tester && (
-                        <div className="row mt">
-                          <Button
-                            disabled={!scope || !batch}
-                            type="primary"
-                            onClick={() => openEditor('scenario')}
-                          >
-                            创建场景
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </>
-              )}
-              <div className="between mt">
-                <p className="caption">
-                  当前 {cases.length} 条 · 已选择 {selectedKeys.length}{' '}
-                  条。生成和维护按所选需求版本办理。
-                </p>
-                <Checkbox
-                  checked={includeRemoved}
-                  onChange={(e) => setIncludeRemoved(e.target.checked)}
-                >
-                  包含已移除历史
-                </Checkbox>
-              </div>
-            </section>
-          </div>
+                    if (asset) selectDirectoryAsset(asset);
+                  }
+                }}
+              />
+            )}
+          </RequirementDirectory>
+          <UiCaseLibraryPane
+            scope={scope}
+            requirement={selectedRequirement}
+            requirements={navigation.requirements}
+            available={scopeExists && !error}
+            loading={loading}
+            scenarios={scenarios}
+            cases={cases}
+            sceneId={sceneId}
+            sceneCount={
+              sceneId
+                ? assets.filter(
+                    (asset) =>
+                      asset.parentId === sceneId && asset.targetType === 'case',
+                  ).length
+                : undefined
+            }
+            search={search}
+            review={reviewFilter}
+            includeRemoved={includeRemoved}
+            selected={selectedKeys}
+            canWrite={canWrite}
+            stageOf={libraryStage}
+            approving={previewLoading}
+            onSearch={setSearch}
+            onReview={libraryReview}
+            onVersion={selectVersion}
+            onCoverage={() => setCoverage(true)}
+            onHistory={() => setReviewHistory(true)}
+            onOpen={openScopedWorkbench}
+            onReviewTeam={openTeamReview}
+            onAction={(kind) => setCaseAction({ kind })}
+            onOpenCase={openCase}
+            onScenario={selectAsset}
+            onAddToScene={addToScene}
+            onSelect={setSelectedKeys}
+            onApprove={startPreview}
+            onIncludeRemoved={setIncludeRemoved}
+          />
         </div>
       </div>
       <DetailDrawer
@@ -1853,7 +1171,6 @@ export function AssetsPage({
             </>
           )
         }
-        wide={kind === 'API'}
         onClose={() => setSelectedId(null)}
       >
         {detailLoading && <Skeleton active />}
@@ -1891,11 +1208,11 @@ export function AssetsPage({
               <Alert
                 type="info"
                 showIcon
-                title={`所属批次：${batches.find((item) => item.id === detail.asset.setId)?.title ?? detail.asset.setId}`}
+                title={`历史归属 · ${sets.find((item) => item.id === detail.asset.setId)?.title ?? detail.asset.setId}`}
                 description={
                   <Space wrap>
                     <Button onClick={() => setSelectedId(detail.asset.setId)}>
-                      查看整批意见
+                      查看归属意见
                     </Button>
                     {detail.asset.targetType === 'case' &&
                       detail.asset.parentId && (
@@ -1923,17 +1240,12 @@ export function AssetsPage({
                 >
                   编辑当前内容并建新修订
                 </Button>
-                {detail.asset.targetType !== 'case' && scope && (
+                {detail.asset.targetType === 'scenario' && scope && (
                   <Button
                     icon={<PlusOutlined />}
-                    onClick={() =>
-                      openEditor(
-                        detail.asset.targetType === 'set' ? 'scenario' : 'case',
-                        detail.asset,
-                      )
-                    }
+                    onClick={() => addToScene(detail.asset)}
                   >
-                    新增{detail.asset.targetType === 'set' ? '场景' : '用例'}
+                    新增用例
                   </Button>
                 )}
                 <Button
