@@ -20,6 +20,10 @@ const uniqueIds = z
   .array(idSchema)
   .max(10000)
   .refine((ids) => new Set(ids).size === ids.length, '对象不可重复');
+export const uiPlanApprovalBasisSchema = z.strictObject({
+  caseId: idSchema,
+  approvalSnapshotId: idSchema,
+});
 export const createPlanInputSchema = z
   .strictObject({
     commandId: commandIdSchema,
@@ -29,6 +33,11 @@ export const createPlanInputSchema = z
     productBuild: z.string().max(200).nullable(),
     requirementVersionId: idSchema.optional(),
     caseIds: uniqueIds.min(1),
+    approvalBasis: z
+      .array(uiPlanApprovalBasisSchema)
+      .min(1)
+      .max(10000)
+      .optional(),
   })
   .superRefine((input, context) => {
     if (input.kind === 'UI' && !input.requirementVersionId)
@@ -43,6 +52,20 @@ export const createPlanInputSchema = z
         path: ['requirementVersionId'],
         message: '接口计划按逻辑case引用，需求版本由各case保留',
       });
+    if (input.approvalBasis) {
+      const selected = new Set(input.caseIds);
+      const approvals = new Set(input.approvalBasis.map(({ caseId }) => caseId));
+      if (
+        input.kind !== 'UI' ||
+        approvals.size !== input.approvalBasis.length ||
+        input.approvalBasis.some(({ caseId }) => !selected.has(caseId))
+      )
+        context.addIssue({
+          code: 'custom',
+          path: ['approvalBasis'],
+          message: '批准基准只能绑定本次已选的 UI 用例，每条用例最多一项。',
+        });
+    }
   });
 export const revisePlanInputSchema = createPlanInputSchema
   .safeExtend({
@@ -73,6 +96,8 @@ export const uiPlanEligibilitySchema = z.strictObject({
     caseId: idSchema,
     setId: idSchema,
     eligible: z.boolean(),
+    approvalSnapshotId: idSchema.nullable(),
+    approvedRevisionId: idSchema.nullable(),
     reasons: z.array(z.string()),
   })),
 });

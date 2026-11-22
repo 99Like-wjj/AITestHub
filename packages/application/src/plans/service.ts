@@ -266,16 +266,20 @@ export class PlanService {
       const items = [];
       for (const item of cases) {
         let reasons: string[] = [];
+        let approvalSnapshotId: string | null = null;
+        let approvedRevisionId: string | null = null;
         if (item.review_state !== 'approved') {
           reasons = ['当前用例修订待批准。'];
         } else {
           try {
-            await this.reviews.latestApprovedInTransaction(
+            const approved = await this.reviews.latestApprovedInTransaction(
               transaction,
               projectId,
               item.id,
               'UI',
             );
+            approvalSnapshotId = approved.approval.id;
+            approvedRevisionId = approved.snapshot.case.revisionId;
           } catch (error) {
             if (!(error instanceof DomainError)) throw error;
             reasons = [error.message];
@@ -285,6 +289,8 @@ export class PlanService {
           caseId: item.id,
           setId: item.set_id,
           eligible: reasons.length === 0,
+          approvalSnapshotId,
+          approvedRevisionId,
           reasons,
         });
       }
@@ -367,6 +373,24 @@ export class PlanService {
         : [],
     );
     const refresh = new Set(refreshCaseIds);
+    const expectedApprovals = new Map(
+      input.approvalBasis?.map(({ caseId, approvalSnapshotId }) => [
+        caseId,
+        approvalSnapshotId,
+      ]),
+    );
+    const confirmApprovalBasis = (
+      caseId: string,
+      approvalSnapshotId: string,
+    ) => {
+      const expected = expectedApprovals.get(caseId);
+      if (expected && expected !== approvalSnapshotId)
+        throw new DomainError(
+          'BUSINESS_CONFLICT',
+          '此用例的批准修订已变化，请返回用例工作台重新预览执行范围。',
+          409,
+        );
+    };
     if (input.kind === 'UI') {
       const currentIds = input.caseIds.filter(
         (id) => !retained.has(id) || refresh.has(id),
@@ -399,6 +423,7 @@ export class PlanService {
       }
       const kept = retained.get(caseId);
       if (input.kind === 'UI' && kept && !refresh.has(caseId)) {
+        confirmApprovalBasis(caseId, kept.approvalSnapshotId);
         items.push({ caseId, approvalSnapshotId: kept.approvalSnapshotId });
         fixed.push({ ...kept, ordinal: fixed.length });
         continue;
@@ -428,6 +453,7 @@ export class PlanService {
         caseId,
         'UI',
       );
+      confirmApprovalBasis(caseId, approved.approval.id);
       const content = uiCaseContentSchema.parse(approved.snapshot.case.content);
       const scenario = scenarioContentSchema.parse(
         approved.snapshot.scenario.content,

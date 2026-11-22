@@ -34,13 +34,21 @@ import { formatBeijingTime } from './beijing-time';
 import { StandaloneWorkbenchHeader } from './standalone-workbench-header';
 import { AppIcon } from './app-icon';
 import { UiCaseReader } from './ui-case-reader';
-import { UiReviewWorkspace, assessmentLabels } from './ui-review-workspace';
+import {
+  UiReviewWorkspace,
+  assessmentLabels,
+  type UiCaseAssessmentDraft,
+} from './ui-review-workspace';
 import type { CaseScope } from './requirements';
+import {
+  matchingApproval,
+  uiPlanHandoffHash,
+  type UiPlanEligibility,
+} from './ui-case-plan-handoff';
 import './ui-case-workbench.css';
 
 type Meeting = z.infer<typeof uiReviewMeetingDetailSchema>;
 type Detail = z.infer<typeof assetDetailSchema>;
-type PlanEligibility = z.infer<typeof uiPlanEligibilitySchema>['items'][number];
 type SavedOrigin = z.infer<typeof caseSupplementOriginResultSchema>['origin'];
 type CaseStage = z.infer<typeof uiCaseReviewStageListSchema>['items'][number];
 type Filter = 'all' | CaseStage['stage'];
@@ -206,6 +214,7 @@ export function UiCaseWorkbench({
   onSupplement,
   onChanged,
   inlineDrafts,
+  inlineAssessments,
 }: {
   scope: CaseScope;
   projectName: string;
@@ -232,6 +241,7 @@ export function UiCaseWorkbench({
   ) => void;
   onChanged: () => Promise<void>;
   inlineDrafts: Map<string, string>;
+  inlineAssessments: Map<string, UiCaseAssessmentDraft>;
 }) {
   const [filter, setFilter] = useState<Filter>('all');
   const [search, setSearch] = useState('');
@@ -256,7 +266,7 @@ export function UiCaseWorkbench({
   const [busy, setBusy] = useState(false);
   const [reviewActions, setReviewActions] = useState<HTMLElement | null>(null);
   const [scopePlan, setScopePlan] = useState(false);
-  const [planItems, setPlanItems] = useState<PlanEligibility[]>();
+  const [planItems, setPlanItems] = useState<UiPlanEligibility[]>();
   const [planError, setPlanError] = useState<string>();
   const [choice, setChoice] = useState<string[]>([]);
   const readonly = Boolean(meetingId) || archived;
@@ -417,7 +427,7 @@ export function UiCaseWorkbench({
         setChoice(
           currentCases
             .filter((asset) =>
-              items.some((item) => item.caseId === asset.id && item.eligible),
+              items.some((item) => Boolean(matchingApproval(asset, item))),
             )
             .map((asset) => asset.id),
         );
@@ -440,12 +450,21 @@ export function UiCaseWorkbench({
   );
   const writable = tester && !readonly && !earlier && !active?.removedAt;
   const eligibility = new Map(planItems?.map((item) => [item.caseId, item]));
-  const eligible = currentCases.filter(
-    (asset) => eligibility.get(asset.id)?.eligible,
+  const eligible = currentCases.flatMap((asset) => {
+    const approvalSnapshotId = matchingApproval(
+      asset,
+      eligibility.get(asset.id),
+    );
+    return approvalSnapshotId ? [{ asset, approvalSnapshotId }] : [];
+  });
+  const chosenApprovals = choice.flatMap(
+    (id) => eligible.find(({ asset }) => asset.id === id) ?? [],
   );
   const blocked =
     planItems &&
-    currentCases.filter((asset) => !eligibility.get(asset.id)?.eligible);
+    currentCases.filter(
+      (asset) => !matchingApproval(asset, eligibility.get(asset.id)),
+    );
   const review = meetingId ? snapshot : liveReview;
   const texts = review?.state.items.filter(
     (item) => item.basis.caseId === activeId,
@@ -479,7 +498,7 @@ export function UiCaseWorkbench({
         if (!controller.signal.aborted)
           setEligibleCount(
             currentCases.filter((row) =>
-              items.some((item) => item.caseId === row.id && item.eligible),
+              items.some((item) => Boolean(matchingApproval(row, item))),
             ).length,
           );
       })
@@ -959,6 +978,7 @@ export function UiCaseWorkbench({
                             inlineActions={reviewActions}
                             onOpenTeam={onOpenTeam}
                             inlineDrafts={inlineDrafts}
+                            inlineAssessments={inlineAssessments}
                             onRead={setLiveReview}
                             onCompare={(from, to) =>
                               setComparison({
@@ -1007,20 +1027,15 @@ export function UiCaseWorkbench({
         onCancel={() => setScopePlan(false)}
         okText="带入计划"
         okButtonProps={{
-          disabled: !choice.some((id) =>
-            eligible.some((asset) => asset.id === id),
-          ),
+          disabled: chosenApprovals.length === 0,
         }}
         onOk={() => {
-          const query = new URLSearchParams({
-            projectId: scope.projectId,
-            kind: 'UI',
-            versionId: scope.requirementVersionId,
-          });
-          for (const id of choice)
-            if (eligible.some((asset) => asset.id === id))
-              query.append('caseId', id);
-          window.location.hash = 'plans?' + query.toString();
+          if (!chosenApprovals.length) return;
+          window.location.hash = uiPlanHandoffHash(
+            scope.projectId,
+            scope.requirementVersionId,
+            chosenApprovals,
+          );
         }}
       >
         {planError ? (
@@ -1036,7 +1051,7 @@ export function UiCaseWorkbench({
                 value={choice}
                 onChange={setChoice}
               >
-                {eligible.map((asset) => (
+                {eligible.map(({ asset }) => (
                   <Checkbox key={asset.id} value={asset.id}>
                     {asset.title} · r{asset.revisionNo}
                   </Checkbox>
@@ -1055,7 +1070,9 @@ export function UiCaseWorkbench({
                     </b>
                     <p className="caption">
                       {eligibility.get(asset.id)?.reasons.join('；') ||
-                        '本次未取得可纳入计划的依据。'}
+                        (eligibility.get(asset.id)?.eligible
+                          ? '计划资格中的批准修订与当前用例不一致，请刷新范围核对。'
+                          : '本次未取得可纳入计划的依据。')}
                     </p>
                   </article>
                 ))}

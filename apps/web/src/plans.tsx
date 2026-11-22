@@ -35,6 +35,7 @@ import {
   planReceiptSchema,
   revisePlanInputSchema,
   renamePlanInputSchema,
+  uiPlanApprovalBasisSchema,
   uiPlanEligibilitySchema,
   uiPlanScopeSchema,
 } from '../../../packages/contracts/src/plans';
@@ -73,6 +74,7 @@ type PlanHandoff = {
   kind: 'UI' | 'API';
   caseIds: string[];
   versionId: string | undefined;
+  approvalBasis: z.infer<typeof uiPlanApprovalBasisSchema>[];
 };
 
 function readPlanHandoff(projectId?: string): PlanHandoff | null {
@@ -87,15 +89,36 @@ function readPlanHandoff(projectId?: string): PlanHandoff | null {
     (kind !== 'UI' && kind !== 'API')
   )
     return null;
-  const caseIds = [...new Set(query.getAll('caseId'))].filter(
-    (id) => idSchema.safeParse(id).success,
-  );
-  if (!caseIds.length || caseIds.length > 10000) return null;
+  const caseIds = query.getAll('caseId');
+  if (
+    !caseIds.length ||
+    caseIds.length > 10000 ||
+    new Set(caseIds).size !== caseIds.length ||
+    caseIds.some((id) => !idSchema.safeParse(id).success)
+  )
+    return null;
   const version = idSchema.safeParse(query.get('versionId'));
+  const approvalIds = query.getAll('approvalSnapshotId');
+  if (
+    kind === 'UI' &&
+    (!version.success || approvalIds.length !== caseIds.length)
+  )
+    return null;
+  if (kind === 'API' && approvalIds.length) return null;
+  const basis = z
+    .array(uiPlanApprovalBasisSchema)
+    .safeParse(
+      approvalIds.map((approvalSnapshotId, index) => ({
+        caseId: caseIds[index],
+        approvalSnapshotId,
+      })),
+    );
+  if (!basis.success) return null;
   return {
     kind,
     caseIds,
     versionId: version.success ? version.data : undefined,
+    approvalBasis: basis.data,
   };
 }
 interface PlanFields {
@@ -342,12 +365,23 @@ function PlanEditor({
               handoff.versionId ?? candidates[0]?.requirementVersionId;
             if (kind === 'UI' && versionId)
               form.setFieldValue('requirementVersionId', versionId);
+            const expected = new Map(
+              handoff.approvalBasis.map(({ caseId, approvalSnapshotId }) => [
+                caseId,
+                approvalSnapshotId,
+              ]),
+            );
+            const current = new Map(
+              qualified.items.map((entry) => [entry.caseId, entry]),
+            );
             const selected = candidates.filter((item) =>
               kind === 'UI'
                 ? item.requirementVersionId === versionId &&
-                  qualified.items.some(
-                    (entry) => entry.caseId === item.id && entry.eligible,
-                  )
+                  current.get(item.id)?.eligible === true &&
+                  current.get(item.id)?.approvedRevisionId ===
+                    item.revisionId &&
+                  current.get(item.id)?.approvalSnapshotId ===
+                    expected.get(item.id)
                 : apiQualified.qualifications.some(
                     (entry) => entry.caseId === item.id,
                   ),
@@ -382,6 +416,12 @@ function PlanEditor({
       plan?.id ?? null,
       plan ? '修改计划范围' : '新建计划',
       async (key) => {
+        const approvalBasis =
+          !plan && kind === 'UI' && handoff?.kind === 'UI'
+            ? handoff.approvalBasis.filter(({ caseId }) =>
+                caseIds.includes(caseId),
+              )
+            : [];
         const input = {
           commandId: key,
           kind,
@@ -389,6 +429,7 @@ function PlanEditor({
           environmentId: values.environmentId,
           productBuild: values.productBuild?.trim() || null,
           caseIds,
+          ...(approvalBasis.length ? { approvalBasis } : {}),
           ...(kind === 'UI'
             ? { requirementVersionId: values.requirementVersionId }
             : {}),
@@ -422,6 +463,12 @@ function PlanEditor({
   );
   const originalIds = new Set(plan?.items.map((item) => item.caseId));
   const eligibleUi = new Map(eligibility.map((item) => [item.caseId, item]));
+  const handedOffApprovals = new Map(
+    handoff?.approvalBasis.map(({ caseId, approvalSnapshotId }) => [
+      caseId,
+      approvalSnapshotId,
+    ]),
+  );
   const apiReady = new Map(
     apiQualifications.map((item) => [item.caseId, item]),
   );
@@ -509,7 +556,7 @@ function PlanEditor({
           <Alert
             type="warning"
             className="section-alert"
-            title={`带入的 ${excludedHandoffCount} 条用例缺少资格或不在当前需求版本。`}
+            title={`带入的 ${excludedHandoffCount} 条用例的批准修订已变化、缺少资格或不在当前需求版本。`}
           />
         )}
         {(error || command.error) && (
@@ -614,7 +661,11 @@ function PlanEditor({
               eligible =
                 kind === 'API'
                   ? Boolean(ready)
-                  : qualification?.eligible === true,
+                  : qualification?.eligible === true &&
+                    qualification.approvedRevisionId === asset.revisionId &&
+                    (!handedOffApprovals.has(asset.id) ||
+                      handedOffApprovals.get(asset.id) ===
+                        qualification.approvalSnapshotId),
               unavailable = !eligible && !selected;
             return (
               <div key={asset.id}>

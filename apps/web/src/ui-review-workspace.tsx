@@ -22,14 +22,30 @@ import {
   uiReviewMeetingMutationSchema,
   type UiReviewWorkItem,
 } from '../../../packages/contracts/src/ui-reviews';
+import { uiPlanEligibilitySchema } from '../../../packages/contracts/src/plans';
 import { api, describeError, isUncertainMutationError } from './api';
 import { PageHeading } from './page-heading';
 import { UiCaseText } from './ui-case-reader';
+import {
+  matchingApproval,
+  uiPlanHandoffHash,
+  type UiPlanEligibility,
+} from './ui-case-plan-handoff';
 import './ui-review-workspace.css';
 
 export type UiReviewRoom = z.infer<typeof uiReviewMeetingDetailSchema>;
 type Room = UiReviewRoom;
 type AssessmentOutcome = z.infer<typeof uiCaseAssessmentOutcomeSchema>;
+export type UiCaseAssessmentDraft = {
+  outcome: AssessmentOutcome | undefined;
+  note: string;
+  instruction: string;
+};
+const emptyAssessmentDraft: UiCaseAssessmentDraft = {
+  outcome: undefined,
+  note: '',
+  instruction: '',
+};
 const assessmentLabels: Record<AssessmentOutcome, string> = {
   resolved: '确认已解决',
   needsRework: '需要补改',
@@ -76,6 +92,7 @@ export function UiReviewWorkspace({
   inlineActions,
   onOpenTeam,
   inlineDrafts,
+  inlineAssessments,
   onBusyChange,
   onSupplement,
   onRead,
@@ -96,6 +113,7 @@ export function UiReviewWorkspace({
   inlineActions?: HTMLElement | null;
   onOpenTeam?: (id: string) => void;
   inlineDrafts?: Map<string, string>;
+  inlineAssessments?: Map<string, UiCaseAssessmentDraft>;
   onBusyChange?: (busy: boolean) => void;
   onSupplement?: (origin: {
     meetingId: string;
@@ -132,15 +150,37 @@ export function UiReviewWorkspace({
   const [handoff, setHandoff] = useState(false);
   const [finalize, setFinalize] = useState(false);
   const [forPlan, setForPlan] = useState<string[]>();
+  const [teamPlanItems, setTeamPlanItems] = useState<UiPlanEligibility[]>();
+  const [teamPlanError, setTeamPlanError] = useState<string>();
+  const planOpen = forPlan !== undefined;
+  useEffect(() => {
+    if (!planOpen) return;
+    const controller = new AbortController();
+    setTeamPlanItems(undefined);
+    setTeamPlanError(undefined);
+    void api(
+      '/projects/' + projectId + '/plans/ui-eligibility',
+      { signal: controller.signal },
+      uiPlanEligibilitySchema,
+    )
+      .then(({ items }) => {
+        if (!controller.signal.aborted) setTeamPlanItems(items);
+      })
+      .catch((failure: unknown) => {
+        if (!controller.signal.aborted)
+          setTeamPlanError(describeError(failure));
+      });
+    return () => controller.abort();
+  }, [planOpen, projectId]);
   const [returnItem, setReturnItem] = useState<UiReviewWorkItem>();
   const [instruction, setInstruction] = useState('');
   const [receiptNotice, setReceiptNotice] = useState<string>();
-  const [assessmentOutcome, setAssessmentOutcome] =
-    useState<AssessmentOutcome>();
-  const [assessmentNote, setAssessmentNote] = useState('');
-  const [assessmentInstruction, setAssessmentInstruction] = useState('');
+  const [localAssessment, setLocalAssessment] = useState<{
+    key: string;
+    draft: UiCaseAssessmentDraft;
+  }>();
   const [assessmentError, setAssessmentError] = useState<string>();
-  const [confirmAssessment, setConfirmAssessment] = useState(false);
+  const [confirmAssessment, setConfirmAssessment] = useState<string>();
 
   useEffect(() => {
     onRead?.(room);
@@ -271,6 +311,20 @@ export function UiReviewWorkspace({
             room.state.items.some((item) => item.basis.caseId === asset.id)),
       )
       .map((asset) => asset.id) ?? [];
+  const teamEligibility = new Map(
+    teamPlanItems?.map((item) => [item.caseId, item]),
+  );
+  const teamApprovals = (room?.cases ?? []).flatMap((asset) => {
+    if (!eligible.includes(asset.id)) return [];
+    const approvalSnapshotId = matchingApproval(
+      asset,
+      teamEligibility.get(asset.id),
+    );
+    return approvalSnapshotId ? [{ asset, approvalSnapshotId }] : [];
+  });
+  const chosenTeamApprovals = (forPlan ?? []).flatMap(
+    (id) => teamApprovals.find(({ asset }) => asset.id === id) ?? [],
+  );
   const frozenFocus = Boolean(active?.removedAt);
   const targetId =
     target === 'case'
@@ -460,9 +514,44 @@ export function UiReviewWorkspace({
     (entry) =>
       entry.caseId === active?.id && entry.revisionId === active.revisionId,
   );
+  const round = openItems.reduce(
+    (maximum, item) => Math.max(maximum, item.round),
+    1,
+  );
+  const assessmentKey =
+    room && active
+      ? [
+          projectId,
+          requirementVersionId,
+          room.meeting.id,
+          active.id,
+          active.revisionId,
+          round,
+          currentAssessment?.time ?? 'new',
+        ].join(':')
+      : undefined;
+  const assessmentDraft =
+    (localAssessment?.key === assessmentKey
+      ? localAssessment?.draft
+      : undefined) ??
+    (assessmentKey ? inlineAssessments?.get(assessmentKey) : undefined) ??
+    emptyAssessmentDraft;
+  const {
+    outcome: assessmentOutcome,
+    note: assessmentNote,
+    instruction: assessmentInstruction,
+  } = assessmentDraft;
   const assessmentChanged = Boolean(
     assessmentOutcome || assessmentNote.trim() || assessmentInstruction.trim(),
   );
+
+  function changeAssessment(change: Partial<UiCaseAssessmentDraft>) {
+    if (!assessmentKey) return;
+    const draft = { ...assessmentDraft, ...change };
+    inlineAssessments?.set(assessmentKey, draft);
+    setLocalAssessment({ key: assessmentKey, draft });
+    setAssessmentError(undefined);
+  }
   const assessmentAllowed = Boolean(
     active &&
     room?.state.finalized &&
@@ -471,14 +560,10 @@ export function UiReviewWorkspace({
     active.reviewState !== 'approved' &&
     !openItems.some((item) => item.state === 'waiting'),
   );
-  function clearAssessmentForm() {
-    setAssessmentOutcome(undefined);
-    setAssessmentNote('');
-    setAssessmentInstruction('');
-  }
   async function saveAssessment() {
     if (
       !active ||
+      !assessmentKey ||
       !assessmentOutcome ||
       !assessmentAllowed ||
       !assessmentNote.trim()
@@ -496,8 +581,9 @@ export function UiReviewWorkspace({
           : {}),
       })
     ) {
-      clearAssessmentForm();
-      setConfirmAssessment(false);
+      inlineAssessments?.delete(assessmentKey);
+      setLocalAssessment(undefined);
+      setConfirmAssessment(undefined);
     }
   }
   const checkReady = Boolean(
@@ -526,7 +612,8 @@ export function UiReviewWorkspace({
           setAssessmentError('请填写下一轮补改意见。');
         else {
           setAssessmentError(undefined);
-          if (assessmentOutcome === 'needsRework') setConfirmAssessment(true);
+          if (assessmentOutcome === 'needsRework')
+            setConfirmAssessment(assessmentKey);
           else void saveAssessment();
         }
       }}
@@ -1022,10 +1109,7 @@ export function UiReviewWorkspace({
                       options={uiCaseAssessmentOutcomeSchema.options.map(
                         (value) => ({ value, label: assessmentLabels[value] }),
                       )}
-                      onChange={(value) => {
-                        setAssessmentError(undefined);
-                        setAssessmentOutcome(value);
-                      }}
+                      onChange={(outcome) => changeAssessment({ outcome })}
                       disabled={blocked}
                     />
                   </label>
@@ -1038,10 +1122,9 @@ export function UiReviewWorkspace({
                       maxLength={10000}
                       value={assessmentNote}
                       disabled={blocked}
-                      onChange={(event) => {
-                        setAssessmentError(undefined);
-                        setAssessmentNote(event.target.value);
-                      }}
+                      onChange={(event) =>
+                        changeAssessment({ note: event.target.value })
+                      }
                     />
                   </label>
                   {assessmentOutcome === 'needsRework' && (
@@ -1052,10 +1135,9 @@ export function UiReviewWorkspace({
                       maxLength={10000}
                       value={assessmentInstruction}
                       disabled={blocked}
-                      onChange={(event) => {
-                        setAssessmentError(undefined);
-                        setAssessmentInstruction(event.target.value);
-                      }}
+                      onChange={(event) =>
+                        changeAssessment({ instruction: event.target.value })
+                      }
                     />
                   )}
                   {assessmentError && (
@@ -1311,10 +1393,10 @@ export function UiReviewWorkspace({
       )}
       <Modal
         title="确认退回补改"
-        open={confirmAssessment}
+        open={Boolean(assessmentKey && confirmAssessment === assessmentKey)}
         confirmLoading={submitting}
         okText="保存并退回"
-        onCancel={() => setConfirmAssessment(false)}
+        onCancel={() => setConfirmAssessment(undefined)}
         onOk={() => void saveAssessment()}
       >
         <p>将按当前 r{active?.revisionNo} 开启下一轮。</p>
@@ -1412,34 +1494,37 @@ export function UiReviewWorkspace({
       </Modal>
       <Modal
         title="选择本轮执行范围"
-        open={Boolean(forPlan)}
+        open={planOpen}
         onCancel={() => setForPlan(undefined)}
         okText="带入计划"
-        okButtonProps={{
-          disabled: !forPlan?.some((id) => eligible.includes(id)),
-        }}
+        okButtonProps={{ disabled: chosenTeamApprovals.length === 0 }}
         onOk={() => {
-          const query = new URLSearchParams({
+          if (!chosenTeamApprovals.length) return;
+          window.location.hash = uiPlanHandoffHash(
             projectId,
-            kind: 'UI',
-            versionId: requirementVersionId,
-          });
-          for (const id of forPlan ?? [])
-            if (eligible.includes(id)) query.append('caseId', id);
-          window.location.hash = 'plans?' + query.toString();
+            requirementVersionId,
+            chosenTeamApprovals,
+          );
         }}
       >
-        <Checkbox.Group
-          aria-label="计划用例"
-          className="ui-review-start-list"
-          value={forPlan ?? []}
-          options={
-            room?.cases
-              .filter((asset) => eligible.includes(asset.id))
-              .map((asset) => ({ label: asset.title, value: asset.id })) ?? []
-          }
-          onChange={setForPlan}
-        />
+        {teamPlanError ? (
+          <Alert type="error" showIcon title={teamPlanError} />
+        ) : !teamPlanItems ? (
+          <Skeleton active />
+        ) : teamApprovals.length ? (
+          <Checkbox.Group
+            aria-label="计划用例"
+            className="ui-review-start-list"
+            value={chosenTeamApprovals.map(({ asset }) => asset.id)}
+            options={teamApprovals.map(({ asset }) => ({
+              label: asset.title + ' · r' + asset.revisionNo,
+              value: asset.id,
+            }))}
+            onChange={setForPlan}
+          />
+        ) : (
+          <Empty description="本轮暂无与当前修订匹配的批准。请刷新评审范围后核对。" />
+        )}
       </Modal>
     </>
   );

@@ -46,7 +46,10 @@ import {
   RequirementDirectoryLabel,
 } from './requirement-directory';
 import { UiCaseText } from './ui-case-reader';
-import { UiReviewWorkspace } from './ui-review-workspace';
+import {
+  UiReviewWorkspace,
+  type UiCaseAssessmentDraft,
+} from './ui-review-workspace';
 import {
   UiCaseWorkbench,
   UiReviewHistory,
@@ -178,6 +181,7 @@ export function AssetsPage({
   }>();
   const recentCase = useRef(new Map<string, string>());
   const inlineDrafts = useRef(new Map<string, string>());
+  const inlineAssessments = useRef(new Map<string, UiCaseAssessmentDraft>());
   const libraryScroll = useRef(0);
   const reviewWorkspace = caseRoute.mode === 'meeting';
   const readerWorkspace = caseRoute.mode === 'workbench';
@@ -942,6 +946,7 @@ export function AssetsPage({
           }}
           onChanged={changed}
           inlineDrafts={inlineDrafts.current}
+          inlineAssessments={inlineAssessments.current}
         />
       )}
       {reviewWorkspace && scope && (
