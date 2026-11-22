@@ -1,13 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import {
-  Alert,
-  Button,
-  Collapse,
-  Descriptions,
-  Modal,
-  Space,
-  Typography,
-} from 'antd';
+import { Alert, Button, Collapse, Descriptions, Space, Typography } from 'antd';
 import { fileReceiptSchema } from '../../../packages/contracts/src/files';
 import type { FileMetadata } from '../../../packages/contracts/src/files';
 import { api, describeError } from './api';
@@ -20,6 +12,13 @@ import {
 import { subscribeIdentityChanges } from './identity-context';
 import { evidencePreviewBytes, isRasterEvidence } from './evidence-gallery';
 import type { EvidenceType } from './evidence-gallery';
+import { evidenceTypeLabels } from './evidence-gallery';
+import { DetailDrawer } from './detail-drawer';
+import {
+  EvidenceSourceTag,
+  FileStatusTag,
+  type EvidenceSource,
+} from './file-display-status';
 import {
   EvidenceConversation,
   EvidenceDelimited,
@@ -29,10 +28,12 @@ import {
 export function EvidenceViewer({
   fileId,
   evidenceType,
+  source,
   onClose,
 }: {
   fileId: string | null;
   evidenceType?: EvidenceType | undefined;
+  source?: EvidenceSource | undefined;
   onClose: () => void;
 }) {
   const [metadata, setMetadata] = useState<FileMetadata | null>(null);
@@ -126,13 +127,21 @@ export function EvidenceViewer({
   );
   const type = metadata?.mediaType;
   return (
-    <Modal
+    <DetailDrawer
+      wide
       zIndex={uiLayers.evidence}
       open={fileId !== null}
       title={metadata?.originalName ?? '证据私有预览'}
-      onCancel={onClose}
-      width={1000}
-      destroyOnHidden
+      meta={
+        <Space wrap>
+          {evidenceType && <span>{evidenceTypeLabels[evidenceType]}</span>}
+          {source && <EvidenceSourceTag source={source} />}
+          <FileStatusTag
+            status={metadata?.status ?? (error ? 'unavailable' : undefined)}
+          />
+        </Space>
+      }
+      onClose={onClose}
       footer={
         <Space>
           <Button onClick={onClose}>关闭</Button>
@@ -229,7 +238,7 @@ export function EvidenceViewer({
                       {
                         key: 'status',
                         label: '字节状态',
-                        children: metadata.status,
+                        children: <FileStatusTag status={metadata.status} />,
                       },
                       {
                         key: 'bytes',
@@ -254,6 +263,6 @@ export function EvidenceViewer({
           />
         )}
       </Space>
-    </Modal>
+    </DetailDrawer>
   );
 }

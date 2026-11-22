@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeftOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, ReloadOutlined } from '@ant-design/icons';
 import {
   Alert,
   Button,
@@ -18,6 +18,7 @@ import {
 } from 'antd';
 import { z } from 'zod';
 import { idSchema } from '../../../packages/contracts/src/base';
+import { runStateSchema } from '../../../packages/contracts/src/domain';
 import {
   reportDetailSchema,
   reportRevisionSchema,
@@ -35,6 +36,8 @@ import { PageHeading } from './page-heading';
 import { ExecutionRecords } from './execution-records';
 import { UiArchiveDialog } from './ui-archive-dialog';
 import { UiDeliveryPanel } from './ui-delivery-panel';
+import { formatBeijingTime } from './beijing-time';
+import { DeliveryStatusTag, ExecutionStateTag } from './semantic-status';
 import {
   currentIdentityOwner,
   identityContextEpoch,
@@ -534,7 +537,7 @@ export function ResultsPage({
                         { value: 'current', label: '当前汇总' },
                         ...report.history.map((row) => ({
                           value: row.id,
-                          label: `历史 r${row.revisionNo} · ${new Date(row.createdAt).toLocaleString('zh-CN')} · ${reportReasons[row.reason] ?? '已保存快照'}`,
+                          label: `历史 r${row.revisionNo} · ${formatBeijingTime(row.createdAt, true)} · ${reportReasons[row.reason] ?? '已保存快照'}`,
                         })),
                       ]}
                     />
@@ -610,14 +613,22 @@ export function ResultsPage({
           eyebrow="EXECUTION & REPORTS"
           title="执行与报告"
           description="保留当轮范围、实际修订、业务结论与独立交付状态。"
+          actions={
+            <>
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={() => setRecordsVersion((version) => version + 1)}
+              >
+                刷新
+              </Button>
+              {project.roles.includes('tester') && (
+                <Button type="primary" onClick={() => setArchiveOpen(true)}>
+                  上传本地独立归档
+                </Button>
+              )}
+            </>
+          }
         />
-        {project.roles.includes('tester') && (
-          <div className="toolbar mb">
-            <Button onClick={() => setArchiveOpen(true)}>
-              上传本地独立归档
-            </Button>
-          </div>
-        )}
         <UiArchiveDialog
           key={project.id}
           project={project}
@@ -714,7 +725,14 @@ export function ResultsPage({
                         {
                           key: 'state',
                           label: '执行状态',
-                          children: run.state,
+                          children: (() => {
+                            const state = runStateSchema.safeParse(run.state);
+                            return state.success ? (
+                              <ExecutionStateTag state={state.data} />
+                            ) : (
+                              run.state
+                            );
+                          })(),
                         },
                         {
                           key: 'progress',
@@ -724,7 +742,9 @@ export function ResultsPage({
                         {
                           key: 'delivery',
                           label: '交付状态',
-                          children: run.deliveryStatus,
+                          children: (
+                            <DeliveryStatusTag status={run.deliveryStatus} />
+                          ),
                         },
                         {
                           key: 'origin',
@@ -773,8 +793,14 @@ export function ResultsPage({
                     >
                       <Space wrap>
                         <Tag>当时接收 {receipt.receipt.resultsAccepted} 项</Tag>
-                        <Tag>原回执交付：{receipt.receipt.deliveryStatus}</Tag>
-                        <Tag>当前交付：{receipt.currentDelivery.status}</Tag>
+                        <span className="caption">原回执</span>
+                        <DeliveryStatusTag
+                          status={receipt.receipt.deliveryStatus}
+                        />
+                        <span className="caption">当前状态</span>
+                        <DeliveryStatusTag
+                          status={receipt.currentDelivery.status}
+                        />
                       </Space>
                       <Typography.Paragraph>
                         当前缺失文件：
@@ -804,6 +830,7 @@ export function ResultsPage({
       <EvidenceViewer
         fileId={preview?.fileId ?? null}
         evidenceType={preview?.manifest.type}
+        source={preview?.source}
         onClose={() => setPreview(null)}
       />
     </>

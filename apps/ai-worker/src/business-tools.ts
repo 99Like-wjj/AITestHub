@@ -19,6 +19,9 @@ import { assertSourceProjectAllowed } from '../../../packages/application/src/co
 import { recoveryFencesReady } from '../../../packages/application/src/recovery/fences.js';
 import { assertTaskCapability } from '../../../packages/application/src/conversations/task-capabilities.js';
 import { requirementCandidatesInputSchema } from '../../../packages/contracts/src/requirements.js';
+import { ReportService } from '../../../packages/application/src/reports/service.js';
+import { ResultService } from '../../../packages/application/src/results/service.js';
+import { registerModelReportReads } from './report-reading.js';
 
 const officeRequirementFindSchema = z.union([
   requirementCandidatesInputSchema.safeExtend({ op: z.literal('find') }),
@@ -64,6 +67,10 @@ const reviewedOfficeReadOperations: ReadonlySet<string> = new Set([
   'ath_reports.get-revision',
   'ath_reports.list',
   'ath_reports.list-executions',
+  'ath_reports.page-items',
+  'ath_reports.page-revisions',
+  'ath_reports.get-item',
+  'ath_reports.page-evidence',
   'ath_reports.search-in-scope',
   'ath_requirement_materials.get-manifest',
   'ath_requirement_materials.prepare-version',
@@ -368,6 +375,11 @@ export function createAiBusinessTools(
     registry,
     db,
     options.services?.auxiliary?.requirementNameAdmission(),
+  );
+  registerModelReportReads(
+    registry,
+    new ReportService(db),
+    new ResultService(db),
   );
   const confirmations = new ActionIntents(db, registry);
   const entries = [...registry.tools.values()].filter((entry) =>

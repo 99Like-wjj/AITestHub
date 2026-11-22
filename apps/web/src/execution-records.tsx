@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Empty, Input, Select, Skeleton, Space } from 'antd';
+import { Alert, Button, Select } from 'antd';
 import { z } from 'zod';
 import {
   executionRecordListSchema,
@@ -15,24 +15,20 @@ import {
   usePendingProgressCloses,
 } from './execution-progress-close';
 import type { PendingProgressClose } from './execution-progress-close-state';
+import {
+  DeliveryStatusTag,
+  ExecutionStateTag,
+  executionStateLabels,
+} from './semantic-status';
+import { BeijingTime } from './beijing-time';
+import { BulkActionBar } from './bulk-action-bar';
+import {
+  ResultFilters,
+  ResultListState,
+  ResultPagination,
+} from './result-list';
 
 export type ExecutionRecord = z.infer<typeof executionRecordSchema>;
-const states: Record<ExecutionRecord['state'], string> = {
-  prepared: '已准备',
-  queued: '排队中',
-  running: '执行中',
-  stopping: '终止中',
-  completed: '已完成',
-  terminated: '已终止',
-  interrupted: '已中断',
-  recoveryRequired: '需核对恢复',
-};
-const delivery: Record<ExecutionRecord['deliveryStatus'], string> = {
-  notSubmitted: '尚未提交',
-  receiving: '接收中',
-  incomplete: '待补传',
-  complete: '完整',
-};
 const source: Record<ExecutionRecord['source'], string> = {
   manual: '手工发起',
   scheduled: '定时回归',
@@ -115,7 +111,7 @@ export function ExecutionRecords({
   useEffect(() => {
     setSelected(new Map());
     setCloseProgress(null);
-  }, [project.id, userId, kind, origin]);
+  }, [project.id, userId, kind, origin, query, state]);
   useEffect(() => {
     if (composing) return;
     const timer = window.setTimeout(() => {
@@ -198,6 +194,16 @@ export function ExecutionRecords({
     }, 5000);
     return () => window.clearInterval(timer);
   }, [data, loading]);
+  function clearResultFilters() {
+    setPage(1);
+    setSearch('');
+    setQuery('');
+    setState(undefined);
+    setMode('original');
+  }
+  function refreshList() {
+    setRefresh((value) => value + 1);
+  }
   return (
     <>
       <div className="between mb">
@@ -230,107 +236,107 @@ export function ExecutionRecords({
             独立归档
           </button>
         </div>
-        <Button
-          loading={loading}
-          onClick={() => setRefresh((value) => value + 1)}
-        >
-          刷新
-        </Button>
       </div>
-      <div className="toolbar mb execution-filters">
-        <Input
-          className="searchbox"
-          aria-label="搜索执行记录"
-          placeholder="搜索计划、轮次或需求"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          onCompositionStart={() => setComposing(true)}
-          onCompositionEnd={() => setComposing(false)}
-          allowClear
-          maxLength={200}
-        />
-        <Select
-          aria-label="执行状态筛选"
-          placeholder="全部执行状态"
-          value={state}
-          allowClear
-          onChange={(value: ExecutionRecord['state'] | undefined) => {
-            setState(value);
-            setPage(1);
+      <div className="mb">
+        <ResultFilters
+          search={{
+            label: '搜索执行记录',
+            placeholder: '搜索计划、轮次或需求',
+            value: search,
+            onChange: setSearch,
+            onCompositionChange: setComposing,
           }}
-          options={runStateSchema.options.map((value) => ({
-            value,
-            label: states[value],
-          }))}
-          style={{ minWidth: 150 }}
-        />
-        <span className="grow" />
-        <span className="caption">结果口径</span>
-        <Select
-          aria-label="执行列表结果口径"
-          value={mode}
-          onChange={setMode}
-          style={{ width: 160 }}
-          options={[
-            { value: 'original', label: '首次原始判断' },
-            { value: 'reported', label: '当前采集判断' },
-            { value: 'final', label: '人工最终结论' },
-            { value: 'effective', label: '当前有效口径' },
-          ]}
-        />
+          onReset={clearResultFilters}
+          summary={
+            loading
+              ? '正在读取'
+              : data
+                ? `共 ${counts(data.total)} 条执行记录`
+                : undefined
+          }
+        >
+          <Select
+            aria-label="执行状态筛选"
+            placeholder="全部执行状态"
+            value={state}
+            allowClear
+            onChange={(value: ExecutionRecord['state'] | undefined) => {
+              setState(value);
+              setPage(1);
+            }}
+            options={runStateSchema.options.map((value) => ({
+              value,
+              label: executionStateLabels[value],
+            }))}
+            style={{ minWidth: 150 }}
+          />
+          <span className="caption">结果口径</span>
+          <Select
+            aria-label="执行列表结果口径"
+            value={mode}
+            onChange={setMode}
+            style={{ width: 160 }}
+            options={[
+              { value: 'original', label: '首次原始判断' },
+              { value: 'reported', label: '当前采集判断' },
+              { value: 'final', label: '人工最终结论' },
+              { value: 'effective', label: '当前有效口径' },
+            ]}
+          />
+        </ResultFilters>
       </div>
-      {error && (
-        <Alert type="error" title={error} showIcon className="section-alert" />
-      )}
+      {error && data?.records.length ? (
+        <Alert
+          type="error"
+          title={error}
+          showIcon
+          className="section-alert"
+          action={<Button onClick={refreshList}>重新读取</Button>}
+        />
+      ) : null}
       {origin === 'formal' &&
         kind === 'UI' &&
         project.roles.includes('tester') && (
-          <div className="toolbar mb">
-            <button
-              type="button"
-              className="btn small"
-              disabled={
-                loading ||
-                !data?.records.some(
-                  (row) =>
-                    row.kind === 'UI' &&
-                    row.source !== 'uiArchive' &&
-                    !blockedRuns.has(row.runId),
-                )
-              }
-              onClick={() =>
-                setSelected((previous) => {
-                  const next = new Map(previous);
-                  for (const row of data?.records ?? [])
-                    if (
+          <BulkActionBar
+            selected={selected.size}
+            onClear={() => setSelected(new Map())}
+            scope="上限 200 项 · 保留选择时的版本"
+            selectionActions={
+              <button
+                type="button"
+                className="btn small"
+                disabled={
+                  loading ||
+                  !data?.records.some(
+                    (row) =>
                       row.kind === 'UI' &&
                       row.source !== 'uiArchive' &&
-                      !blockedRuns.has(row.runId) &&
-                      next.size < 200
-                    )
-                      next.set(row.runId, {
-                        runId: row.runId,
-                        rowVersion: row.rowVersion,
-                        name: row.name,
-                      });
-                  return next;
-                })
-              }
-            >
-              选择本页 UI 轮次
-            </button>
-            <span className="caption">
-              已选 {selected.size}/200 项；保留选择时的版本
-            </span>
-            <button
-              type="button"
-              className="btn small"
-              disabled={!selected.size}
-              onClick={() => setSelected(new Map())}
-            >
-              清空选择
-            </button>
-            <span className="grow" />
+                      !blockedRuns.has(row.runId),
+                  )
+                }
+                onClick={() =>
+                  setSelected((previous) => {
+                    const next = new Map(previous);
+                    for (const row of data?.records ?? [])
+                      if (
+                        row.kind === 'UI' &&
+                        row.source !== 'uiArchive' &&
+                        !blockedRuns.has(row.runId) &&
+                        next.size < 200
+                      )
+                        next.set(row.runId, {
+                          runId: row.runId,
+                          rowVersion: row.rowVersion,
+                          name: row.name,
+                        });
+                    return next;
+                  })
+                }
+              >
+                选择本页 UI 轮次
+              </button>
+            }
+          >
             <button
               type="button"
               className="btn small"
@@ -347,7 +353,7 @@ export function ExecutionRecords({
             >
               批量关闭平台进度
             </button>
-          </div>
+          </BulkActionBar>
         )}
       {!!pendingCloses.length && (
         <div className="notice amber mb">
@@ -400,8 +406,8 @@ export function ExecutionRecords({
         </div>
       )}
       {loading && !data && (
-        <section className="card pad mb">
-          <Skeleton active />
+        <section className="card mb">
+          <ResultListState state="loading" title="正在读取执行记录" />
         </section>
       )}
       {data?.records.map((row) => {
@@ -441,18 +447,12 @@ export function ExecutionRecords({
                 <h2>{row.name}</h2>
                 <p className="caption">
                   {row.runId} · {source[row.source]} ·{' '}
-                  {new Date(row.startedAt ?? row.createdAt).toLocaleString(
-                    'zh-CN',
-                  )}{' '}
-                  · {row.environment.name}
+                  <BeijingTime value={row.startedAt ?? row.createdAt} /> ·{' '}
+                  {row.environment.name}
                 </p>
               </div>
               <div className="row wrap">
-                <span
-                  className={`badge ${row.state === 'completed' ? 'green' : row.state === 'running' || row.state === 'stopping' ? 'blue' : ''}`}
-                >
-                  {states[row.state]}
-                </span>
+                <ExecutionStateTag state={row.state} />
                 {row.kind === 'API' &&
                   (row.state === 'running' || row.state === 'stopping') && (
                     <Button
@@ -518,19 +518,15 @@ export function ExecutionRecords({
                 <span className="caption">尚未提交结果，进度不作为结论。</span>
               )}
               <span className="grow" />
-              <span
-                className={`badge ${row.deliveryStatus === 'complete' ? 'green' : row.deliveryStatus === 'incomplete' ? 'amber' : ''}`}
-              >
-                {delivery[row.deliveryStatus]}
-              </span>
+              <DeliveryStatusTag status={row.deliveryStatus} />
             </div>
             {row.kind === 'UI' &&
             row.source !== 'uiArchive' &&
             row.progressClosedAt ? (
               <p className="caption mt">
                 平台进度展示已关闭 ·{' '}
-                {new Date(row.progressClosedAt).toLocaleString('zh-CN')}。本地
-                AI 未因此停止，结果与后续上报仍保留。
+                <BeijingTime value={row.progressClosedAt} detail />
+                。本地 AI 未因此停止，结果与后续上报仍保留。
               </p>
             ) : (
               <div
@@ -617,31 +613,51 @@ export function ExecutionRecords({
           </section>
         );
       })}
-      {!loading && data?.records.length === 0 && (
-        <section className="card pad mb">
-          <Empty description="此范围没有执行记录。UI 由本地 AI 发起，接口由平台按计划运行。" />
+
+      {!loading && !data?.records.length && (data || error) ? (
+        <section className="card mb">
+          {error ? (
+            <ResultListState
+              state="error"
+              title="执行记录读取失败"
+              description={error}
+              action={<Button onClick={refreshList}>重新读取</Button>}
+            />
+          ) : query || state ? (
+            <ResultListState
+              state="no-match"
+              title="没有符合条件的执行记录"
+              description="可调整搜索和状态，或清空结果筛选。"
+              action={
+                <Button onClick={clearResultFilters}>清空结果筛选</Button>
+              }
+            />
+          ) : (
+            <ResultListState
+              state="empty"
+              title="此范围暂无执行记录"
+              description="UI 由本地 AI 发起，接口由平台按计划运行。"
+            />
+          )}
         </section>
-      )}
-      {data && (
-        <div className="between mt">
-          <span className="caption">
-            第 {data.page} 页 · 共 {counts(data.total)} 条
-          </span>
-          <Space>
-            <Button
-              disabled={loading || page === 1}
-              onClick={() => setPage((value) => value - 1)}
-            >
-              上一页
-            </Button>
-            <Button
-              disabled={loading || !data.hasMore || page >= 1000000}
-              onClick={() => setPage((value) => value + 1)}
-            >
-              下一页
-            </Button>
-          </Space>
-        </div>
+      ) : null}
+      {data && (data.records.length > 0 || data.page > 1) && (
+        <ResultPagination
+          summary={`第 ${data.page} 页 · 共 ${counts(data.total)} 条`}
+        >
+          <Button
+            disabled={loading || page === 1}
+            onClick={() => setPage((value) => value - 1)}
+          >
+            上一页
+          </Button>
+          <Button
+            disabled={loading || !data.hasMore || page >= 1000000}
+            onClick={() => setPage((value) => value + 1)}
+          >
+            下一页
+          </Button>
+        </ResultPagination>
       )}
       {stopTarget && (
         <ExecutionStopDialog

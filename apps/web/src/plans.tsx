@@ -6,7 +6,6 @@ import {
   Card,
   Checkbox,
   Descriptions,
-  Drawer,
   Form,
   Input,
   Modal,
@@ -49,7 +48,10 @@ import type { TestConfigurationView } from '../../../packages/contracts/src/test
 import { api, describeError } from './api';
 import { uiLayers } from './ui-layers';
 import type { Project } from './types';
-import { reviewLabels } from './asset-review-panel';
+import { reviewLabels, StatusTag } from './semantic-status';
+import { BeijingTime } from './beijing-time';
+import { DetailDrawer } from './detail-drawer';
+import { ResultListState, ResultPagination } from './result-list';
 import { PageHeading } from './page-heading';
 import { PlanScheduleSection, type Schedule } from './plan-schedules';
 import { scheduleListSchema } from '../../../packages/contracts/src/schedules';
@@ -1099,6 +1101,12 @@ export function PlansPage({
     preview &&
     (preview.existingRunIds.length || preview.existingRequestIds.length),
   );
+  const canCreate =
+    tester && !unresolved.some((item) => item.targetId === null);
+  function openNewPlan() {
+    setEditing(null);
+    setEditorOpen(true);
+  }
   return (
     <PlanningActorContext.Provider value={userId ?? null}>
       <PageHeading
@@ -1117,13 +1125,8 @@ export function PlansPage({
             <Button
               type="primary"
               icon={<PlusOutlined />}
-              disabled={
-                !tester || unresolved.some((item) => item.targetId === null)
-              }
-              onClick={() => {
-                setEditing(null);
-                setEditorOpen(true);
-              }}
+              disabled={!canCreate}
+              onClick={openNewPlan}
             >
               新建计划
             </Button>
@@ -1151,41 +1154,38 @@ export function PlansPage({
         projectId={project.id}
         onRecovered={() => void load()}
       />
-      {error && (
-        <div className="notice red mb" role="alert">
-          {error}
-        </div>
-      )}
       {scheduleError && (
         <div className="notice amber mb" role="alert">
           定时状态未能读取：{scheduleError}。请刷新，未将未知状态显示为未配置。
         </div>
       )}
-      {loading && !plans.length && (
-        <section className="card pad mb" aria-busy="true">
-          <p className="caption" role="status">
-            读取测试计划…
-          </p>
-        </section>
-      )}
-      {!loading && !plans.length && !error && (
-        <section className="card">
-          <div className="empty">
-            <h2>还没有{kind === 'UI' ? ' UI ' : '接口'}计划</h2>
-            <p>从符合评审条件的资产中选择全部或部分用例。</p>
-            <button
-              className="btn primary mt"
-              disabled={
-                !tester || unresolved.some((item) => item.targetId === null)
+      {!plans.length && (
+        <section className="card mb">
+          {loading ? (
+            <ResultListState state="loading" title="正在读取测试计划" />
+          ) : error ? (
+            <ResultListState
+              state="error"
+              title="测试计划读取失败"
+              description={error}
+              action={<Button onClick={() => void load()}>重新读取</Button>}
+            />
+          ) : (
+            <ResultListState
+              state="empty"
+              title={kind === 'UI' ? '还没有 UI 计划' : '还没有接口计划'}
+              description="从符合评审条件的资产中选择全部或部分用例。"
+              action={
+                <Button
+                  type="primary"
+                  disabled={!canCreate}
+                  onClick={openNewPlan}
+                >
+                  创建计划
+                </Button>
               }
-              onClick={() => {
-                setEditing(null);
-                setEditorOpen(true);
-              }}
-            >
-              创建计划
-            </button>
-          </div>
+            />
+          )}
         </section>
       )}
       {plans.slice(0, visibleCount).map((plan) => {
@@ -1254,9 +1254,9 @@ export function PlansPage({
               </div>
             </div>
             <div className="row wrap mt">
-              <span className="badge">
+              <StatusTag tone="info">
                 {plan.kind === 'UI' ? '固定已审版本' : '开始时取最新可回归'}
-              </span>
+              </StatusTag>
               <span className="caption">
                 {plan.kind === 'UI'
                   ? `固定需求版本 ${plan.requirementVersionId}`
@@ -1284,13 +1284,18 @@ export function PlansPage({
           </section>
         );
       })}
-      {plans.length > visibleCount && (
-        <button
-          className="btn mb"
-          onClick={() => setVisibleCount((count) => count + 15)}
-        >
-          显示更多计划（已显示 {visibleCount} / {plans.length}）
-        </button>
+      {plans.length > 0 && (
+        <div className="card mb">
+          <ResultPagination
+            summary={`已展示 ${Math.min(visibleCount, plans.length)} / ${plans.length} 条计划`}
+          >
+            {plans.length > visibleCount && (
+              <Button onClick={() => setVisibleCount((count) => count + 15)}>
+                显示更多计划
+              </Button>
+            )}
+          </ResultPagination>
+        </div>
       )}
       <PlanEditor
         projectId={project.id}
@@ -1310,9 +1315,13 @@ export function PlansPage({
         onClose={() => setRenaming(null)}
         onSaved={() => load()}
       />
-      <Drawer
-        zIndex={uiLayers.detail}
+      <DetailDrawer
         title={detail?.plan.name ?? '计划详情'}
+        meta={
+          detail &&
+          `${detail.plan.kind === 'UI' ? 'UI 自主测试' : '接口回归'} · ${detail.plan.items.length} 条用例`
+        }
+        wide={uiScope !== null}
         open={detail !== null || detailLoading}
         onClose={() => {
           detailGeneration.current += 1;
@@ -1321,8 +1330,6 @@ export function PlansPage({
           setDetail(null);
           setUiScope(null);
         }}
-        width={1000}
-        destroyOnHidden
       >
         {detail && (
           <>
@@ -1400,8 +1407,7 @@ export function PlansPage({
                 {
                   title: '保存时间',
                   dataIndex: 'createdAt',
-                  render: (value: string) =>
-                    new Date(value).toLocaleString('zh-CN'),
+                  render: (value: string) => <BeijingTime value={value} />,
                 },
                 ...(detail.plan.kind === 'UI' && tester
                   ? [
@@ -1493,7 +1499,7 @@ export function PlansPage({
             )}
           </>
         )}
-      </Drawer>
+      </DetailDrawer>
       <Modal
         title="接口开始前预览"
         zIndex={uiLayers.dialog}

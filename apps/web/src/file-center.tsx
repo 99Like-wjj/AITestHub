@@ -2,16 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
-  Empty,
   Input,
   Modal,
   Upload,
   Radio,
   Select,
   Space,
-  Spin,
   Table,
-  Tag,
   Tree,
   Typography,
 } from 'antd';
@@ -55,11 +52,19 @@ import {
 import './file-center.css';
 import { FileEntryActions } from './file-entry-actions';
 
-export const fileKindLabels = {
-  original: '原始资料',
-  artifact: 'AI成果',
-  legacy: '历史文件',
-};
+import {
+  fileKindLabels,
+  FileKindTag,
+  FileStatusTag,
+} from './file-display-status';
+import { BeijingTime, beijingDate } from './beijing-time';
+import {
+  ResultFilters,
+  ResultListState,
+  ResultPagination,
+} from './result-list';
+
+export { fileKindLabels } from './file-display-status';
 export const displayFileName = (entry: PreviewEntry) =>
   entry.originalName ?? entry.path.split('/').at(-1) ?? entry.path;
 function fileFormatLabel(entry: PreviewEntry): string {
@@ -262,7 +267,7 @@ export function FileListing({
         />
       ) : null}
       {!entries.length ? (
-        <Empty description="此范围暂无可读文件" />
+        <ResultListState state="empty" title="此范围暂无可读文件" />
       ) : view === 'cards' ? (
         <div className="file-center-card-grid">
           {entries.map((entry) => (
@@ -277,7 +282,16 @@ export function FileListing({
                 <strong>{displayFileName(entry)}</strong>
               </button>
               <Space wrap className="file-center-card-meta">
-                <Tag>{fileKindLabels[entry.kind]}</Tag>
+                <FileKindTag kind={entry.kind} />
+                <FileStatusTag
+                  status={
+                    entry.deletedAt
+                      ? 'deleted'
+                      : entry.available
+                        ? 'available'
+                        : 'unavailable'
+                  }
+                />
                 <span>{humanFileSize(entry.bytes)}</span>
                 {entry.kind !== 'original' ? (
                   <span>v{entry.revision}</span>
@@ -289,7 +303,7 @@ export function FileListing({
                   : ''}
               </p>
               <p className="file-center-card-time">
-                {new Date(entry.updatedAt).toLocaleString()}
+                <BeijingTime value={entry.updatedAt} />
               </p>
               <div className="file-center-card-actions">{actions(entry)}</div>
             </article>
@@ -329,7 +343,20 @@ export function FileListing({
             },
             {
               title: '分类',
-              render: (_, entry) => <Tag>{fileKindLabels[entry.kind]}</Tag>,
+              render: (_, entry) => (
+                <Space wrap>
+                  <FileKindTag kind={entry.kind} />
+                  <FileStatusTag
+                    status={
+                      entry.deletedAt
+                        ? 'deleted'
+                        : entry.available
+                          ? 'available'
+                          : 'unavailable'
+                    }
+                  />
+                </Space>
+              ),
             },
             { title: '大小', render: (_, entry) => humanFileSize(entry.bytes) },
             {
@@ -338,7 +365,7 @@ export function FileListing({
                 <div>
                   {entry.kind === 'original' ? '原件' : `v${entry.revision}`}
                   <div className="caption">
-                    {new Date(entry.updatedAt).toLocaleString()}
+                    <BeijingTime value={entry.updatedAt} />
                   </div>
                 </div>
               ),
@@ -403,7 +430,7 @@ export function buildFileCenterTree(
       title: requirement.title,
       children: requirement.conversations.map((conversation) => ({
         key: `c:${conversation.conversationId}`,
-        title: `${new Date(conversation.createdAt).toLocaleDateString()} · ${conversation.conversationTitle} (${conversation.fileCount})`,
+        title: `${beijingDate(conversation.createdAt)} · ${conversation.conversationTitle} (${conversation.fileCount})`,
         children: (['original', 'artifact', 'legacy'] as const).map((kind) => ({
           key: `k:${conversation.conversationId}:${kind}`,
           title: fileKindLabels[kind],
@@ -442,6 +469,10 @@ export function FileCenter({
     [pending, setPending] = useState(false),
     [treePending, setTreePending] = useState(false),
     [error, setError] = useState<string>(),
+    [listError, setListError] = useState<{
+      description: string;
+      cursor: string | undefined;
+    }>(),
     [selected, setSelected] = useState<PreviewEntry | null>(null);
   const [pendingUpload, setPendingUpload] = useState<{
     conversationId: string;
@@ -501,10 +532,10 @@ export function FileCenter({
       for (const [key, value] of Object.entries(scope))
         if (value) params.set(key, value);
     if (kind !== 'all') params.set('kind', kind);
-    if (from && !Number.isNaN(Date.parse(`${from}T00:00:00`)))
-      params.set('from', new Date(`${from}T00:00:00`).toISOString());
-    if (to && !Number.isNaN(Date.parse(`${to}T23:59:59.999`)))
-      params.set('to', new Date(`${to}T23:59:59.999`).toISOString());
+    if (from && !Number.isNaN(Date.parse(`${from}T00:00:00+08:00`)))
+      params.set('from', new Date(`${from}T00:00:00+08:00`).toISOString());
+    if (to && !Number.isNaN(Date.parse(`${to}T23:59:59.999+08:00`)))
+      params.set('to', new Date(`${to}T23:59:59.999+08:00`).toISOString());
     return params.toString();
   }, [query, scope, kind, mode, from, to, dateField]);
   const load = useCallback(
@@ -514,7 +545,7 @@ export function FileCenter({
       const abort = new AbortController();
       listAbort.current = abort;
       setPending(true);
-      setError(undefined);
+      setListError(undefined);
       try {
         const result = await api(
           `/me/file-center?${queryString}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
@@ -534,7 +565,8 @@ export function FileCenter({
         );
         setNextCursor(result.nextCursor);
       } catch (err) {
-        if (!abort.signal.aborted) setError(describeError(err));
+        if (!abort.signal.aborted && generation === serial.current)
+          setListError({ description: describeError(err), cursor });
       } finally {
         if (!abort.signal.aborted) setPending(false);
       }
@@ -550,10 +582,19 @@ export function FileCenter({
   useEffect(() => {
     if (open) {
       setEntries([]);
+      setNextCursor(null);
       void load();
     }
     return () => listAbort.current?.abort();
   }, [open, load]);
+  function clearResultFilters() {
+    setQuery('');
+    setKind('all');
+    setType('all');
+    setDateField('created');
+    setFrom('');
+    setTo('');
+  }
   const filtered = entries.filter(
     (entry) =>
       type === 'all' ||
@@ -608,7 +649,7 @@ export function FileCenter({
       const date =
         (dateField === 'created' ? entry.createdAt : entry.updatedAt) ??
         entry.updatedAt;
-      const key = new Date(date).toLocaleDateString();
+      const key = beijingDate(date);
       grouped.set(key, [...(grouped.get(key) ?? []), entry]);
     }
     return grouped;
@@ -709,49 +750,7 @@ export function FileCenter({
             ) : null}
           </aside>
           <main className="file-center-main">
-            <div className="file-center-toolbar">
-              <Input.Search
-                aria-label="搜索文件名称"
-                placeholder="搜索文件名称"
-                allowClear
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                style={{ width: 260 }}
-              />
-              <Select
-                aria-label="文件来源分类"
-                value={kind}
-                onChange={setKind}
-                options={[
-                  { value: 'all', label: '全部来源' },
-                  ...Object.entries(fileKindLabels).map(([value, label]) => ({
-                    value,
-                    label,
-                  })),
-                ]}
-              />
-              <Select
-                aria-label="文件格式"
-                value={type}
-                onChange={setType}
-                options={[
-                  { value: 'all', label: '全部格式' },
-                  ...[
-                    'markdown',
-                    'html',
-                    'code',
-                    'structured',
-                    'table',
-                    'office',
-                    'pdf',
-                    'image',
-                    'svg',
-                    'video',
-                    'audio',
-                    'zip',
-                  ].map((value) => ({ value, label: value.toUpperCase() })),
-                ]}
-              />
+            <div className="file-center-actions">
               <Radio.Group
                 aria-label="文件展示方式"
                 value={view}
@@ -793,7 +792,53 @@ export function FileCenter({
                 刷新列表
               </Button>
             </div>
-            <div className="file-center-toolbar">
+            <ResultFilters
+              search={{
+                label: '搜索文件名称',
+                value: query,
+                onChange: setQuery,
+              }}
+              onReset={clearResultFilters}
+              summary={
+                pending
+                  ? '正在读取'
+                  : `已加载 ${entries.length} 项${type !== 'all' ? '，格式筛选仅覆盖已加载结果' : ''}`
+              }
+            >
+              <Select
+                aria-label="文件来源分类"
+                value={kind}
+                onChange={setKind}
+                options={[
+                  { value: 'all', label: '全部来源' },
+                  ...Object.entries(fileKindLabels).map(([value, label]) => ({
+                    value,
+                    label,
+                  })),
+                ]}
+              />
+              <Select
+                aria-label="文件格式"
+                value={type}
+                onChange={setType}
+                options={[
+                  { value: 'all', label: '全部格式' },
+                  ...[
+                    'markdown',
+                    'html',
+                    'code',
+                    'structured',
+                    'table',
+                    'office',
+                    'pdf',
+                    'image',
+                    'svg',
+                    'video',
+                    'audio',
+                    'zip',
+                  ].map((value) => ({ value, label: value.toUpperCase() })),
+                ]}
+              />
               <Select
                 value={dateField}
                 aria-label="文件日期字段"
@@ -818,12 +863,7 @@ export function FileCenter({
                 onChange={(event) => setTo(event.target.value)}
                 style={{ width: 170 }}
               />
-              <Typography.Text type="secondary">
-                已加载 {entries.length} 项
-                {type !== 'all' ? '，格式筛选仅覆盖已加载结果' : ''}
-                {nextCursor ? ' · 可继续加载' : ''}
-              </Typography.Text>
-            </div>
+            </ResultFilters>
             {error ? <Alert type="error" showIcon title={error} /> : null}
             {pendingUpload ? (
               <Alert
@@ -856,9 +896,39 @@ export function FileCenter({
             ) : null}
             <div className="file-center-files">
               {pending && !entries.length ? (
-                <Spin tip="读取文件列表…">
-                  <div className="file-preview-loading" />
-                </Spin>
+                <ResultListState state="loading" title="正在读取文件列表" />
+              ) : listError && !entries.length ? (
+                <ResultListState
+                  state="error"
+                  title="文件列表读取失败"
+                  description={listError.description}
+                  action={
+                    <Button onClick={() => void load(listError.cursor)}>
+                      重新读取
+                    </Button>
+                  }
+                />
+              ) : !filtered.length ? (
+                query.trim() ||
+                kind !== 'all' ||
+                type !== 'all' ||
+                from ||
+                to ? (
+                  <ResultListState
+                    state="no-match"
+                    title="没有符合条件的文件"
+                    description={
+                      nextCursor && type !== 'all'
+                        ? '格式筛选仅覆盖已加载结果，可继续加载更多文件。'
+                        : '可调整条件，或清空结果筛选。'
+                    }
+                    action={
+                      <Button onClick={clearResultFilters}>清空结果筛选</Button>
+                    }
+                  />
+                ) : (
+                  <ResultListState state="empty" title="此范围暂无可读文件" />
+                )
               ) : groups ? (
                 [...groups].map(([date, entries]) => (
                   <section key={date}>
@@ -881,20 +951,37 @@ export function FileCenter({
                   onChanged={() => void load()}
                 />
               )}
-              <div className="file-center-load-more">
-                {nextCursor ? (
-                  <Button
-                    loading={pending}
-                    onClick={() => void load(nextCursor)}
-                  >
-                    加载更多文件
-                  </Button>
-                ) : entries.length ? (
-                  <Typography.Text type="secondary">
-                    已加载当前范围全部文件
-                  </Typography.Text>
-                ) : null}
-              </div>
+
+              {entries.length > 0 && listError ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  title={listError.description}
+                  action={
+                    <Button onClick={() => void load(listError.cursor)}>
+                      重新读取
+                    </Button>
+                  }
+                />
+              ) : null}
+              {entries.length > 0 || nextCursor ? (
+                <ResultPagination
+                  summary={
+                    nextCursor
+                      ? `已加载 ${entries.length} 项`
+                      : '已加载当前范围全部文件'
+                  }
+                >
+                  {nextCursor && (
+                    <Button
+                      loading={pending}
+                      onClick={() => void load(nextCursor)}
+                    >
+                      加载更多
+                    </Button>
+                  )}
+                </ResultPagination>
+              ) : null}
             </div>
           </main>
         </div>

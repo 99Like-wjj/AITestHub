@@ -38,6 +38,7 @@ import {
 } from '@ant-design/icons';
 import { meSchema } from '../../../packages/contracts/src/identity';
 import { idSchema } from '../../../packages/contracts/src/base';
+import { workspaceDraftKeySchema } from '../../../packages/contracts/src/workspace-drafts';
 import {
   api,
   describeError,
@@ -185,6 +186,13 @@ function workspaceReturnHash(value: string | null) {
     const id = idSchema.safeParse(query.get(key));
     if (id.success) result.set(key, id.data);
   }
+  const draft = workspaceDraftKeySchema.safeParse(query.get('draft'));
+  if (
+    !result.has('conversationId') &&
+    draft.success &&
+    draft.data.startsWith('new:')
+  )
+    result.set('draft', draft.data);
   return `#workspace${result.size ? '?' + result.toString() : ''}`;
 }
 

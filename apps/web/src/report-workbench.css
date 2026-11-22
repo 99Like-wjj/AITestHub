@@ -24,9 +24,7 @@
 
 .report-workbench-bar-left,
 .report-workbench-controls,
-.report-workbench-heading,
-.report-workbench-filters,
-.report-batch-toolbar {
+.report-workbench-heading {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -105,26 +103,12 @@
   font-size: 12px;
 }
 
-.report-workbench-filters,
-.report-batch-toolbar,
+.report-workbench-content > .result-filters,
 .report-inline-command {
   padding: 10px 12px;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 9px;
-}
-
-.report-workbench-filters > .ant-input-affix-wrapper {
-  flex: 1 1 210px;
-  max-width: 360px;
-}
-
-.report-workbench-filters > .ant-select {
-  min-width: min(174px, 100%);
-}
-
-.report-batch-toolbar {
-  justify-content: space-between;
 }
 
 .report-desk-grid {

@@ -1,40 +1,5 @@
-.assets-unified-toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
-  min-height: 36px;
-}
-.assets-unified-toolbar > .segmented {
-  margin: 0;
-}
-.assets-unified-toolbar .archived-requirements-toggle {
-  min-height: 32px;
-  padding: 0;
-}
-.live-asset-workspace {
-  align-items: start;
-}
-.live-asset-workspace > .asset-tree {
-  top: 0;
-  padding: 0 9px 12px;
-}
-.live-asset-workspace > .asset-tree > .tree-head {
-  min-height: 76px;
-  display: flex;
-  align-items: flex-start;
-  padding: 16px 10px 12px;
-  font-size: 12px;
-  letter-spacing: 0;
-  border-bottom: 1px solid var(--line);
-  margin: 0 -9px 8px;
-  padding-inline: 19px;
-  box-sizing: border-box;
-}
 .live-asset-workspace > .asset-pane > .context-head {
-  min-height: 76px;
+  min-height: 64px;
   display: flex;
   align-items: flex-start;
   padding: 16px;
@@ -51,21 +16,7 @@
 .live-asset-workspace > .asset-pane > .context-head p {
   margin: 3px 0 0;
 }
-.assets-unified-toolbar .tab {
-  min-height: 32px;
-}
 @media (max-width: 700px) {
-  .assets-unified-toolbar {
-    align-items: center;
-    gap: 8px;
-  }
-  .live-asset-workspace > .asset-tree {
-    top: auto;
-  }
-  .live-asset-workspace > .asset-tree > .tree-head {
-    min-height: 46px;
-    padding-block: 12px;
-  }
   .live-asset-workspace > .asset-pane > .context-head {
     flex-wrap: wrap;
   }

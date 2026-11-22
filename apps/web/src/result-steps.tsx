@@ -8,6 +8,7 @@ import type {
 import type { resultScopeItemSchema } from '../../../packages/contracts/src/ui-results';
 import { EvidenceGallery } from './evidence-gallery';
 import type { EvidenceGalleryItem } from './evidence-gallery';
+import { StatusTag } from './semantic-status';
 
 type Content = z.infer<typeof resultItemSchema>;
 type Scope = z.infer<typeof resultScopeItemSchema>;
@@ -29,19 +30,19 @@ const gapLabels: Record<Gap['state'], string> = {
 };
 export function ResultOutcomeTag({ outcome }: { outcome: string }) {
   return (
-    <Tag
-      color={
+    <StatusTag
+      tone={
         outcome === 'passed'
           ? 'success'
           : outcome === 'failed'
             ? 'error'
             : outcome === 'blocked' || outcome === 'inconclusive'
               ? 'warning'
-              : 'default'
+              : 'neutral'
       }
     >
       {outcomeLabels[outcome] ?? outcome}
-    </Tag>
+    </StatusTag>
   );
 }
 

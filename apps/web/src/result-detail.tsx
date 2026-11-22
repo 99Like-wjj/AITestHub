@@ -4,7 +4,6 @@ import {
   Button,
   Collapse,
   Descriptions,
-  Drawer,
   Form,
   Input,
   Modal,
@@ -50,6 +49,8 @@ import {
 import { ApiResultTrace } from './api-result-trace';
 import type { Project } from './types';
 import { uiLayers } from './ui-layers';
+import { DetailDrawer } from './detail-drawer';
+import { BeijingTime } from './beijing-time';
 import {
   ReportReceiptControl,
   useReportCommandRecovery,
@@ -561,7 +562,7 @@ export function ResultDetailPanel({
         <div className="result-review">
           <div className="result-review-header">
             <div>
-              <h2>{result.scopeItem?.title ?? '执行结果详情'}</h2>
+              {inline && <h2>{result.scopeItem?.title ?? '执行结果详情'}</h2>}
               {result.scopeItem?.dataRow && (
                 <Tag color="cyan">
                   数据行 {result.scopeItem.dataRow.name} ·{' '}
@@ -573,11 +574,13 @@ export function ResultDetailPanel({
                   固定准备修订 {result.scopeItem.preparationSources.length} 项
                 </Tag>
               ) : null}
-              <small className="result-review-muted result-review-id">
-                原执行 {result.runId}
-              </small>
+              {inline && (
+                <small className="result-review-muted result-review-id">
+                  原执行 {result.runId}
+                </small>
+              )}
             </div>
-            {returnTo && <Button href={returnTo}>返回缺陷</Button>}
+            {inline && returnTo && <Button href={returnTo}>返回缺陷</Button>}
           </div>
           <div className="result-review-meta">
             <div>
@@ -626,8 +629,12 @@ export function ResultDetailPanel({
               </strong>
               <div className="result-review-muted">
                 {revision && `r${revision.revisionNo}`}
-                {revision?.createdAt &&
-                  ` · ${new Date(revision.createdAt).toLocaleString('zh-CN')}`}
+                {revision?.createdAt && (
+                  <>
+                    {' '}
+                    · <BeijingTime value={revision.createdAt} detail />
+                  </>
+                )}
                 {revision?.reason && ` · ${revision.reason}`}
               </div>
             </div>
@@ -837,7 +844,13 @@ export function ResultDetailPanel({
                               },
                               { title: '原因', dataIndex: 'reason' },
                               { title: '操作者', dataIndex: 'actorId' },
-                              { title: '时间', dataIndex: 'createdAt' },
+                              {
+                                title: '时间',
+                                dataIndex: 'createdAt',
+                                render: (value: string) => (
+                                  <BeijingTime value={value} />
+                                ),
+                              },
                             ]}
                             locale={{ emptyText: '尚无人工最终结论' }}
                           />
@@ -858,16 +871,16 @@ export function ResultDetailPanel({
       {inline ? (
         detail
       ) : (
-        <Drawer
+        <DetailDrawer
           open={resultId !== null}
-          zIndex={uiLayers.detail}
-          title="结果事实、人工结论与证据"
-          width={1100}
+          title={result?.scopeItem?.title ?? '结果事实、人工结论与证据'}
+          meta={result && `原执行 ${result.runId}`}
+          extra={returnTo && <Button href={returnTo}>返回缺陷</Button>}
+          wide
           onClose={onClose}
-          destroyOnHidden
         >
           {detail}
-        </Drawer>
+        </DetailDrawer>
       )}
       {reportReview && !archivedAssessment && (
         <ReportReceiptControl recovery={recovery} onCheck={recoverAssessment} />

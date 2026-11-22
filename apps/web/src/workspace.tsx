@@ -159,6 +159,11 @@ import {
   removeInsertions,
 } from './workspace-drafts';
 import type { ComposerInsertion, WorkspaceDraft } from './workspace-drafts';
+import {
+  workspaceDraftKeySchema,
+  workspaceDraftListSchema,
+} from '../../../packages/contracts/src/workspace-drafts';
+import { WorkspaceDraftSync } from './workspace-draft-sync';
 import { readWorkspaceSendReceipt } from './workspace-send-receipt';
 import { WorkspaceMarkdown } from './workspace-markdown';
 import { WorkspaceTurn } from './workspace-turn';
@@ -189,6 +194,26 @@ function conversationFromUrl() {
   const query = new URLSearchParams(window.location.hash.split('?')[1]);
   const result = idSchema.safeParse(query.get('conversationId'));
   return result.success ? result.data : null;
+}
+function newDraftFromUrl() {
+  const encoded = new URLSearchParams(window.location.hash.split('?')[1]).get(
+    'draft',
+  );
+  const result = workspaceDraftKeySchema.safeParse(encoded);
+  return result.success && result.data.startsWith('new:') ? result.data : null;
+}
+function newDraftHash(key: string, projectId: string | null) {
+  const query = new URLSearchParams({ draft: key });
+  if (projectId) query.set('projectId', projectId);
+  return `workspace?${query}`;
+}
+function hasDraft(draft: Draft) {
+  return Boolean(
+    draft.content ||
+    draft.references.length ||
+    draft.skillIds?.length ||
+    draft.operationTarget !== undefined,
+  );
 }
 function operationTargetFor(
   projectId: string | null,
@@ -311,6 +336,10 @@ export function Workspace({
   const effort = selection?.effort ?? null;
   const [activeId, setActiveId] = useState<string | null>(conversationFromUrl);
   const activeRef = useRef(activeId);
+  const [newScope, setNewScope] = useState(
+    () => newDraftFromUrl() ?? newDraftKey(project?.id ?? null),
+  );
+  const newScopeRef = useRef(newScope);
   const pendingMessages = useWorkspaceSendQueue(me.user.id, activeId);
   const browseRef = useRef(project?.id ?? null);
   const browseGeneration = useRef(0);
@@ -431,9 +460,40 @@ export function Workspace({
   const [aliasError, setAliasError] = useState<string>();
   const [aliasForm] = Form.useForm<{ alias: string }>();
   const [associateOpen, setAssociateOpen] = useState(false);
-  const [associationError, setAssociationError] = useState<string>();
   const drafts = useRef(workspaceDrafts(me.user.id));
   drafts.current = workspaceDrafts(me.user.id);
+  const [draftWarning, setDraftWarning] = useState<{
+    key: string;
+    text: string;
+  }>();
+  const draftSync = useMemo(
+    () =>
+      new WorkspaceDraftSync(me.user.id, (key, error) => {
+        setDraftWarning({
+          key,
+          text:
+            error instanceof ApiError && error.code === 'STALE_BASE_REVISION'
+              ? '草稿在其他窗口已更新，本窗口仍保留当前输入。'
+              : `草稿未能同步：${describeError(error)}`,
+        });
+      }),
+    [me.user.id],
+  );
+  const [draftLoading, setDraftLoading] = useState(true);
+  const hydratedDraftKey = useRef<string | null>(null);
+  useEffect(() => {
+    const flush = () => draftSync.drain(true);
+    const changesVisibility = () => {
+      if (document.visibilityState === 'hidden') draftSync.drain(true);
+    };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', changesVisibility);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', changesVisibility);
+      draftSync.drain();
+    };
+  }, [draftSync]);
   const creationDrafts = useRef(pendingCreationDrafts(me.user.id));
   creationDrafts.current = pendingCreationDrafts(me.user.id);
   const candidateInsertion = useRef<ComposerInsertion | null>(null);
@@ -576,13 +636,7 @@ export function Workspace({
         : true),
   );
   const contextCollapsible = Boolean(
-    activeId &&
-    (conversationLoading ||
-      !active ||
-      active.id !== activeId ||
-      taskId ||
-      detail?.messages.length ||
-      (sendPreview?.conversationId === activeId && sendPreview.userMessageId)),
+    activeId && (conversationLoading || active?.id !== activeId),
   );
   useEffect(() => {
     if (contextCollapsible) {
@@ -611,7 +665,7 @@ export function Workspace({
   const targetProject = me.projects.find(
     (entry) => entry.id === targetProjectId,
   );
-  const composerScope = activeId ?? newDraftKey(targetProjectId);
+  const composerScope = activeId ?? newScope;
   useEffect(() => {
     if (
       conversationLoading ||
@@ -637,7 +691,32 @@ export function Workspace({
       : null;
   const currentOperationTarget: OperationTarget | null =
     accessMode === 'full' ? operationTargetFor(targetProjectId, active) : null;
+  const composerRequirementId =
+    restoredTarget && restoredTarget.value?.projectId === targetProjectId
+      ? restoredTarget.value?.requirementId
+      : operationTargetFor(targetProjectId, active)?.requirementId;
+  const composerRequirement =
+    (sidebar?.groups ?? []).find(
+      (group) =>
+        group.requirementId === composerRequirementId &&
+        group.projectId === targetProjectId,
+    ) ??
+    groupCandidates.find(
+      (group) =>
+        group.requirementId === composerRequirementId &&
+        group.projectId === targetProjectId,
+    );
+  const composerRequirementLabel = composerRequirementId
+    ? (composerRequirement?.alias ??
+      composerRequirement?.generatedName ??
+      composerRequirement?.formalTitle ??
+      (active?.requirementId === composerRequirementId
+        ? active.requirementTitle
+        : null) ??
+      '当前关联需求')
+    : null;
   const hasRestoredTargetDifference = Boolean(
+    activeId &&
     restoredTarget &&
     JSON.stringify(restoredTarget.value) !==
       JSON.stringify(currentOperationTarget),
@@ -815,15 +894,11 @@ export function Workspace({
           (item) => item.role === 'assistant' && item.taskId !== null,
         );
         setTaskId(last?.taskId ?? null);
-        const draft = drafts.current.get(id);
-        restoreDraftTarget(id, draft);
-        if (draft) {
-          setContent(draft.content);
-          setReferences(draft.references);
-        } else {
-          setContent('');
-          setReferences([]);
-        }
+        if (
+          response.conversation.projectId &&
+          response.conversation.projectId !== browseRef.current
+        )
+          onProjectChange(response.conversation.projectId);
       }
     } catch (error) {
       if (!signal?.aborted && epoch === conversationEpoch.current) {
@@ -917,10 +992,6 @@ export function Workspace({
       setDetail(null);
       setTaskId(null);
       setConversationError(undefined);
-      const draft = drafts.current.get(newDraftKey(browseRef.current));
-      restoreDraftTarget(newDraftKey(browseRef.current), draft);
-      setContent(draft?.content ?? '');
-      setReferences(draft?.references ?? []);
       return;
     }
     const controller = new AbortController();
@@ -930,6 +1001,83 @@ export function Workspace({
     void loadConversation(activeId, controller.signal);
     return () => controller.abort();
   }, [activeId]);
+  const initialDraftLocated = useRef(Boolean(activeId || newDraftFromUrl()));
+  useEffect(() => {
+    if (initialDraftLocated.current) return;
+    const controller = new AbortController();
+    const navigation = conversationNavigation.current;
+    void api(
+      '/me/workspace-drafts',
+      { signal: controller.signal, expectedDraftOwner: me.user.id },
+      workspaceDraftListSchema,
+    )
+      .then(({ drafts: pending }) => {
+        if (
+          controller.signal.aborted ||
+          navigation !== conversationNavigation.current ||
+          activeRef.current ||
+          composerContent.current
+        )
+          return;
+        initialDraftLocated.current = true;
+        const latest = pending[0]?.key;
+        if (latest && latest !== newScopeRef.current) {
+          setPendingDraftScope(latest);
+          window.location.hash = newDraftHash(latest, browseRef.current);
+        }
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [me.user.id]);
+
+  useEffect(() => {
+    let current = true;
+    setDraftLoading(true);
+    const local = drafts.current.get(composerScope);
+    const restore = (draft: Draft | undefined) => {
+      if (
+        !current ||
+        (activeRef.current ?? newScopeRef.current) !== composerScope
+      )
+        return;
+      hydratedDraftKey.current = composerScope;
+      restoreDraftTarget(composerScope, draft);
+      setContent(draft?.content ?? '');
+      setReferences(draft?.references ?? []);
+      setCaret(draft?.content.length ?? 0);
+      if (draft && 'operationTarget' in draft) {
+        const projectId = draft.operationTarget?.projectId ?? null;
+        if (projectId !== browseRef.current) onProjectChange(projectId);
+      }
+      setDraftLoading(false);
+    };
+    if (local) restore(local);
+    else {
+      setContent('');
+      setReferences([]);
+      void draftSync
+        .read(composerScope)
+        .then((stored) => {
+          if (!current) return;
+          const currentLocal = drafts.current.get(composerScope);
+          if (stored && !currentLocal)
+            drafts.current.set(composerScope, stored.draft);
+          restore(currentLocal ?? stored?.draft);
+        })
+        .catch((error: unknown) => {
+          if (!current) return;
+          setDraftWarning({
+            key: composerScope,
+            text: `草稿未能读回：${describeError(error)}`,
+          });
+          restore(drafts.current.get(composerScope));
+        });
+    }
+    return () => {
+      current = false;
+    };
+  }, [composerScope, draftSync]);
+
   useEffect(() => {
     const changed = () => {
       if (
@@ -937,10 +1085,13 @@ export function Workspace({
       )
         return;
       const id = conversationFromUrl();
-      if (id !== activeRef.current) {
+      const next = newDraftFromUrl() ?? newDraftKey(browseRef.current);
+      if (id !== activeRef.current || (!id && next !== newScopeRef.current)) {
         conversationNavigation.current += 1;
         saveDraft();
         activeRef.current = id;
+        if (!id) setPendingDraftScope(next);
+        setDraftLoading(true);
         setActiveId(id);
       }
     };
@@ -948,26 +1099,11 @@ export function Workspace({
     return () => window.removeEventListener('hashchange', changed);
   }, [content, references, draftTarget, composerSkills]);
   useEffect(() => {
-    if (currentIdentityOwner() !== me.user.id) return;
-    if (
-      activeId &&
-      detail?.conversation.id === activeId &&
-      !conversationLoading
-    )
-      saveWorkspaceDraft(drafts.current, activeId, composerDraft());
-    else if (!activeId) {
-      const timer = window.setTimeout(() => {
-        if (!activeRef.current && browseRef.current === targetProjectId)
-          saveWorkspaceDraft(
-            drafts.current,
-            newDraftKey(targetProjectId),
-            composerDraft(),
-          );
-      }, 0);
-      return () => window.clearTimeout(timer);
-    }
+    if (!draftLoading && (!activeId || detail?.conversation.id === activeId))
+      saveDraft();
   }, [
     activeId,
+    composerScope,
     content,
     references,
     detail?.conversation.id,
@@ -975,6 +1111,7 @@ export function Workspace({
     targetProjectId,
     draftTarget,
     composerSkills,
+    draftLoading,
   ]);
 
   function composerDraft(): Draft {
@@ -1001,38 +1138,89 @@ export function Workspace({
     );
   }
   function promoteCreatedDraft(conversationId: string, draft: Draft) {
-    for (const scope of promoteWorkspaceDraft(
+    const current = drafts.current.get(conversationId);
+    if (current && current !== draft) return;
+    draftSync.save(conversationId, draft);
+    const consumed = promoteWorkspaceDraft(
       drafts.current,
       conversationId,
       draft,
-    ))
-      replaceDraftGeneration(scope);
+    );
+    if (consumed.length) {
+      void draftSync.flush(conversationId).then(() => {
+        if (!draftSync.matchesSaved(conversationId, draft)) return;
+        for (const scope of consumed) {
+          if (drafts.current.has(scope)) continue;
+          replaceDraftGeneration(scope);
+          draftSync.clear(scope, draft);
+        }
+      });
+    }
   }
   function saveDraft() {
-    if (currentIdentityOwner() !== me.user.id) return;
-    saveWorkspaceDraft(
-      drafts.current,
-      activeRef.current ?? newDraftKey(browseRef.current),
-      composerDraft(),
-    );
+    if (currentIdentityOwner() !== me.user.id || draftLoading) return;
+    const key = activeRef.current ?? newScopeRef.current;
+    if (hydratedDraftKey.current !== key) return;
+    const draft = saveWorkspaceDraft(drafts.current, key, composerDraft());
+    draftSync.save(key, hasDraft(draft) ? draft : null);
+  }
+  function setPendingDraftScope(key: string) {
+    if (newScopeRef.current !== key) setDraftLoading(true);
+    newScopeRef.current = key;
+    setNewScope(key);
+  }
+  function changeComposerTarget(
+    projectId: string | null,
+    requirementId?: string,
+  ) {
+    if (draftLoading || (activeRef.current && active?.id !== activeRef.current))
+      return;
+    const target = projectId
+      ? { projectId, ...(requirementId ? { requirementId } : {}) }
+      : null;
+    const currentKey = activeRef.current ?? newScopeRef.current;
+    const key = activeRef.current
+      ? `new:detached:${crypto.randomUUID()}`
+      : currentKey;
+    saveDraft();
+    const draft = { ...composerDraft(), operationTarget: target };
+    drafts.current.set(key, draft);
+    if (hasDraft(draft)) draftSync.save(key, draft);
+    conversationNavigation.current += 1;
+    if (activeRef.current) {
+      conversationEpoch.current += 1;
+      activeRef.current = null;
+      setActiveId(null);
+      setDetail(null);
+      setTaskId(null);
+      setConversationLoading(false);
+      setConversationError(undefined);
+      setSendError(undefined);
+      setSendPreview(null);
+      setUncertain(null);
+    }
+    setPendingDraftScope(key);
+    restoreDraftTarget(key, draft);
+    candidateInsertion.current = null;
+    setDismissedCandidate(null);
+    setReferenceOpen(false);
+    if (browseRef.current !== projectId) {
+      groupEpoch.current += 1;
+      setGroupCandidates([]);
+      onProjectChange(projectId);
+    }
+    window.location.hash = newDraftHash(key, projectId);
   }
   function changeProject(id: string | null) {
-    setDraftTarget(null);
-    if (!activeRef.current) {
-      saveDraft();
-      const next = drafts.current.get(newDraftKey(id));
-      restoreDraftTarget(newDraftKey(id), next);
-      setContent(next?.content ?? '');
-      setReferences(next?.references ?? []);
-      candidateInsertion.current = null;
-    }
-    onProjectChange(id);
+    if (id !== browseRef.current) changeComposerTarget(id);
   }
   function openConversation(id: string) {
+    if (activeRef.current === id) return;
     conversationNavigation.current += 1;
     saveDraft();
     candidateInsertion.current = null;
     activeRef.current = id;
+    setDraftLoading(true);
     setActiveId(id);
     window.location.hash = `workspace?conversationId=${id}`;
   }
@@ -1050,9 +1238,7 @@ export function Workspace({
     );
   }
   function openNewDraft() {
-    if (!activeRef.current || currentConversationIsEmpty()) return;
-    if (detail?.conversation.id === activeRef.current && !conversationLoading)
-      saveDraft();
+    saveDraft();
     conversationNavigation.current += 1;
     conversationEpoch.current += 1;
     activeRef.current = null;
@@ -1068,13 +1254,15 @@ export function Workspace({
     setDismissedCandidate(null);
     setReferenceOpen(false);
     setActiveCandidateId(undefined);
-    const scope = newDraftKey(browseRef.current);
-    const draft = drafts.current.get(scope);
-    setContent(draft?.content ?? '');
-    setReferences(draft?.references ?? []);
+    const scope = `new:detached:${crypto.randomUUID()}`;
+    const draft: Draft = { content: '', references: [] };
+    drafts.current.set(scope, draft);
+    setPendingDraftScope(scope);
+    setContent('');
+    setReferences([]);
     restoreDraftTarget(scope, draft);
-    setCaret(draft?.content.length ?? 0);
-    window.location.hash = 'workspace';
+    setCaret(0);
+    window.location.hash = newDraftHash(scope, browseRef.current);
   }
   function openReferences(tab: ReferenceTab) {
     if (accessMode === 'restricted') return;
@@ -1254,7 +1442,7 @@ export function Workspace({
     const codes = [
       ...new Set(text.match(/\bATHC1-[a-f0-9]{32}\b/gi) ?? []),
     ].slice(0, 30 - references.length);
-    const draftId = activeRef.current ?? newDraftKey(browseRef.current),
+    const draftId = activeRef.current ?? newScopeRef.current,
       epoch = identityContextEpoch(),
       generation = draftGenerations.current.get(draftId) ?? 0;
     for (const code of codes) {
@@ -1282,7 +1470,7 @@ export function Workspace({
         };
         if (
           mounted.current &&
-          (activeRef.current ?? newDraftKey(browseRef.current)) === draftId
+          (activeRef.current ?? newScopeRef.current) === draftId
         ) {
           const materialized = replaceConversationReferenceCode(
             composerContent.current,
@@ -1325,14 +1513,16 @@ export function Workspace({
               inlineReferenceMarker(prepared.label, prepared.reference),
             );
             if (!materialized.insertions.length) continue;
-            drafts.current.set(draftId, {
+            const next = {
               ...old,
               content: materialized.text,
               references: [
                 ...old.references,
                 { ...prepared, insertions: materialized.insertions },
               ],
-            });
+            };
+            drafts.current.set(draftId, next);
+            draftSync.save(draftId, next);
           }
         }
       } catch (error) {
@@ -1380,15 +1570,22 @@ export function Workspace({
           attempt.commandId,
           saveWorkspaceDraft(
             drafts.current,
-            newDraftKey(browseRef.current),
+            newScopeRef.current,
             composerDraft(),
           ),
         );
+      const selectedTarget = composerDraft().operationTarget;
+      const chosenGroup =
+        group ??
+        (selectedTarget?.requirementId
+          ? {
+              projectId: selectedTarget.projectId,
+              requirementId: selectedTarget.requirementId,
+            }
+          : undefined);
       const response = await dispatchConversationCreate(attempt, {
-        useDefaultTarget: !group,
-        ...(group
-          ? { projectId: group.projectId, requirementId: group.requirementId }
-          : {}),
+        useDefaultTarget: !chosenGroup && selectedTarget === undefined,
+        ...chosenGroup,
       });
       const draft = creationDrafts.current.get(attempt.commandId);
       if (current() && draft && !drafts.current.has(response.conversation.id))
@@ -1800,7 +1997,7 @@ export function Workspace({
       void message.info('切换完全访问后可添加文件或引用。');
       return;
     }
-    const draftId = activeRef.current ?? newDraftKey(browseRef.current);
+    const draftId = activeRef.current ?? newScopeRef.current;
     const attachmentEpoch = identityContextEpoch();
     const id = crypto.randomUUID();
     setUploading((previous) => [
@@ -1826,7 +2023,7 @@ export function Workspace({
       };
       if (
         mounted.current &&
-        (activeRef.current ?? newDraftKey(browseRef.current)) === draftId
+        (activeRef.current ?? newScopeRef.current) === draftId
       )
         setReferences((previous) => [...previous, prepared]);
       else {
@@ -1835,10 +2032,12 @@ export function Workspace({
           references: [],
           targetProjectId: null,
         };
-        drafts.current.set(draftId, {
+        const next = {
           ...previous,
           references: [...previous.references, prepared],
-        });
+        };
+        drafts.current.set(draftId, next);
+        draftSync.save(draftId, next);
         if (mounted.current)
           void message.info('附件已上传，引用保留在原草稿。');
       }
@@ -1898,6 +2097,7 @@ export function Workspace({
     const sendEpoch = identityContextEpoch();
     if (currentIdentityOwner() !== me.user.id) return;
     if (
+      draftLoading ||
       !access.ready ||
       Boolean(targetProjectId && !targetProject) ||
       (!content.trim() && !composerSkills.length) ||
@@ -2000,7 +2200,10 @@ export function Workspace({
           active.id,
           submittedDraft,
         );
-        if (clearComposer) replaceDraftGeneration(active.id);
+        if (clearComposer) {
+          replaceDraftGeneration(active.id);
+          draftSync.clear(active.id, submittedDraft);
+        }
         if (clearComposer && activeRef.current === active.id) {
           setDraftTarget(null);
           setContent('');
@@ -2043,7 +2246,10 @@ export function Workspace({
           active.id,
           submittedDraft,
         );
-        if (clearComposer) replaceDraftGeneration(active.id);
+        if (clearComposer) {
+          replaceDraftGeneration(active.id);
+          draftSync.clear(active.id, submittedDraft);
+        }
         uncertainSends.current.delete(active.id);
         if (mounted.current && activeRef.current === active.id) {
           if (clearComposer) {
@@ -2224,7 +2430,10 @@ export function Workspace({
       send.conversationId,
       send.draft,
     );
-    if (clearComposer) replaceDraftGeneration(send.conversationId);
+    if (clearComposer) {
+      replaceDraftGeneration(send.conversationId);
+      draftSync.clear(send.conversationId, send.draft);
+    }
     if (activeRef.current === send.conversationId) {
       setTaskId(receipt.receipt.taskId);
       if (clearComposer) {
@@ -2306,53 +2515,6 @@ export function Workspace({
       setSendError(describeError(error));
     } finally {
       setSending(false);
-    }
-  }
-  async function associate(associationId: string) {
-    if (
-      !active ||
-      active.id !== activeRef.current ||
-      conversationLoading ||
-      active.requirementId ||
-      !project ||
-      !associationId
-    )
-      return;
-    const epoch = conversationEpoch.current;
-    const isCurrentConversation = () =>
-      activeRef.current === active.id && conversationEpoch.current === epoch;
-    const isCurrentPicker = () =>
-      isCurrentConversation() && browseRef.current === project.id;
-    setPending(true);
-    setAssociationError(undefined);
-    try {
-      const response = await api(
-        `/me/conversations/${active.id}/associate`,
-        {
-          method: 'POST',
-          body: {
-            commandId: crypto.randomUUID(),
-            rowVersion: active.rowVersion,
-            projectId: project.id,
-            requirementId: associationId,
-          },
-        },
-        conversationMutationSchema,
-      );
-      if (isCurrentConversation()) {
-        setDraftTarget(null);
-        setDetail((previous) =>
-          previous?.conversation.id === active.id
-            ? { ...previous, conversation: response.conversation }
-            : previous,
-        );
-      }
-      if (isCurrentPicker()) setAssociateOpen(false);
-      await loadSidebar();
-    } catch (error) {
-      if (isCurrentPicker()) setAssociationError(describeError(error));
-    } finally {
-      setPending(false);
     }
   }
   function prepareContinuation() {
@@ -2833,7 +2995,9 @@ export function Workspace({
                 <Button
                   type="text"
                   className="composer-project-context"
-                  disabled={creating || sending || Boolean(uncertain)}
+                  disabled={
+                    draftLoading || creating || sending || Boolean(uncertain)
+                  }
                   title={project?.name ?? '不在项目'}
                   aria-label={'切换全站项目：' + (project?.name ?? '不在项目')}
                 >
@@ -2848,37 +3012,27 @@ export function Workspace({
                 open={associateOpen}
                 onOpenChange={(value) => {
                   setAssociateOpen(value);
-                  if (value) {
-                    setAssociationError(undefined);
-                    void restoreCandidates(false);
-                  }
+                  if (value) void restoreCandidates(false);
                 }}
-                selectedId={active?.requirementId ?? ''}
+                selectedId={composerRequirementId ?? ''}
                 placeholder="搜索需求"
                 loading={groupLoading}
-                error={associationError ?? groupError}
+                error={groupError}
                 emptyText={
                   project ? '当前没有本人参与的需求' : '先选择这个项目'
                 }
-                caption={
-                  active?.requirementId
-                    ? '当前对话已关联，既有归属保持不变。'
-                    : '选择后关联本对话；不会改动已发任务。'
-                }
+                caption="只调整本次待发草稿的关联需求。"
                 options={[
-                  {
-                    id: '',
-                    label: '不关联需求',
-                    disabled: Boolean(active?.requirementId),
-                  },
-                  ...(active?.requirementId &&
+                  { id: '', label: '不关联需求' },
+                  ...(composerRequirementId &&
+                  composerRequirementLabel &&
                   !groupCandidates.some(
-                    (group) => group.requirementId === active.requirementId,
+                    (group) => group.requirementId === composerRequirementId,
                   )
                     ? [
                         {
-                          id: active.requirementId,
-                          label: active.requirementTitle ?? '当前需求',
+                          id: composerRequirementId,
+                          label: composerRequirementLabel,
                         },
                       ]
                     : []),
@@ -2887,45 +3041,33 @@ export function Workspace({
                     label:
                       group.alias ?? group.generatedName ?? group.formalTitle,
                     description: group.formalTitle,
-                    disabled: Boolean(
-                      active?.requirementId &&
-                      active.requirementId !== group.requirementId,
-                    ),
                   })),
                 ]}
                 onChoose={(id) => {
-                  if (!id || id === active?.requirementId) {
-                    setAssociateOpen(false);
-                    return;
-                  }
-                  const selected = groupCandidates.find(
-                    (group) => group.requirementId === id,
-                  );
-                  if (!selected) return;
-                  if (!active) {
-                    void createConversation(selected).then((created) => {
-                      if (created) setAssociateOpen(false);
-                    });
-                  } else void associate(id);
+                  if (
+                    id !== (composerRequirementId ?? '') &&
+                    (!id ||
+                      groupCandidates.some(
+                        (group) =>
+                          group.requirementId === id &&
+                          group.projectId === targetProjectId,
+                      ))
+                  )
+                    changeComposerTarget(targetProjectId, id || undefined);
+                  setAssociateOpen(false);
                 }}
               >
                 <Button
                   type="text"
                   className="composer-requirement-context"
                   icon={<AppIcon name="folder-closed" />}
-                  disabled={pending || sending || conversationLoading}
-                  title={
-                    currentGroup?.formalTitle ??
-                    active?.requirementTitle ??
-                    '选择需求'
+                  disabled={
+                    pending || sending || conversationLoading || draftLoading
                   }
+                  title={composerRequirementLabel ?? '选择需求'}
                   aria-label="选择当前对话需求"
                 >
-                  {currentGroup?.alias ??
-                    currentGroup?.generatedName ??
-                    currentGroup?.formalTitle ??
-                    active?.requirementTitle ??
-                    '未关联需求'}
+                  {composerRequirementLabel ?? '不关联需求'}
                   <AppIcon name="down" />
                 </Button>
               </WorkspaceContextPicker>
@@ -2945,6 +3087,9 @@ export function Workspace({
             )}
             {sendModeError && (
               <Alert type="warning" showIcon title={sendModeError} />
+            )}
+            {draftWarning?.key === composerScope && (
+              <Alert type="warning" showIcon title={draftWarning.text} />
             )}
             {hasRestoredTargetDifference && (
               <p className="caption composer-restored-target" role="status">
@@ -3066,7 +3211,9 @@ export function Workspace({
               ref={input}
               value={content}
               allowedReferences={inlineAllowedReferences}
-              disabled={conversationLoading || creating || sending}
+              disabled={
+                draftLoading || conversationLoading || creating || sending
+              }
               maxLength={100000}
               placeholder={
                 active

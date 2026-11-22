@@ -1,0 +1,242 @@
+import { randomUUID } from 'node:crypto';
+import type { BindToolsInput } from '@langchain/core/language_models/chat_models';
+import { tool } from 'langchain';
+import { z } from 'zod';
+import { SHARED_SKILL_RULE_TOOL_NAME } from '../../../packages/application/src/shared-skill-rules/index.js';
+import { modelTools } from './adapter-model.js';
+import type { AiHostEvent } from './host.js';
+import { AI_PROGRESS_TOOL_NAME } from './progress-tool.js';
+
+export const AI_TOOL_DISCOVERY_NAME = 'ath_tool_discovery';
+
+const coreTools = [
+  AI_TOOL_DISCOVERY_NAME,
+  AI_PROGRESS_TOOL_NAME,
+  'ath_projects_list',
+  'ath_task_context',
+  SHARED_SKILL_RULE_TOOL_NAME,
+];
+
+// Cap the schemas supplied together, independently of each provider's token budget.
+// A request for one unusually large schema still gets the ordinary model preflight.
+const preferredSchemaBytes = 48 * 1024;
+const additionalToolsLimit = 6;
+const requestedToolsLimit = 3;
+const catalogPageSize = 40;
+
+const defaultTools = [
+  'ath_reports',
+  'ath_requirements',
+  'ath_problems',
+  'ath_issues',
+];
+
+const relatedTools = [
+  {
+    terms: /报告|报表|复盘|执行结果|测试结果|统计|\breports?\b|\bresults?\b/iu,
+    names: ['ath_reports', 'ath_ui_executions', 'ath_problems'],
+  },
+  {
+    terms: /需求|原型|\brequirements?\b/iu,
+    names: [
+      'ath_requirements',
+      'ath_requirement_materials',
+      'ath_document_read',
+    ],
+  },
+  {
+    terms:
+      /用例|测点|测试点|评审|ath-case-design|\btest cases?\b|\breviews?\b/iu,
+    names: ['ath_assets', 'ath_reviews'],
+  },
+  {
+    terms: /回归|计划|接口测试|复测|ath-api|\btest plans?\b|\bretests?\b/iu,
+    names: ['ath_plans', 'ath_ui_executions', 'ath_retests', 'ath_api_runs'],
+  },
+  {
+    terms: /缺陷|候选问题|待确认问题|bug\b|\bdefects?\b/iu,
+    names: ['ath_issues', 'ath_problems', 'ath_issue_lifecycle'],
+  },
+  {
+    terms: /知识库|知识条目|项目知识|ath-project-knowledge|\bknowledge\b/iu,
+    names: ['ath_knowledge', 'ath_semantic_search', 'ath_knowledge_changes'],
+  },
+  {
+    terms: /附件|文档|搜索|联网|网页|\battachments?\b|\bweb search\b/iu,
+    names: ['ath_document_read', 'ath_public_search', 'ath_web_read'],
+  },
+  {
+    terms: /代码|仓库|计算|表格|定时|\brepositor(?:y|ies)\b|\bschedules?\b/iu,
+    names: [
+      'ath_repository',
+      'ath_compute',
+      'ath_office',
+      'ath_office_schedule',
+    ],
+  },
+];
+
+interface ToolContext {
+  prompts: readonly string[];
+  referenceKinds: readonly string[];
+  officeOnly: boolean;
+}
+
+type NamedTool = BindToolsInput & { name: string };
+
+export function createModelToolSelection(
+  availableNames: readonly string[],
+  authorize: () => Promise<void>,
+  emit: (event: AiHostEvent) => void,
+) {
+  const authorizedNames = new Set(availableNames);
+  const requested = new Set<string>();
+  const sizes = new WeakMap<NamedTool, number>();
+  const discovery = tool(
+    async ({ names, offset = 0 }) => {
+      const invocationId = randomUUID();
+      const event = {
+        type: 'tool' as const,
+        name: AI_TOOL_DISCOVERY_NAME,
+        invocationId,
+      };
+      emit({ ...event, state: 'started' });
+      try {
+        await authorize();
+        const requestedNames = names?.filter((name) =>
+          authorizedNames.has(name),
+        );
+        for (const name of requestedNames ?? []) {
+          // Only recent requests take priority. Tools not selected by the current
+          // model call remain discoverable and may be requested again.
+          requested.delete(name);
+          requested.add(name);
+        }
+        while (requested.size > requestedToolsLimit) {
+          const first = requested.values().next().value;
+          if (first === undefined) break;
+          requested.delete(first);
+        }
+        emit({ ...event, state: 'completed' });
+        return JSON.stringify(
+          names
+            ? {
+                requested: requestedNames,
+                unavailable: names.filter((name) => !authorizedNames.has(name)),
+                instruction:
+                  'Use these tools after their schemas appear. If one does not fit with the others, request only that tool.',
+              }
+            : {
+                availableTools: availableNames.slice(
+                  offset,
+                  offset + catalogPageSize,
+                ),
+                nextOffset:
+                  offset + catalogPageSize < availableNames.length
+                    ? offset + catalogPageSize
+                    : null,
+              },
+        );
+      } catch (error) {
+        emit({ ...event, state: 'failed' });
+        throw error;
+      }
+    },
+    {
+      name: AI_TOOL_DISCOVERY_NAME,
+      schema: z.strictObject({
+        offset: z.number().int().min(0).max(1000).optional(),
+        names: z
+          .array(z.string().min(1).max(64))
+          .min(1)
+          .max(requestedToolsLimit)
+          .optional(),
+      }),
+      description:
+        'List the tool names authorized for this message (continue with offset when nextOffset is returned), or request up to 3 exact names for the next model step. This only loads definitions; existing permissions, write safety and human approvals still apply. Use a tool only after it is included in the current request.',
+    },
+  );
+
+  const size = (candidate: NamedTool) => {
+    const cached = sizes.get(candidate);
+    if (cached !== undefined) return cached;
+    const bytes = Buffer.byteLength(JSON.stringify(modelTools([candidate])));
+    sizes.set(candidate, bytes);
+    return bytes;
+  };
+
+  return {
+    discovery,
+    select<T extends NamedTool>(
+      candidates: readonly T[],
+      context: ToolContext,
+    ) {
+      const byName = new Map(
+        candidates.map((candidate) => [candidate.name, candidate]),
+      );
+      const selected = new Set(coreTools.filter((name) => byName.has(name)));
+      const prompts = context.prompts.map((prompt) => prompt.slice(0, 4_000));
+      const explicit = new Set(
+        prompts.join('\n').match(/\b(?:ath_|ext_)[\w-]+\b/g),
+      );
+      const matched = prompts.flatMap((prompt) =>
+        relatedTools
+          .filter(({ terms }) => terms.test(prompt))
+          .flatMap(({ names }) => names),
+      );
+      const referenced = context.referenceKinds.flatMap((kind) => {
+        if (kind === 'requirementVersion')
+          return ['ath_requirements', 'ath_requirement_materials'];
+        if (kind === 'knowledge')
+          return ['ath_knowledge', 'ath_semantic_search'];
+        if (kind === 'resource') return ['ath_document_read'];
+        if (kind === 'externalMcpInvocation')
+          return ['ath_external_mcp_status'];
+        if (kind === 'externalMcpConnection')
+          return candidates
+            .filter((candidate) => candidate.name.startsWith('ext_'))
+            .map((candidate) => candidate.name);
+        return [];
+      });
+      const priorities = [
+        ...[...requested].reverse(),
+        ...explicit,
+        ...referenced,
+        ...matched,
+        ...(context.officeOnly
+          ? [
+              'ath_office',
+              'ath_document_read',
+              'ath_public_search',
+              'ath_compute',
+              'ath_web_read',
+            ]
+          : defaultTools),
+      ];
+      let bytes = candidates.reduce(
+        (total, candidate) =>
+          total + (selected.has(candidate.name) ? size(candidate) : 0),
+        0,
+      );
+      let additionalCount = 0;
+      for (const name of priorities) {
+        const candidate = byName.get(name);
+        if (!candidate || selected.has(name)) continue;
+        const total = bytes + size(candidate);
+        if (
+          total > preferredSchemaBytes &&
+          !(
+            (requested.has(name) || explicit.has(name)) &&
+            additionalCount === 0
+          )
+        )
+          continue;
+        selected.add(name);
+        bytes = total;
+        if (++additionalCount === additionalToolsLimit) break;
+      }
+      // Stable registration order keeps repeated schema prefixes reusable.
+      return candidates.filter((candidate) => selected.has(candidate.name));
+    },
+  };
+}

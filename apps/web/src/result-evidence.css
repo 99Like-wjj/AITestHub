@@ -110,7 +110,6 @@
   overflow-wrap: anywhere;
 }
 .result-review-step-button .ant-tag,
-.result-evidence-card-meta .ant-tag,
 .result-evidence-timeline .ant-tag {
   margin-inline-end: 0;
 }

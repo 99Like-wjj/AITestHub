@@ -187,6 +187,21 @@ export async function issueEvent(
     'mergeId',
   ])
     if (key in payload) summary[key] = payload[key];
+  if (action === 'manual-verification') {
+    summary.previousState = row.state;
+    summary.newState = payload.state;
+  }
+  if (
+    previousOwner !== newOwner ||
+    action === 'closed' ||
+    action === 'reopened' ||
+    (action === 'ready-for-retest' && payload.newState !== row.state) ||
+    (action === 'manual-verification' &&
+      row.state === 'awaitingRetest' &&
+      payload.outcome === 'failed' &&
+      payload.state === 'inProgress')
+  )
+    summary.notificationResponsibilityChanged = true;
   await audit(tx, actor, `issue.${action}`, row.id, row.project_id, summary);
 }
 export async function linkResults(

@@ -111,6 +111,8 @@ type ApiOptions = {
   rawBody?: Blob;
   signal?: AbortSignal;
   timeoutMs?: number;
+  keepalive?: boolean;
+  expectedDraftOwner?: string;
 };
 export function api<T>(
   path: string,
@@ -176,6 +178,9 @@ export async function api(
       credentials: 'same-origin',
       headers: {
         Accept: 'application/json',
+        ...(options.expectedDraftOwner
+          ? { 'X-ATH-Draft-Owner': options.expectedDraftOwner }
+          : {}),
         ...(method === 'GET' ? {} : { 'X-ATH-CSRF': '1' }),
         ...(options.rawBody === undefined
           ? {}
@@ -188,6 +193,7 @@ export async function api(
         ? {}
         : { body: JSON.stringify(options.body) }),
       ...(options.rawBody === undefined ? {} : { body: options.rawBody }),
+      ...(options.keepalive ? { keepalive: true } : {}),
       signal,
     });
   } catch (error) {

@@ -14,6 +14,8 @@ import { ReloadOutlined } from '@ant-design/icons';
 import { z } from 'zod';
 import { uiDeliveryStatusSchema } from '../../../packages/contracts/src/ui-delivery';
 import { api, describeError } from './api';
+import { formatBeijingTime } from './beijing-time';
+import { DeliveryStatusTag } from './semantic-status';
 
 type Status = z.infer<typeof uiDeliveryStatusSchema>;
 type Kind = Status['page']['kind'];
@@ -32,15 +34,7 @@ const tabs: { label: string; value: Kind }[] = [
   { label: '待组装记录', value: 'descriptors' },
 ];
 const date = (value: string | null) =>
-  value
-    ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-    : '尚未上报';
-const deliveryLabels = {
-  notSubmitted: '尚未提交',
-  receiving: '接收中',
-  incomplete: '待补齐',
-  complete: '完整',
-};
+  value ? formatBeijingTime(value, true) : '尚未上报';
 function rows(data: Status, titles: Map<string, string>): Row[] {
   const page = data.page;
   switch (page.kind) {
@@ -266,13 +260,7 @@ export function UiDeliveryPanel({
               </Tag>
               <Tag>待组装 {data.pendingDescriptors} 项</Tag>
               <Tag>缺文件 {data.missingFileCount}</Tag>
-              <Tag
-                color={
-                  data.deliveryStatus === 'complete' ? 'success' : 'default'
-                }
-              >
-                交付{deliveryLabels[data.deliveryStatus]}
-              </Tag>
+              <DeliveryStatusTag status={data.deliveryStatus} />
             </Space>
             <Descriptions
               size="small"

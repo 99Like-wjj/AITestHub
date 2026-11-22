@@ -19,25 +19,13 @@ import {
 } from '../../../packages/contracts/src/assets';
 import type { Asset } from '../../../packages/contracts/src/assets';
 import { api, describeError } from './api';
+import { BeijingTime } from './beijing-time';
 
 type Opinions = z.infer<typeof opinionsResponseSchema>;
 const opinionCreatedSchema = z.strictObject({
   opinionId: z.uuid(),
   asset: assetReceiptSchema.shape.asset,
 });
-export const reviewLabels = {
-  pending: '待确认',
-  needsOptimization: '需要优化',
-  aiOptimized: 'AI 已优化（仍待人工）',
-  approved: '通过',
-};
-export const reviewTones = {
-  pending: 'amber',
-  needsOptimization: 'red',
-  aiOptimized: 'blue',
-  approved: 'green',
-} as const;
-
 export function AssetReviewPanel({
   projectId,
   asset,
@@ -136,7 +124,7 @@ export function AssetReviewPanel({
                   style={{ justifyContent: 'space-between', width: '100%' }}
                 >
                   <Typography.Text type="secondary">
-                    {new Date(opinion.createdAt).toLocaleString('zh-CN')} ·{' '}
+                    <BeijingTime value={opinion.createdAt} detail /> ·{' '}
                     {opinion.createdBy}
                   </Typography.Text>
                   {opinion.removedAt ? (

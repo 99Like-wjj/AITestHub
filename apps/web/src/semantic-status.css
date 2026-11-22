@@ -1,0 +1,47 @@
+.semantic-status {
+  --status-ink: var(--muted);
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--status-ink) 11%, var(--surface));
+  color: var(--status-ink);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 16px;
+  vertical-align: middle;
+}
+
+.semantic-status::before {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+  content: '';
+}
+
+.semantic-status-success {
+  --status-ink: var(--accent);
+}
+.semantic-status-warning {
+  --status-ink: #784d0c;
+}
+.semantic-status-error {
+  --status-ink: #9b332e;
+}
+.semantic-status-info {
+  --status-ink: #315a83;
+}
+
+:root[data-theme='dark'] .semantic-status-warning {
+  --status-ink: var(--warning);
+}
+:root[data-theme='dark'] .semantic-status-error {
+  --status-ink: var(--danger);
+}
+:root[data-theme='dark'] .semantic-status-info {
+  --status-ink: var(--info);
+}

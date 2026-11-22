@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { CheckOutlined, SearchOutlined } from '@ant-design/icons';
+import { CheckOutlined } from '@ant-design/icons';
 import {
   Alert,
   Button,
@@ -8,7 +8,6 @@ import {
   Collapse,
   Descriptions,
   Empty,
-  Input,
   Pagination,
   Select,
   Space,
@@ -33,6 +32,10 @@ import {
   reportProblemLabel,
 } from './report-review';
 import type { Project } from './types';
+import { BulkActionBar } from './bulk-action-bar';
+import { BeijingTime } from './beijing-time';
+import { DeliveryStatusTag } from './semantic-status';
+import { ResultFilters, ResultPagination } from './result-list';
 
 type Report = z.infer<typeof reportDetailSchema>['report'];
 type Facts = Report['facts'];
@@ -81,14 +84,6 @@ const provenanceLabels = {
   unknown: '执行来源未确认',
   'platform-api': '平台接口 Worker',
 } as const;
-const deliveryLabels: Record<string, string> = {
-  complete: '已完整交付',
-  incomplete: '交付待补',
-  pending: '待提交',
-  partial: '部分交付',
-  notSubmitted: '未提交',
-  missingFiles: '文件待补',
-};
 const resultStatus = (item: Item) =>
   item.result?.reportedOutcome ?? 'notReported';
 function scenarioKey(item: Item) {
@@ -615,11 +610,15 @@ export function ReportWorkbench({
               ? facts.scope.title
               : `${facts.kind === 'UI' ? 'UI' : '接口'}测试报告`}
           </Typography.Title>
-          <Typography.Text type="secondary">
-            执行 {facts.runId} ·{' '}
-            {deliveryLabels[facts.deliveryStatus] ?? facts.deliveryStatus} ·{' '}
-            {new Date(facts.capturedAt).toLocaleString('zh-CN')}
-          </Typography.Text>
+          <Space wrap size={[8, 4]}>
+            <Typography.Text type="secondary">
+              执行 {facts.runId}
+            </Typography.Text>
+            <DeliveryStatusTag status={facts.deliveryStatus} />
+            <Typography.Text type="secondary">
+              <BeijingTime value={facts.capturedAt} detail />
+            </Typography.Text>
+          </Space>
         </div>
       </div>
       {archived && (
@@ -736,18 +735,25 @@ export function ReportWorkbench({
           },
         ]}
       />
-      <div className="report-workbench-filters">
-        <Input
-          aria-label="搜索范围、用例或场景"
-          allowClear
-          prefix={<SearchOutlined />}
-          value={search}
-          placeholder="搜索用例或场景"
-          onChange={(event) => {
-            setSearch(event.target.value);
+      <ResultFilters
+        search={{
+          label: '搜索范围、用例或场景',
+          placeholder: '搜索用例或场景',
+          value: search,
+          onChange: (value) => {
+            setSearch(value);
             resetSelection();
-          }}
-        />
+          },
+        }}
+        onReset={() => {
+          setFilter('all');
+          setScenario(null);
+          setReviewFilter('all');
+          setSearch('');
+          resetSelection();
+        }}
+        summary={`${matched.length}/${facts.statistics.denominator} 项`}
+      >
         <Select
           aria-label="按场景筛选"
           allowClear
@@ -771,14 +777,18 @@ export function ReportWorkbench({
             resetSelection();
           }}
         />
-        <Typography.Text type="secondary">
-          {matched.length}/{facts.statistics.denominator} 项
-        </Typography.Text>
-      </div>
+      </ResultFilters>
       {writableDetail && (
-        <div className="report-batch-toolbar">
-          <Space wrap>
+        <BulkActionBar
+          selected={selectedRows.length}
+          scope={`仅当前筛选页的可处理结果${eligible.size > 100 ? '，每批最多 100 项' : ''}`}
+          onClear={() => {
+            setSelected(new Set());
+            setBatch(null);
+          }}
+          selectionActions={
             <Button
+              size="small"
               icon={<CheckOutlined />}
               disabled={eligible.size === 0 || Boolean(batch)}
               onClick={() => {
@@ -788,31 +798,18 @@ export function ReportWorkbench({
             >
               全选待确认的失败用例
             </Button>
-            <Button
-              disabled={selectedRows.length === 0}
-              type="primary"
-              onClick={() =>
-                setBatch({ items: selectedRows, id: crypto.randomUUID() })
-              }
-            >
-              预览批量转换（{selectedRows.length} 项）
-            </Button>
-            <Button
-              type="text"
-              disabled={selectedRows.length === 0}
-              onClick={() => {
-                setSelected(new Set());
-                setBatch(null);
-              }}
-            >
-              清空选择
-            </Button>
-          </Space>
-          <Typography.Text type="secondary">
-            仅当前筛选页可批量处理的结果
-            {eligible.size > 100 ? '，每批最多 100 项' : ''}
-          </Typography.Text>
-        </div>
+          }
+        >
+          <Button
+            size="small"
+            type="primary"
+            onClick={() =>
+              setBatch({ items: selectedRows, id: crypto.randomUUID() })
+            }
+          >
+            预览批量转换
+          </Button>
+        </BulkActionBar>
       )}
       {batch && (
         <ReportReviewBatch
@@ -863,18 +860,20 @@ export function ReportWorkbench({
         </aside>
       </div>
       {matched.length > pageSize && (
-        <Pagination
-          current={currentPage}
-          pageSize={pageSize}
-          total={matched.length}
-          showSizeChanger={false}
-          onChange={(value) => {
-            setPage(value);
-            setSelected(new Set());
-            setBatch(null);
-            clearFocusedResult();
-          }}
-        />
+        <ResultPagination summary={`共 ${matched.length} 项结果`}>
+          <Pagination
+            current={currentPage}
+            pageSize={pageSize}
+            total={matched.length}
+            showSizeChanger={false}
+            onChange={(value) => {
+              setPage(value);
+              setSelected(new Set());
+              setBatch(null);
+              clearFocusedResult();
+            }}
+          />
+        </ResultPagination>
       )}
       {facts.evidence.length > 0 && (
         <Collapse

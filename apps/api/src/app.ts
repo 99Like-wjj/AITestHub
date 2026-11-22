@@ -52,6 +52,8 @@ import {
   ApiExecutionController,
 } from './api-execution.controller.js';
 import { ConversationsController } from './conversations.controller.js';
+import { WorkspaceDraftsController } from './workspace-drafts.controller.js';
+import { WorkspaceDraftService } from '../../../packages/application/src/conversations/drafts.js';
 import { ConversationsService } from '../../../packages/application/src/conversations/service.js';
 import { AiTasksService } from '../../../packages/application/src/conversations/tasks.js';
 import { FilePrivacyLedger } from '../../../packages/application/src/conversations/privacy.js';
@@ -468,6 +470,7 @@ export async function createApp(db: Database) {
       ...(retrieval ? [AgentRetrievalController] : []),
       ActionIntentsController,
       ConversationsController,
+      WorkspaceDraftsController,
       KnowledgeController,
       RetestsController,
       NotificationsController,
@@ -526,6 +529,10 @@ export async function createApp(db: Database) {
       {
         provide: ConversationsService,
         useValue: conversationsService,
+      },
+      {
+        provide: WorkspaceDraftService,
+        useValue: new WorkspaceDraftService(db),
       },
       {
         provide: AiTasksService,

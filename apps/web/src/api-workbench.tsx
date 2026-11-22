@@ -11,7 +11,6 @@ import {
   Skeleton,
   Space,
   Table,
-  Tag,
   Tree,
 } from 'antd';
 import { z } from 'zod';
@@ -43,9 +42,13 @@ import type { AssetEditorTarget } from './asset-editor';
 import { useBusinessCommand } from './business-command';
 import { AppIcon } from './app-icon';
 import { PageHeading } from './page-heading';
+import { StatusTag } from './semantic-status';
 import { registerNavigationBlocker } from './navigation-guard';
 import { uiLayers } from './ui-layers';
-import { ArchivedRequirementsToggle } from './archived-requirements-toggle';
+import {
+  RequirementDirectory,
+  RequirementDirectoryLabel,
+} from './requirement-directory';
 import type { Project } from './types';
 
 type Navigation = z.infer<typeof assetNavigationSchema>;
@@ -125,9 +128,13 @@ export function ApiWorkbenchPage({
       asset.targetType === 'set' &&
       (!versionId || asset.requirementVersionId === versionId),
   );
-  const visibleVersion = navigation.requirements.some((requirement) =>
-    requirement.versions.some((version) => version.id === versionId),
+  const directoryRequirement = navigation.requirements.find((item) =>
+    item.versions.some((version) => version.id === versionId),
   );
+  const directoryVersion = directoryRequirement?.versions.find(
+    (version) => version.id === versionId,
+  );
+  const visibleVersion = Boolean(directoryVersion);
 
   function activate(asset: Asset | null) {
     setActive(asset);
@@ -155,6 +162,19 @@ export function ApiWorkbenchPage({
       preserveDraftOnLeave.current = preserveDraft;
       setLeave(true);
     } else action();
+  }
+  function setDirectoryScope(nextVersion?: string) {
+    setVersionId(nextVersion);
+    setBatchId(undefined);
+    setSceneId(undefined);
+  }
+  function changeArchiveScope(value: boolean) {
+    guard(() => {
+      epoch.current += 1;
+      setLoading(true);
+      if (!value && directoryRequirement?.archived) setDirectoryScope();
+      setIncludeArchivedRequirements(value);
+    }, true);
   }
   async function load(signal?: AbortSignal, initialize = false) {
     if (!project) return false;
@@ -483,6 +503,23 @@ export function ApiWorkbenchPage({
     );
   }
   const keyword = query.trim().toLocaleLowerCase();
+  const requirementTitles = new Map(
+    navigation.requirements.flatMap((requirement) =>
+      requirement.versions.map((version) => [version.id, requirement.title]),
+    ),
+  );
+  const assetTitles = new Map(assets.map((asset) => [asset.id, asset.title]));
+  function matchesDirectory(asset: Asset) {
+    return (
+      !keyword ||
+      [
+        requirementTitles.get(asset.requirementVersionId),
+        asset.parentId ? assetTitles.get(asset.parentId) : undefined,
+        asset.title,
+        asset.id,
+      ].some((value) => value?.toLocaleLowerCase().includes(keyword))
+    );
+  }
   const qualificationsByCase = new Map(
     qualifications.map((item) => [item.caseId, item]),
   );
@@ -495,9 +532,7 @@ export function ApiWorkbenchPage({
       (!versionId || asset.requirementVersionId === versionId) &&
       (!batchId || asset.setId === batchId) &&
       (!sceneId || asset.parentId === sceneId) &&
-      (!keyword ||
-        asset.title.toLocaleLowerCase().includes(keyword) ||
-        asset.id.includes(keyword)) &&
+      matchesDirectory(asset) &&
       (caseView !== 'pending' ||
         qualificationsByCase.get(asset.id)?.revisionId !== asset.revisionId),
   );
@@ -616,44 +651,62 @@ export function ApiWorkbenchPage({
           {recoveryStatus}
         </p>
       )}
-      <div className="asset-workspace live-asset-workspace api-workbench">
-        <aside className="asset-tree">
-          <div className="tree-head">接口回归 · 需求 / 场景 / 用例</div>
-          <div className="tree-search">
-            <ArchivedRequirementsToggle
-              checked={includeArchivedRequirements}
-              disabled={command.pending}
-              onChange={(value) =>
-                guard(() => {
-                  epoch.current += 1;
-                  setLoading(true);
-                  setIncludeArchivedRequirements(value);
-                }, true)
-              }
+      <div className="asset-workspace live-asset-workspace api-workbench requirement-directory-layout">
+        <RequirementDirectory
+          includeArchived={includeArchivedRequirements}
+          onIncludeArchivedChange={changeArchiveScope}
+          archiveDisabled={command.pending}
+          search={query}
+          onSearchChange={setQuery}
+          searchPlaceholder="搜索需求、场景或用例"
+        >
+          <button
+            type="button"
+            className={`tree-node requirement-directory-button${directoryVersion ? '' : ' active'}`}
+            aria-pressed={!directoryVersion}
+            onClick={() =>
+              guard(() => {
+                activate(null);
+                setDirectoryScope();
+              })
+            }
+          >
+            <RequirementDirectoryLabel
+              title="全部需求"
+              count={`${navigation.requirements.reduce(
+                (count, requirement) => count + requirement.caseCount,
+                0,
+              )} 条用例`}
             />
-          </div>
-          <div className="tree-search">
-            <Input
-              aria-label="搜索接口资产"
-              placeholder="搜索需求或用例"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              allowClear
-            />
-          </div>
+          </button>
           {loading && !assets.length ? (
             <Skeleton active />
           ) : (
             <Tree
               blockNode
-              expandedKeys={expandedKeys}
-              onExpand={(keys) => setExpandedKeys(keys.map(String))}
+              expandedKeys={
+                keyword
+                  ? [
+                      ...navigation.requirements.map(
+                        (item) => `requirement:${item.id}`,
+                      ),
+                      ...assets
+                        .filter((item) => item.targetType === 'scenario')
+                        .map((item) => `scenario:${item.id}`),
+                    ]
+                  : expandedKeys
+              }
+              onExpand={(keys) => {
+                if (!keyword) setExpandedKeys(keys.map(String));
+              }}
               selectedKeys={
-                active
+                directoryVersion && active
                   ? [`case:${active.id}`]
                   : sceneId
                     ? [`scenario:${sceneId}`]
-                    : []
+                    : directoryRequirement
+                      ? [`requirement:${directoryRequirement.id}`]
+                      : []
               }
               onSelect={([key]) => {
                 if (typeof key !== 'string') return;
@@ -664,15 +717,13 @@ export function ApiWorkbenchPage({
                   );
                   guard(() => {
                     activate(null);
-                    setVersionId(
+                    setDirectoryScope(
                       requirement
                         ? [...requirement.versions].sort(
                             (a, b) => b.versionNo - a.versionNo,
                           )[0]?.id
                         : undefined,
                     );
-                    setBatchId(undefined);
-                    setSceneId(undefined);
                   });
                 } else {
                   const asset = assets.find((item) => item.id === id);
@@ -688,64 +739,94 @@ export function ApiWorkbenchPage({
                     });
                 }
               }}
-              treeData={navigation.requirements.map((requirement) => ({
-                key: `requirement:${requirement.id}`,
-                title: (
-                  <span>
-                    {requirement.title}
-                    {requirement.archived ? '（已归档）' : ''}
-                    <span className="caption"> · {requirement.caseCount}</span>
-                  </span>
-                ),
-                children: assets
-                  .filter(
-                    (asset) =>
-                      asset.targetType === 'scenario' &&
-                      requirement.versions.some(
-                        (version) => version.id === asset.requirementVersionId,
-                      ),
-                  )
-                  .filter(
-                    (asset) =>
-                      !keyword ||
-                      `${requirement.title} ${asset.title}`
-                        .toLocaleLowerCase()
-                        .includes(keyword) ||
-                      assets.some(
-                        (child) =>
-                          child.parentId === asset.id &&
-                          child.title.toLocaleLowerCase().includes(keyword),
-                      ),
-                  )
-                  .map((scenario) => ({
-                    key: `scenario:${scenario.id}`,
-                    title: scenario.title,
-                    children: assets
-                      .filter(
-                        (asset) =>
-                          asset.targetType === 'case' &&
-                          asset.parentId === scenario.id &&
-                          (!keyword ||
-                            `${requirement.title} ${scenario.title} ${asset.title}`
-                              .toLocaleLowerCase()
-                              .includes(keyword)),
-                      )
-                      .map((asset) => ({
-                        key: `case:${asset.id}`,
-                        title: asset.title,
-                        isLeaf: true,
-                      })),
-                  })),
-              }))}
+              autoExpandParent={Boolean(keyword)}
+              treeData={navigation.requirements
+                .filter(
+                  (requirement) =>
+                    !keyword ||
+                    requirement.title.toLocaleLowerCase().includes(keyword) ||
+                    assets.some(
+                      (asset) =>
+                        asset.targetType !== 'set' &&
+                        matchesDirectory(asset) &&
+                        requirement.versions.some(
+                          (version) =>
+                            version.id === asset.requirementVersionId,
+                        ),
+                    ),
+                )
+                .map((requirement) => ({
+                  key: `requirement:${requirement.id}`,
+                  title: (
+                    <RequirementDirectoryLabel
+                      title={requirement.title}
+                      archived={requirement.archived}
+                      count={`${requirement.caseCount} 条用例`}
+                    />
+                  ),
+                  children: assets
+                    .filter(
+                      (asset) =>
+                        asset.targetType === 'scenario' &&
+                        requirement.versions.some(
+                          (version) =>
+                            version.id === asset.requirementVersionId,
+                        ),
+                    )
+                    .filter(
+                      (asset) =>
+                        matchesDirectory(asset) ||
+                        assets.some(
+                          (child) =>
+                            child.parentId === asset.id &&
+                            matchesDirectory(child),
+                        ),
+                    )
+                    .map((scenario) => ({
+                      key: `scenario:${scenario.id}`,
+                      title: scenario.title,
+                      children: assets
+                        .filter(
+                          (asset) =>
+                            asset.targetType === 'case' &&
+                            asset.parentId === scenario.id &&
+                            matchesDirectory(asset),
+                        )
+                        .map((asset) => ({
+                          key: `case:${asset.id}`,
+                          title: asset.title,
+                          isLeaf: true,
+                        })),
+                    })),
+                }))}
             />
           )}
-          <div className="api-scope-tools mt">
+        </RequirementDirectory>
+        <section className="asset-pane">
+          <div className="card pad mb">
+            <div className="context-head">
+              <div>
+                <h2>{directoryRequirement?.title ?? '全部需求'}</h2>
+                <p className="caption">
+                  {directoryVersion
+                    ? `需求版本 v${directoryVersion.versionNo}`
+                    : '当前项目 · 全部版本'}
+                </p>
+              </div>
+              <Button
+                size="small"
+                loading={loading}
+                onClick={() => void load()}
+              >
+                刷新目录
+              </Button>
+            </div>
             {tester && visibleVersion && !batchId && (
               <p className="caption" role="status">
                 新增场景前，请先创建或选择批次。下方“新建批次”可直接创建。
               </p>
             )}
-            <div className="context-controls api-scope-controls">
+            <div className="context-controls">
               <Select
                 aria-label="接口需求版本"
                 placeholder="选择明确需求版本"
@@ -753,9 +834,7 @@ export function ApiWorkbenchPage({
                 onChange={(id) =>
                   guard(() => {
                     activate(null);
-                    setVersionId(id);
-                    setBatchId(undefined);
-                    setSceneId(undefined);
+                    setDirectoryScope(id);
                   })
                 }
                 style={{ width: 220 }}
@@ -804,12 +883,7 @@ export function ApiWorkbenchPage({
                 </>
               )}
             </div>
-            <Button size="small" loading={loading} onClick={() => void load()}>
-              刷新目录
-            </Button>
           </div>
-        </aside>
-        <section className="asset-pane">
           {!loading && !error && active && !currentRequirement && (
             <Alert
               type="info"
@@ -863,8 +937,8 @@ export function ApiWorkbenchPage({
                   </div>
                 </div>
                 <div className="row wrap mt">
-                  <Tag
-                    color={
+                  <StatusTag
+                    tone={
                       activeQualification?.revisionId === active.revisionId
                         ? 'success'
                         : 'warning'
@@ -873,16 +947,16 @@ export function ApiWorkbenchPage({
                     {activeQualification?.revisionId === active.revisionId
                       ? '当前修订可回归'
                       : '当前修订待调试'}
-                  </Tag>
+                  </StatusTag>
                   <span className="caption">
                     编辑 r{active.revisionNo} · {draft.requests.length} 个请求
                   </span>
                   {dirty && <span className="badge amber">未保存</span>}
                   {activeQualification && (
-                    <Tag color="success">
+                    <StatusTag tone="success">
                       可回归 r{activeQualification.revisionNo}
                       {' · 调试通过'}
-                    </Tag>
+                    </StatusTag>
                   )}
                 </div>
               </div>
@@ -1136,11 +1210,12 @@ export function ApiWorkbenchPage({
                       title: '可回归修订',
                       render: (_, asset) => {
                         const available = qualificationsByCase.get(asset.id);
-                        if (!available) return <Tag>待调试</Tag>;
+                        if (!available)
+                          return <StatusTag tone="warning">待调试</StatusTag>;
                         return (
-                          <Tag color="success">
+                          <StatusTag tone="success">
                             r{available.revisionNo} · 调试通过
-                          </Tag>
+                          </StatusTag>
                         );
                       },
                     },

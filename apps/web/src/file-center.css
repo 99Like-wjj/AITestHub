@@ -44,21 +44,17 @@
   gap: 12px;
   overflow: hidden;
 }
-.file-center-toolbar {
+.file-center-actions {
   display: flex;
   gap: 8px;
   align-items: center;
+  justify-content: flex-end;
   flex-wrap: wrap;
 }
 .file-center-files {
   flex: 1;
   min-height: 0;
   overflow: auto;
-}
-.file-center-load-more {
-  display: flex;
-  justify-content: center;
-  padding: 20px;
 }
 .file-center-card-grid {
   display: grid;
@@ -103,9 +99,6 @@
 .file-center-card-meta {
   min-width: 0;
   row-gap: 6px;
-}
-.file-center-card-meta .ant-tag {
-  margin-inline-end: 0;
 }
 .file-center-card-description,
 .file-center-card-time {

@@ -67,8 +67,19 @@ import type { RetestTarget } from './retests';
 import { CommandDialog, useBusinessCommand } from './business-command';
 import { PageHeading } from './page-heading';
 import { AppIcon } from './app-icon';
-import { ArchivedRequirementsToggle } from './archived-requirements-toggle';
+import {
+  IssueStateTag,
+  IssueSeverityTag,
+  ProblemStateTag,
+} from './semantic-status';
+import { BeijingTime } from './beijing-time';
+import {
+  RequirementDirectory,
+  RequirementDirectoryLabel,
+} from './requirement-directory';
 import { useIssueCounts, useIssueReadScope } from './issues-counts';
+import { BulkActionBar } from './bulk-action-bar';
+import { ResultFilters, ResultListState } from './result-list';
 import './issues-readability.css';
 
 type Scope = 'participated' | 'mine' | 'all';
@@ -514,6 +525,51 @@ export function IssuesPage({
     aggregate.refresh();
     await Promise.allSettled([load(), refreshDetail.current()]);
   }
+
+  function clearResultFilters() {
+    setSearch('');
+    setState(null);
+    setSeverity(null);
+    setAssignee(null);
+    setSubmitter(null);
+    setIncludeMerged(true);
+    setProblemState('pendingConfirmation');
+  }
+  function emptyFeedback(
+    record: '问题' | '正式缺陷',
+    failure: string | undefined,
+  ) {
+    if (loading)
+      return (
+        <ResultListState state="loading" title={`正在读取${record}列表`} />
+      );
+    if (failure)
+      return (
+        <ResultListState
+          state="error"
+          title={`${record}列表读取失败`}
+          description={failure}
+          action={<Button onClick={() => void refresh()}>重新读取</Button>}
+        />
+      );
+    const filtered =
+      search.trim() ||
+      (problemTab(tab)
+        ? tab === 'triage' &&
+          problemState &&
+          problemState !== 'pendingConfirmation'
+        : state || severity || assignee || submitter || !includeMerged);
+    return filtered ? (
+      <ResultListState
+        state="no-match"
+        title={`没有符合条件的${record}`}
+        description="可调整条件，或清空结果筛选。"
+        action={<Button onClick={clearResultFilters}>清空结果筛选</Button>}
+      />
+    ) : (
+      <ResultListState state="empty" title={`当前范围暂无${record}`} />
+    );
+  }
   function updateUrl(selected: IssueSelection | null) {
     if (!project) return;
     const query = new URLSearchParams({ projectId: project.id, scope, tab });
@@ -631,89 +687,57 @@ export function IssuesPage({
         title="缺陷管理"
         description="按需求聚焦责任和处理状态，原始事实与最终结论分别保留。"
         actions={
-          <Button
-            type="primary"
-            icon={<AppIcon name="plus" />}
-            disabled={!canCreate}
-            onClick={() =>
-              setEditor({
-                session: crypto.randomUUID(),
-                kind: 'new',
-                ...(requirementId
-                  ? {
-                      requirementId,
-                      requirementVersionId:
-                        idSchema.safeParse(requirementVersion).data ?? null,
-                    }
-                  : {}),
-              })
-            }
-          >
-            新建缺陷
-          </Button>
+          <>
+            <Dropdown
+              menu={{
+                items: [
+                  { key: 'refresh', label: '刷新列表' },
+                  {
+                    key: 'finding',
+                    label: '上报其他待确认发现',
+                    disabled: !tester,
+                  },
+                  { key: 'retests', label: '固定复测范围与原回执' },
+                ],
+                onClick: ({ key }) => {
+                  if (key === 'refresh') {
+                    aggregate.refresh();
+                    void load();
+                  } else if (key === 'finding')
+                    setExtraFinding(crypto.randomUUID());
+                  else setHistoryOpen(true);
+                },
+              }}
+              trigger={['click']}
+            >
+              <Button
+                aria-label="问题与复测更多操作"
+                icon={<AppIcon name="more" />}
+              />
+            </Dropdown>
+            <Button
+              type="primary"
+              icon={<AppIcon name="plus" />}
+              disabled={!canCreate}
+              onClick={() =>
+                setEditor({
+                  session: crypto.randomUUID(),
+                  kind: 'new',
+                  ...(requirementId
+                    ? {
+                        requirementId,
+                        requirementVersionId:
+                          idSchema.safeParse(requirementVersion).data ?? null,
+                      }
+                    : {}),
+                })
+              }
+            >
+              新建缺陷
+            </Button>
+          </>
         }
       />
-      <div className="between mb wrap">
-        <div className="segmented">
-          {(
-            [
-              ['participated', '参与需求'],
-              ['mine', '我负责的'],
-              ['all', '全部缺陷'],
-            ] as const
-          ).map(([value, label]) => (
-            <button
-              type="button"
-              className={`tab ${scope === value ? 'active' : ''}`}
-              key={value}
-              aria-pressed={scope === value}
-              onClick={() => setScope(value)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <div className="row wrap">
-          <ArchivedRequirementsToggle
-            checked={includeArchivedRequirements}
-            onChange={(value) => {
-              epoch.current += 1;
-              setRequirementId(null);
-              setSelectedIssues([]);
-              setSelectedProblems([]);
-              setIncludeArchivedRequirements(value);
-            }}
-          />
-          <Dropdown
-            menu={{
-              items: [
-                { key: 'refresh', label: '刷新列表' },
-                {
-                  key: 'finding',
-                  label: '上报其他待确认发现',
-                  disabled: !tester,
-                },
-                { key: 'retests', label: '固定复测范围与原回执' },
-              ],
-              onClick: ({ key }) => {
-                if (key === 'refresh') {
-                  aggregate.refresh();
-                  void load();
-                } else if (key === 'finding')
-                  setExtraFinding(crypto.randomUUID());
-                else setHistoryOpen(true);
-              },
-            }}
-            trigger={['click']}
-          >
-            <Button
-              type="text"
-              aria-label="问题与复测更多操作"
-              icon={<AppIcon name="more" />}
-            />
-          </Dropdown>
-        </div>
-      </div>
       {context.error && (
         <Alert
           type="warning"
@@ -721,27 +745,36 @@ export function IssuesPage({
           showIcon
         />
       )}
-      <div className="issue-layout live-issue-layout">
-        <aside className="asset-tree">
-          <div className="tree-head">需求范围 · {project.name}</div>
-          <Input
-            allowClear
-            aria-label="查找需求"
-            placeholder="查找需求"
-            value={requirementSearch}
-            onChange={(event) => setRequirementSearch(event.target.value)}
-          />
-
+      <div className="issue-layout live-issue-layout requirement-directory-layout">
+        <RequirementDirectory
+          includeArchived={includeArchivedRequirements}
+          onIncludeArchivedChange={(value) => {
+            epoch.current += 1;
+            if (
+              !value &&
+              requirementId &&
+              requirementOf(requirementId)?.archived
+            ) {
+              setRequirementId(null);
+            }
+            setSelectedIssues([]);
+            setSelectedProblems([]);
+            setIncludeArchivedRequirements(value);
+          }}
+          search={requirementSearch}
+          onSearchChange={setRequirementSearch}
+          searchPlaceholder="搜索需求名称或 ID"
+        >
           <button
             type="button"
-            className={`tree-node ${!requirementId ? 'active' : ''}`}
+            className={`tree-node requirement-directory-button ${!requirementId ? 'active' : ''}`}
+            aria-pressed={!requirementId}
             onClick={() => setRequirementId(null)}
           >
-            <AppIcon name="folder-closed" />
-            <span className="grow">全部需求</span>
-            <span className="count">
-              {displayCount(aggregate.data?.totals.formal)}
-            </span>
+            <RequirementDirectoryLabel
+              title="全部需求"
+              count={`${displayCount(aggregate.data?.totals.formal)} 项缺陷`}
+            />
           </button>
           {context.requirements
             .filter((r) =>
@@ -755,61 +788,83 @@ export function IssuesPage({
               <button
                 type="button"
                 key={requirement.id}
-                className={`tree-node ${requirementId === requirement.id ? 'active' : ''}`}
+                className={`tree-node requirement-directory-button ${requirementId === requirement.id ? 'active' : ''}`}
+                aria-pressed={requirementId === requirement.id}
                 onClick={() => setRequirementId(requirement.id)}
               >
-                <span className="grow">
-                  {requirement.title}
-                  {requirement.archived ? '（已归档）' : ''}
-                  <br />
-                  <span className="caption">{requirement.id}</span>
-                </span>
-                <span className="count">
-                  {displayCount(counts.get(requirement.id)?.formal)}
-                </span>
+                <RequirementDirectoryLabel
+                  title={requirement.title}
+                  archived={requirement.archived}
+                  count={`${displayCount(counts.get(requirement.id)?.formal)} 项缺陷`}
+                />
               </button>
             ))}
           <div className="divider" />
           <p className="caption" style={{ padding: '0 10px' }}>
             导航数字按当前筛选汇总各需求的全部版本。
           </p>
-        </aside>
+        </RequirementDirectory>
         <section className="issue-pane">
           <div className="card">
             <div className="issue-summary">
-              <h2>
-                {requirementId
-                  ? (context.requirements.find(
-                      (requirement) => requirement.id === requirementId,
-                    )?.title ?? requirementId)
-                  : '全部需求'}
-              </h2>
-              <p className="caption">
-                {scope === 'participated'
-                  ? '本人参与的需求'
-                  : scope === 'mine'
-                    ? '当前负责人为本人'
-                    : '当前项目全部需求'}{' '}
-                · 需求目录汇总各版本，列表按选定版本展示
-              </p>
-              {requirementId && (
-                <Select
-                  aria-label="需求版本"
-                  placeholder="全部版本"
-                  allowClear
-                  value={requirementVersion || undefined}
-                  options={[
-                    ...(requirementOf(requirementId)?.versions ?? []).map(
-                      (v) => ({ value: v.id, label: 'v' + v.versionNo }),
-                    ),
-                    { value: 'unspecified', label: '未指定版本' },
-                  ]}
-                  onChange={(value: string | undefined) =>
-                    setRequirementVersion(value ?? '')
-                  }
-                  style={{ minWidth: 160 }}
-                />
-              )}
+              <div className="issue-directory-results-header">
+                <div>
+                  <h2>
+                    {requirementId
+                      ? (context.requirements.find(
+                          (requirement) => requirement.id === requirementId,
+                        )?.title ?? requirementId)
+                      : '全部需求'}
+                  </h2>
+                  <p className="caption">
+                    {scope === 'participated'
+                      ? '本人参与的需求'
+                      : scope === 'mine'
+                        ? '当前负责人为本人'
+                        : '当前项目全部需求'}{' '}
+                    · 需求目录汇总各版本，列表按选定版本展示
+                  </p>
+                </div>
+                <div className="row wrap issue-directory-results-controls">
+                  <div className="segmented" aria-label="责任范围">
+                    {(
+                      [
+                        ['participated', '参与需求'],
+                        ['mine', '我负责的'],
+                        ['all', '项目全部'],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <button
+                        type="button"
+                        className={`tab ${scope === value ? 'active' : ''}`}
+                        key={value}
+                        aria-pressed={scope === value}
+                        onClick={() => setScope(value)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  {requirementId && (
+                    <Select
+                      aria-label="需求版本"
+                      placeholder="全部版本"
+                      allowClear
+                      value={requirementVersion || undefined}
+                      options={[
+                        ...(requirementOf(requirementId)?.versions ?? []).map(
+                          (v) => ({ value: v.id, label: 'v' + v.versionNo }),
+                        ),
+                        { value: 'unspecified', label: '未指定版本' },
+                      ]}
+                      onChange={(value: string | undefined) =>
+                        setRequirementVersion(value ?? '')
+                      }
+                      style={{ minWidth: 160 }}
+                    />
+                  )}
+                </div>
+              </div>
               <div className="stats three">
                 {[
                   ['正式缺陷', displayCount(selectedCounts?.formal)],
@@ -874,38 +929,24 @@ export function IssuesPage({
                   { key: 'triage', label: '分诊记录' },
                 ]}
               />
-              <div className="issue-query-row row">
-                <label className="issue-search-field">
-                  <span>搜索问题或缺陷</span>
-                  <Input
-                    aria-label="搜索问题或缺陷"
-                    value={search}
-                    maxLength={200}
-                    placeholder="输入编号、标题或描述"
-                    onChange={(event) => setSearch(event.target.value)}
-                    onCompositionStart={() => setComposing(true)}
-                    onCompositionEnd={() => setComposing(false)}
-                  />
-                </label>
-                <Button
-                  onClick={() => {
-                    setSearch('');
-                    setState(null);
-                    setSeverity(null);
-                    setAssignee(null);
-                    setSubmitter(null);
-                    setRequirementId(null);
-                    setIncludeMerged(true);
-                    setProblemState('pendingConfirmation');
-                  }}
-                >
-                  清空条件
-                </Button>
-              </div>
-              <Space wrap className="issue-filter-controls">
+
+              <ResultFilters
+                search={{
+                  label: '搜索问题或缺陷',
+                  placeholder: '输入编号、标题或描述',
+                  value: search,
+                  onChange: setSearch,
+                  onCompositionChange: setComposing,
+                }}
+                onReset={clearResultFilters}
+                summary={
+                  loading
+                    ? '正在读取'
+                    : `已读入 ${problemTab(tab) ? problems.length : issues.length} 条`
+                }
+              >
                 <Select
                   aria-label="正式状态筛选"
-                  style={{ minWidth: 140 }}
                   value={state}
                   allowClear
                   disabled={problemTab(tab) || tab === 'retest'}
@@ -920,7 +961,6 @@ export function IssuesPage({
                 />
                 <Select
                   aria-label="负责人筛选"
-                  style={{ minWidth: 180 }}
                   value={assignee}
                   allowClear
                   disabled={problemTab(tab)}
@@ -934,7 +974,6 @@ export function IssuesPage({
                 />
                 <Select
                   aria-label="严重程度筛选"
-                  style={{ minWidth: 120 }}
                   value={severity}
                   allowClear
                   disabled={problemTab(tab)}
@@ -949,7 +988,6 @@ export function IssuesPage({
                 />
                 <Select
                   aria-label="提交人筛选"
-                  style={{ minWidth: 180 }}
                   value={submitter}
                   allowClear
                   disabled={problemTab(tab)}
@@ -961,26 +999,26 @@ export function IssuesPage({
                     setSubmitter(value ?? null)
                   }
                 />
-              </Space>
+                {tab === 'triage' && (
+                  <Select
+                    aria-label="问题决定筛选"
+                    value={problemState}
+                    allowClear
+                    style={{ width: 260 }}
+                    options={problemStateSchema.options
+                      .filter((value) => value !== 'pendingConfirmation')
+                      .map((value) => ({
+                        value,
+                        label: problemStateLabels[value],
+                      }))}
+                    onChange={(value: Problem['state'] | undefined) =>
+                      setProblemState(value ?? null)
+                    }
+                  />
+                )}
+              </ResultFilters>
               {problemTab(tab) ? (
                 <>
-                  {tab === 'triage' && (
-                    <Select
-                      aria-label="问题决定筛选"
-                      value={problemState}
-                      allowClear
-                      style={{ width: 260 }}
-                      options={problemStateSchema.options
-                        .filter((value) => value !== 'pendingConfirmation')
-                        .map((value) => ({
-                          value,
-                          label: problemStateLabels[value],
-                        }))}
-                      onChange={(value: Problem['state'] | undefined) =>
-                        setProblemState(value ?? null)
-                      }
-                    />
-                  )}
                   {scope === 'mine' && (
                     <Alert
                       type="info"
@@ -988,14 +1026,12 @@ export function IssuesPage({
                       showIcon
                     />
                   )}
-                  {problemError && (
-                    <Alert type="error" title={problemError} showIcon />
-                  )}
-                  <Space wrap>
-                    <Typography.Text>
-                      当前已加载问题记录 {problems.length}{' '}
-                      条，独立于正式缺陷数。
-                    </Typography.Text>
+
+                  <BulkActionBar
+                    selected={chosenProblems.length}
+                    onClear={() => setSelectedProblems([])}
+                    scope="只处理本次明确选择的问题"
+                  >
                     <Button
                       disabled={!tester || !chosenProblems.length}
                       onClick={() =>
@@ -1005,14 +1041,21 @@ export function IssuesPage({
                         })
                       }
                     >
-                      批量精确确认所选 {chosenProblems.length} 项
+                      批量确认精确预览
                     </Button>
-                  </Space>
+                  </BulkActionBar>
                   <Table
                     rowKey="id"
-                    loading={loading}
+
+                    loading={loading && problems.length > 0}
                     dataSource={groupedProblems}
-                    pagination={{ pageSize: 15 }}
+                    pagination={{
+                      className: 'result-table-pagination',
+                      pageSize: 15,
+                      size: 'small',
+                      showTotal: (total, range) =>
+                        `第 ${range[0]}–${range[1]} 条 · 共 ${total} 条`,
+                    }}
                     scroll={{ x: 740 }}
                     rowSelection={{
                       selectedRowKeys: selectedProblems,
@@ -1021,11 +1064,7 @@ export function IssuesPage({
                         disabled: row.state === 'confirmed',
                       }),
                     }}
-                    locale={{
-                      emptyText: problemError
-                        ? '问题列表尚未取得。'
-                        : '当前职责/条件无可读问题记录。',
-                    }}
+                    locale={{ emptyText: emptyFeedback('问题', problemError) }}
                     columns={[
                       {
                         title: '问题',
@@ -1046,12 +1085,15 @@ export function IssuesPage({
                       },
                       {
                         title: '决定',
-                        render: (_, row) => problemStateLabels[row.state],
+                        render: (_, row) => (
+                          <ProblemStateTag state={row.state} />
+                        ),
                       },
                       {
                         title: '建议严重程度',
-                        render: (_, row) =>
-                          severityLabels[row.suggestedSeverity],
+                        render: (_, row) => (
+                          <IssueSeverityTag severity={row.suggestedSeverity} />
+                        ),
                       },
                       {
                         title: '真实来源',
@@ -1081,9 +1123,6 @@ export function IssuesPage({
                 </>
               ) : (
                 <>
-                  {issueError && (
-                    <Alert type="error" title={issueError} showIcon />
-                  )}
                   {scope === 'mine' && tab === 'unassigned' && (
                     <Alert
                       type="info"
@@ -1091,88 +1130,93 @@ export function IssuesPage({
                       showIcon
                     />
                   )}
-                  <Space wrap>
-                    <Checkbox
-                      checked={includeMerged}
-                      onChange={(event) =>
-                        setIncludeMerged(event.target.checked)
+
+                  <BulkActionBar
+                    selected={chosenIssues.length}
+                    onClear={() => setSelectedIssues([])}
+                    scope="只处理本次明确选择的正式缺陷"
+                    selectionActions={
+                      <Checkbox
+                        checked={includeMerged}
+                        onChange={(event) =>
+                          setIncludeMerged(event.target.checked)
+                        }
+                      >
+                        包含合并关系中的保留原记录
+                      </Checkbox>
+                    }
+                  >
+                    <Button
+                      disabled={!tester || !chosenIssues.length}
+                      onClick={() =>
+                        setLifecycle({
+                          session: crypto.randomUUID(),
+                          action: 'close',
+                          issues: chosenIssues,
+                        })
                       }
                     >
-                      包含合并关系中的保留原记录
-                    </Checkbox>
-                    <Typography.Text>
-                      已明确选择 {chosenIssues.length} 条当前正式记录。
-                    </Typography.Text>
-                    {!!chosenIssues.length && (
-                      <>
-                        <Button
-                          disabled={!tester || !chosenIssues.length}
-                          onClick={() =>
-                            setLifecycle({
-                              session: crypto.randomUUID(),
-                              action: 'close',
-                              issues: chosenIssues,
-                            })
-                          }
-                        >
-                          批量关闭精确预览
-                        </Button>
-                        <Button
-                          disabled={!tester || !chosenIssues.length}
-                          onClick={() =>
-                            setLifecycle({
-                              session: crypto.randomUUID(),
-                              action: 'reopen',
-                              issues: chosenIssues,
-                            })
-                          }
-                        >
-                          批量重开精确预览
-                        </Button>
-                        <Button
-                          disabled={!tester || !chosenIssues.length}
-                          onClick={() =>
-                            setRetest({
-                              session: crypto.randomUUID(),
-                              issues: chosenIssues,
-                            })
-                          }
-                        >
-                          直接准备所选复测
-                        </Button>
-                        <Button
-                          disabled={
-                            !tester ||
-                            chosenIssues.length < 2 ||
-                            chosenIssues.some((issue) => issue.mergedIntoId)
-                          }
-                          onClick={() =>
-                            setMerge({
-                              session: crypto.randomUUID(),
-                              kind: 'merge',
-                              issues: chosenIssues,
-                            })
-                          }
-                        >
-                          人工合并主从范围
-                        </Button>
-                      </>
-                    )}
-                  </Space>
+                      批量关闭精确预览
+                    </Button>
+                    <Button
+                      disabled={!tester || !chosenIssues.length}
+                      onClick={() =>
+                        setLifecycle({
+                          session: crypto.randomUUID(),
+                          action: 'reopen',
+                          issues: chosenIssues,
+                        })
+                      }
+                    >
+                      批量重开精确预览
+                    </Button>
+                    <Button
+                      disabled={!tester || !chosenIssues.length}
+                      onClick={() =>
+                        setRetest({
+                          session: crypto.randomUUID(),
+                          issues: chosenIssues,
+                        })
+                      }
+                    >
+                      直接准备所选复测
+                    </Button>
+                    <Button
+                      disabled={
+                        !tester ||
+                        chosenIssues.length < 2 ||
+                        chosenIssues.some((issue) => issue.mergedIntoId)
+                      }
+                      onClick={() =>
+                        setMerge({
+                          session: crypto.randomUUID(),
+                          kind: 'merge',
+                          issues: chosenIssues,
+                        })
+                      }
+                    >
+                      人工合并主从范围
+                    </Button>
+                  </BulkActionBar>
                   <Table
                     rowKey="id"
-                    loading={loading}
+
+                    loading={loading && issues.length > 0}
                     dataSource={groupedIssues}
-                    pagination={{ pageSize: 15 }}
+                    pagination={{
+                      className: 'result-table-pagination',
+                      pageSize: 15,
+                      size: 'small',
+                      showTotal: (total, range) =>
+                        `第 ${range[0]}–${range[1]} 条 · 共 ${total} 条`,
+                    }}
                     scroll={{ x: 760 }}
                     rowSelection={{
                       selectedRowKeys: selectedIssues,
                       onChange: (keys) => setSelectedIssues(keys.map(String)),
                     }}
                     locale={{
-                      emptyText: issueError
-                        ? '正式缺陷列表尚未取得。'
-                        : '当前职责/条件没有正式缺陷记录。',
+                      emptyText: emptyFeedback('正式缺陷', issueError),
                     }}
                     columns={[
                       {
@@ -1199,9 +1243,7 @@ export function IssuesPage({
                               {' · '}
                               {versionLabel(row)}
                             </div>
-                            <span className="badge">
-                              {severityLabels[row.severity]}
-                            </span>
+                            <IssueSeverityTag severity={row.severity} />
                             {row.mergedIntoId && (
                               <span className="badge">保留合并从项</span>
                             )}
@@ -1211,13 +1253,7 @@ export function IssuesPage({
                       {
                         title: '状态',
                         width: 110,
-                        render: (_, row) => (
-                          <span
-                            className={`badge ${row.state === 'pending' ? 'amber' : row.state === 'inProgress' || row.state === 'awaitingRetest' ? 'blue' : ''}`}
-                          >
-                            {issueStateLabels[row.state]}
-                          </span>
-                        ),
+                        render: (_, row) => <IssueStateTag state={row.state} />,
                       },
                       {
                         title: '负责人 / 最近来源',
@@ -1234,12 +1270,27 @@ export function IssuesPage({
                                 发现来源：{issueSourceLabels[row.source]}
                               </div>
                               <div className="sub">
-                                {row.latestHandling
-                                  ? `最近处理人：${name(row.latestHandling.actorId)} · ${new Date(row.latestHandling.createdAt).toLocaleString('zh-CN')}`
-                                  : '尚无责任变更'}
+                                {row.latestHandling ? (
+                                  <>
+                                    最近处理人：
+                                    {name(row.latestHandling.actorId)} ·{' '}
+                                    <BeijingTime
+                                      value={row.latestHandling.createdAt}
+                                    />
+                                  </>
+                                ) : (
+                                  '尚无责任变更'
+                                )}
                               </div>
                             </details>
                           </div>
+                        ),
+                      },
+                      {
+                        title: '更新时间',
+                        width: 112,
+                        render: (_, row) => (
+                          <BeijingTime value={row.updatedAt} />
                         ),
                       },
                       {

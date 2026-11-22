@@ -1,0 +1,34 @@
+.bulk-action-bar:empty {
+  display: none;
+}
+
+.bulk-action-bar {
+  margin-block: 8px;
+}
+
+.bulk-action-choices,
+.bulk-action-selection {
+  gap: 6px 10px;
+}
+
+.bulk-action-selection {
+  padding: 8px 12px;
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.bulk-action-choices + .bulk-action-selection {
+  margin-top: 8px;
+}
+
+.bulk-action-count {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--accent);
+}
+
+.bulk-action-buttons {
+  margin-inline-start: auto;
+  gap: 6px;
+}

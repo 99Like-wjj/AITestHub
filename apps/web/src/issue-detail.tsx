@@ -5,7 +5,6 @@ import {
   Button,
   Card,
   Collapse,
-  Drawer,
   Select,
   Skeleton,
   Space,
@@ -25,13 +24,14 @@ import type {
   ReportProblemReviewScope,
 } from '../../../packages/contracts/src/issues';
 import { api, describeError } from './api';
+import { useRequirementMetadata, issueSourceLabels } from './issue-context';
 import {
-  issueStateLabels,
-  problemStateLabels,
-  severityLabels,
-  useRequirementMetadata,
-  issueSourceLabels,
-} from './issue-context';
+  IssueStateTag,
+  IssueSeverityTag,
+  ProblemStateTag,
+} from './semantic-status';
+import { BeijingTime } from './beijing-time';
+import { DetailDrawer } from './detail-drawer';
 import type { IssueMember, IssueNavigation } from './issue-context';
 import type { ActionTarget, EditorTarget, HandlingAction } from './issue-forms';
 import type { MergeTarget } from './issue-batch';
@@ -95,7 +95,7 @@ function HumanReviewEvidence({
           title={describeActor(entry.actorId)}
           extra={
             <Typography.Text type="secondary">
-              {new Date(entry.createdAt).toLocaleString('zh-CN')}
+              <BeijingTime value={entry.createdAt} detail />
             </Typography.Text>
           }
         >
@@ -489,88 +489,69 @@ export function IssueDetailPanel({
     base?.requirementId ?? null,
     requirements,
   );
+  const version = requirementMetadata.requirement?.versions.find(
+    (entry) => entry.id === base?.requirementVersionId,
+  );
   return (
-    <Drawer
+    <DetailDrawer
       open={selection !== null}
-      title={
-        base
-          ? activeIssue
-            ? `缺陷详情 · ${activeIssue.number}`
-            : `待确认问题 · ${base.id.slice(0, 8)}`
-          : '问题/缺陷详情'
+      title={base?.title ?? '问题/缺陷详情'}
+      meta={
+        base && (
+          <>
+            {activeIssue
+              ? `缺陷详情 · ${activeIssue.number}`
+              : `待确认问题 · ${base.id.slice(0, 8)}`}{' '}
+            ·{' '}
+            <span title={base.requirementId}>
+              {requirementMetadata.requirement?.title ??
+                (requirementMetadata.loading
+                  ? '正在读取需求名称…'
+                  : '需求名称暂不可用')}
+            </span>{' '}
+            ·{' '}
+            {base.requirementVersionId
+              ? version
+                ? `v${version.versionNo}`
+                : requirementMetadata.loading
+                  ? '正在读取版本…'
+                  : '需求版本资料暂不可用'
+              : '未指定需求版本'}{' '}
+            · {issueSourceLabels[base.source]}
+          </>
+        )
       }
-      width="min(1180px, 100vw)"
-      className="issue-detail-drawer"
-      footer={
-        <div className="row" style={{ justifyContent: 'flex-end' }}>
-          <Button onClick={onClose}>关闭</Button>
-        </div>
+      wide
+      extra={
+        <Button
+          size="small"
+          onClick={() => {
+            requirementMetadata.refresh();
+            void load();
+          }}
+          loading={loading}
+        >
+          刷新
+        </Button>
       }
       onClose={onClose}
-      destroyOnHidden
     >
       {loading && <Skeleton active />}
       {error && <Alert type="error" title={error} showIcon />}
       <div className="issue-detail-content">
-        <div className="between">
-          <h2>{base?.title ?? (loading ? '正在读取…' : '尚未取得对象')}</h2>
-          <Button
-            size="small"
-            onClick={() => {
-              requirementMetadata.refresh();
-              void load();
-            }}
-            loading={loading}
-          >
-            刷新
-          </Button>
-        </div>
-        {base && (
-          <>
-            <p className="caption mt">
-              <span title={base.requirementId}>
-                {requirementMetadata.requirement?.title ??
-                  (requirementMetadata.loading
-                    ? '正在读取需求名称…'
-                    : '需求名称暂不可用')}
-              </span>{' '}
-              ·{' '}
-              {base.requirementVersionId
-                ? (() => {
-                    const version =
-                      requirementMetadata.requirement?.versions.find(
-                        (version) => version.id === base.requirementVersionId,
-                      );
-                    return version
-                      ? `v${version.versionNo}`
-                      : requirementMetadata.loading
-                        ? '正在读取版本…'
-                        : '需求版本资料暂不可用';
-                  })()
-                : '未指定需求版本'}{' '}
-              · {issueSourceLabels[base.source]}
-            </p>
-            {requirementMetadata.error && (
-              <Alert
-                type="warning"
-                showIcon
-                title="需求/版本名称暂未取得"
-                description={requirementMetadata.error}
-              />
-            )}
-          </>
+        {base && requirementMetadata.error && (
+          <Alert
+            type="warning"
+            showIcon
+            title="需求/版本名称暂未取得"
+            description={requirementMetadata.error}
+          />
         )}
         {issue && activeIssue && (
           <>
             <div className="row wrap mt">
-              <span
-                className={`badge ${activeIssue.state === 'pending' ? 'amber' : activeIssue.state === 'inProgress' || activeIssue.state === 'awaitingRetest' ? 'blue' : ''}`}
-              >
-                {issueStateLabels[activeIssue.state]}
-              </span>
-              <span className="badge">
-                {severityLabels[activeIssue.severity]}
-              </span>
+              <IssueStateTag state={activeIssue.state} />
+              <IssueSeverityTag severity={activeIssue.severity} />
               <span className="badge">
                 负责人：{userName(activeIssue.assigneeId)}
               </span>
@@ -779,8 +760,8 @@ export function IssueDetailPanel({
                     </span>
                     <p>
                       {userName(verification.actorId)} ·{' '}
-                      {new Date(verification.createdAt).toLocaleString('zh-CN')}{' '}
-                      · {verification.note || '无补充说明'}
+                      <BeijingTime value={verification.createdAt} detail /> ·{' '}
+                      {verification.note || '无补充说明'}
                     </p>
                     {verification.executionProvenance ===
                       'protocol-synthetic' && (
@@ -840,7 +821,7 @@ export function IssueDetailPanel({
               {issue.events.map((event) => (
                 <div className="assign-event" key={event.id}>
                   <small>
-                    {new Date(event.createdAt).toLocaleString('zh-CN')}
+                    <BeijingTime value={event.createdAt} detail />
                   </small>
                   <p>
                     <b>{userName(event.actorId)}</b> ·{' '}
@@ -957,9 +938,9 @@ export function IssueDetailPanel({
         {problem && (
           <>
             <Space wrap size={10} className="row wrap mt">
-              <Tag>{problemStateLabels[problem.problem.state]}</Tag>
+              <ProblemStateTag state={problem.problem.state} />
               <Tag>{problem.problem.source}</Tag>
-              <Tag>{severityLabels[problem.problem.suggestedSeverity]}</Tag>
+              <IssueSeverityTag severity={problem.problem.suggestedSeverity} />
               <Tag>
                 {problem.problem.sourceExecutionProvenance ===
                 'protocol-synthetic'
@@ -1157,6 +1138,6 @@ export function IssueDetailPanel({
           </details>
         )}
       </div>
-    </Drawer>
+    </DetailDrawer>
   );
 }

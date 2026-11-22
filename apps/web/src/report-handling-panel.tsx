@@ -1,11 +1,12 @@
 import { Button, Space, Table } from 'antd';
 import type { ReportHandling } from '../../../packages/contracts/src/report-handling';
 import {
-  issueStateLabels,
-  problemStateLabels,
-  severityLabels,
-} from './issue-context';
-import { outcomeLabels } from './result-detail';
+  IssueStateTag,
+  IssueSeverityTag,
+  ProblemStateTag,
+} from './semantic-status';
+import { ResultOutcomeTag } from './result-steps';
+import { BeijingTime } from './beijing-time';
 
 export function ReportHandlingPanel({
   projectId,
@@ -21,7 +22,6 @@ export function ReportHandlingPanel({
   const open = (kind: 'issue' | 'problem', id: string) => {
     window.location.hash = `issues?projectId=${encodeURIComponent(projectId)}&${kind === 'issue' ? 'issueId' : 'problemId'}=${encodeURIComponent(id)}`;
   };
-  const time = (value: string) => new Date(value).toLocaleString('zh-CN');
   return (
     <section className="card pad report-handling-panel">
       <div className="between">
@@ -29,8 +29,8 @@ export function ReportHandlingPanel({
         <span className="badge">业务处理</span>
       </div>
       <p className="caption">
-        测试事实截取于 {time(factsCapturedAt)}；本区处理信息截至{' '}
-        {time(handling.capturedAt)}
+        测试事实截取于 <BeijingTime value={factsCapturedAt} detail />
+        ；本区处理信息截至 <BeijingTime value={handling.capturedAt} detail />
         。处理状态、合并关系和最新复测不改写原始判断、人工最终结论或结果统计；复测通过不自动关闭。
       </p>
       <div className="row wrap mt">
@@ -69,7 +69,7 @@ export function ReportHandlingPanel({
           },
           {
             title: '人工决定',
-            render: (_, row) => problemStateLabels[row.state],
+            render: (_, row) => <ProblemStateTag state={row.state} />,
           },
           {
             title: '关联正式缺陷',
@@ -109,7 +109,7 @@ export function ReportHandlingPanel({
                   {row.number} · {row.title}
                 </Button>
                 <p className="caption">
-                  {severityLabels[row.severity]}
+                  <IssueSeverityTag severity={row.severity} />
                   {row.mergedIntoId ? ' · 合并从项，原记录保留' : ''}
                 </p>
               </div>
@@ -117,13 +117,7 @@ export function ReportHandlingPanel({
           },
           {
             title: '处理状态',
-            render: (_, row) => (
-              <span
-                className={`badge ${row.state === 'pending' ? 'amber' : row.state === 'inProgress' || row.state === 'awaitingRetest' ? 'blue' : ''}`}
-              >
-                {issueStateLabels[row.state]}
-              </span>
-            ),
+            render: (_, row) => <IssueStateTag state={row.state} />,
           },
           {
             title: '负责人',
@@ -138,13 +132,16 @@ export function ReportHandlingPanel({
               row.latestVerification ? (
                 <div>
                   <span>
-                    {outcomeLabels[row.latestVerification.outcome]} ·{' '}
+                    <ResultOutcomeTag
+                      outcome={row.latestVerification.outcome}
+                    />{' '}
+                    ·{' '}
                     {row.latestVerification.method === 'manual'
                       ? '人工'
                       : row.latestVerification.method}
                   </span>
                   <p className="caption">
-                    {time(row.latestVerification.createdAt)}
+                    <BeijingTime value={row.latestVerification.createdAt} />
                   </p>
                 </div>
               ) : (

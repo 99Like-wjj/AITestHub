@@ -1,0 +1,114 @@
+:is(.asset-workspace, .issue-layout).requirement-directory-layout {
+  grid-template-columns: 246px minmax(0, 1fr);
+  gap: 15px;
+  align-items: start;
+}
+
+.requirement-directory-layout > .requirement-directory.asset-tree {
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  padding: 0;
+  margin: 0;
+  min-height: 0;
+  height: auto;
+  max-height: min(560px, calc(100vh - 140px));
+  overflow: hidden;
+}
+
+.requirement-directory-header {
+  flex: none;
+  padding: 11px 12px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.requirement-directory-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+
+.requirement-directory-heading h2 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 22px;
+}
+
+.requirement-directory-heading .archived-requirements-toggle {
+  font-size: 11px;
+}
+
+.requirement-directory-header .ant-input-affix-wrapper {
+  font-size: 12px;
+  min-height: 32px;
+}
+
+.requirement-directory-content {
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 7px 7px;
+}
+
+.requirement-directory-label {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+}
+
+.requirement-directory-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.requirement-directory-count,
+.requirement-directory-detail {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.requirement-directory-count {
+  flex: none;
+}
+
+.requirement-directory-detail {
+  display: block;
+  margin-top: 2px;
+}
+
+.requirement-directory-archived {
+  display: inline-block;
+  margin-inline-start: 5px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.requirement-directory .ant-tree .ant-tree-title {
+  display: block;
+  width: 100%;
+}
+
+.requirement-directory .tree-node.requirement-directory-button {
+  padding: 7px 8px 7px 23px;
+}
+
+@media (max-width: 700px) {
+  :is(.asset-workspace, .issue-layout).requirement-directory-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .requirement-directory-layout > .requirement-directory.asset-tree {
+    position: static;
+    max-height: 230px;
+  }
+}

@@ -1,5 +1,10 @@
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import {
+  markNotificationGroupsReadReceiptSchema,
+  markNotificationGroupsReadSchema,
+  notificationGroupItemsQuerySchema,
+  notificationGroupItemsSchema,
+  notificationKindSchema,
   notificationListQuerySchema,
   notificationListSchema,
   markNotificationsReadSchema,
@@ -11,6 +16,11 @@ import type {
 import { currentUser } from '../access/policy.js';
 import { DomainError } from '../errors.js';
 import { idSchema } from '../../../contracts/src/base.js';
+import {
+  canReadNotification,
+  groupWatermark,
+  notificationView,
+} from './queries.js';
 interface EventRow {
   id: string;
   event_type: string;
@@ -26,16 +36,84 @@ interface Delivery {
     | 'reportReady'
     | 'scheduleCompleted'
     | 'issueNotDefect'
-    | 'uploadInterrupted';
+    | 'uploadInterrupted'
+    | 'issueAssigned'
+    | 'issueRetest'
+    | 'issueReturned';
   objectId: string;
   title: string;
   path: string;
   recipients: string[];
 }
-const canRead = `n.recipient_id=$1 AND EXISTS(SELECT 1 FROM app.users u WHERE u.id=$1 AND u.active)
- AND (n.project_id IS NULL OR EXISTS(SELECT 1 FROM app.project_members m JOIN app.projects p ON p.id=m.project_id
-  WHERE m.project_id=n.project_id AND m.user_id=$1 AND m.active AND p.active AND
-   (n.kind='uploadInterrupted' OR (n.kind='issueNotDefect' AND 'developer'=ANY(m.roles)) OR (n.kind NOT IN ('issueNotDefect','uploadInterrupted') AND 'tester'=ANY(m.roles)))))`;
+type RecipientRole = 'tester' | 'developer' | 'member' | 'issueHandler';
+
+interface NoticeRow {
+  id: string;
+  project_id: string | null;
+  kind: string;
+  object_id: string;
+  title: string;
+  target_path: string;
+  read_at: Date | string | null;
+  created_at: Date | string;
+  asset_kind: 'UI' | 'API' | null;
+  asset_title: string | null;
+  asset_revision_id: string | null;
+  asset_revision_no: number | null;
+  issue_number: string | null;
+  issue_title: string | null;
+  run_state: string | null;
+  lane: 'attention' | 'activity';
+}
+
+interface GroupRow extends NoticeRow {
+  project_name: string | null;
+  requirement_id: string | null;
+  requirement_title: string | null;
+  requirement_version_no: number | null;
+  group_key: string;
+  group_unread: string;
+  group_total: string;
+  read_through: string;
+  preview: NoticeRow[];
+  unread_groups: string;
+}
+
+function notification(row: NoticeRow) {
+  let title = row.title;
+  let path = row.target_path;
+  if (row.kind === 'assetReview') {
+    const asset =
+      row.asset_title ?? (row.asset_kind === 'API' ? '接口用例' : 'UI 用例');
+    const revision =
+      row.asset_revision_no === null ? '' : ` · r${row.asset_revision_no}`;
+    title = `${asset}${revision} · ${row.lane === 'attention' ? '待评审' : '用例变更'}`;
+    if (path.startsWith('/#cases?')) {
+      const query = new URLSearchParams(path.split('?')[1]);
+      query.set('assetId', row.object_id);
+      if (row.asset_revision_id)
+        query.set('assetRevisionId', row.asset_revision_id);
+      path = `/#cases?${query}`;
+    }
+  }
+  if (row.issue_title)
+    title = `${row.issue_number ?? '缺陷'} · ${row.issue_title} · ${row.title}`;
+  if (row.kind === 'reportReady' && row.lane === 'attention')
+    title =
+      row.run_state === 'interrupted' || row.run_state === 'recoveryRequired'
+        ? '执行需要核对恢复'
+        : '执行报告交付未完整';
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    kind: notificationKindSchema.parse(row.kind),
+    objectId: row.object_id,
+    title,
+    targetPath: path,
+    readAt: row.read_at ? new Date(row.read_at).toISOString() : null,
+    createdAt: new Date(row.created_at).toISOString(),
+  };
+}
 export class NotificationService {
   private timer: ReturnType<typeof setInterval> | undefined;
   private busy = false;
@@ -65,8 +143,7 @@ export class NotificationService {
     tx: SqlExecutor,
     event: EventRow,
     userId: string,
-    developer = false,
-    memberOnly = false,
+    role: RecipientRole = 'tester',
   ) {
     if (!event.project_id)
       return Boolean(
@@ -80,15 +157,73 @@ export class NotificationService {
       (
         await tx.query(
           `SELECT 1 FROM app.project_members m JOIN app.users u ON u.id=m.user_id JOIN app.projects p ON p.id=m.project_id
-   WHERE m.project_id=$1 AND m.user_id=$2 AND m.active AND u.active AND p.active AND ($3='member' OR $3=ANY(m.roles))`,
-          [
-            event.project_id,
-            userId,
-            memberOnly ? 'member' : developer ? 'developer' : 'tester',
-          ],
+   WHERE m.project_id=$1 AND m.user_id=$2 AND m.active AND u.active AND p.active AND (
+     $3='member' OR $3=ANY(m.roles) OR ($3='issueHandler' AND m.roles && ARRAY['tester','developer']::text[])
+   )`,
+          [event.project_id, userId, role],
         )
       ).rowCount,
     );
+  }
+  private async issueDelivery(
+    tx: SqlExecutor,
+    event: EventRow,
+    projectId: string,
+    issueId: string,
+  ): Promise<Delivery | null> {
+    if (event.payload.notificationResponsibilityChanged !== true) return null;
+    const { previousOwner, newOwner, previousState, newState, outcome } =
+      event.payload;
+    const assignee = idSchema.safeParse(newOwner);
+    if (
+      (event.event_type === 'issue.created' ||
+        event.event_type === 'issue.assign' ||
+        event.event_type === 'issue.transfer') &&
+      assignee.success &&
+      assignee.data !== previousOwner &&
+      assignee.data !== event.actor_id
+    )
+      return {
+        kind: 'issueAssigned',
+        objectId: issueId,
+        title: '已指派给你',
+        path: `/#issues?projectId=${projectId}&issueId=${issueId}`,
+        recipients: [assignee.data],
+      };
+    if (
+      event.event_type === 'issue.manual-verification' &&
+      previousState === 'awaitingRetest' &&
+      outcome === 'failed' &&
+      newState === 'inProgress' &&
+      assignee.success &&
+      assignee.data !== event.actor_id
+    )
+      return {
+        kind: 'issueReturned',
+        objectId: issueId,
+        title: '复测未通过，已退回处理',
+        path: `/#issues?projectId=${projectId}&issueId=${issueId}`,
+        recipients: [assignee.data],
+      };
+    if (
+      event.event_type !== 'issue.ready-for-retest' ||
+      newState !== 'awaitingRetest'
+    )
+      return null;
+    const submitter = (
+      await tx.query<{ submitted_by: string }>(
+        'SELECT submitted_by FROM app.issues WHERE project_id=$1 AND id=$2',
+        [projectId, issueId],
+      )
+    ).rows[0]?.submitted_by;
+    if (!submitter || submitter === event.actor_id) return null;
+    return {
+      kind: 'issueRetest',
+      objectId: issueId,
+      title: '待你复测',
+      path: `/#issues?projectId=${projectId}&scope=all&tab=retest&issueId=${issueId}`,
+      recipients: [submitter],
+    };
   }
   private async delivery(
     tx: SqlExecutor,
@@ -230,6 +365,10 @@ export class NotificationService {
         recipients: users,
       };
     }
+    if (p && event.event_type.startsWith('issue.')) {
+      const notice = await this.issueDelivery(tx, event, p, id);
+      if (notice) return notice;
+    }
     if (event.event_type === 'file.upload-incomplete') {
       if (
         typeof event.payload.attempt !== 'number' ||
@@ -281,17 +420,18 @@ export class NotificationService {
       let delivered = 0;
       for (const event of events) {
         const message = await this.delivery(tx, event);
-        if (message)
+        if (message) {
+          const role =
+            message.kind === 'issueNotDefect'
+              ? 'developer'
+              : message.kind === 'uploadInterrupted'
+                ? 'member'
+                : message.kind === 'issueAssigned' ||
+                    message.kind === 'issueReturned'
+                  ? 'issueHandler'
+                  : 'tester';
           for (const recipient of new Set(message.recipients)) {
-            if (
-              !(await this.recipientStillValid(
-                tx,
-                event,
-                recipient,
-                message.kind === 'issueNotDefect',
-                message.kind === 'uploadInterrupted',
-              ))
-            )
+            if (!(await this.recipientStillValid(tx, event, recipient, role)))
               continue;
             const inserted = await tx.query(
               `INSERT INTO app.notifications(recipient_id,event_id,project_id,kind,object_id,title,target_path)
@@ -308,6 +448,7 @@ export class NotificationService {
             );
             delivered += inserted.rowCount ?? 0;
           }
+        }
         await tx.query(
           'INSERT INTO app.notification_dispatches(event_id) VALUES($1) ON CONFLICT DO NOTHING',
           [event.id],
@@ -319,83 +460,137 @@ export class NotificationService {
       };
     });
   }
+
+  private async checkCursor(
+    tx: SqlExecutor,
+    actor: ActorContext,
+    cursor: string | undefined,
+  ) {
+    if (!cursor) return;
+    const visible = await tx.query(
+      `SELECT 1 FROM app.notifications n WHERE n.id=$2 AND ${canReadNotification}`,
+      [actor.userId, cursor],
+    );
+    if (!visible.rowCount)
+      throw new DomainError('NOT_FOUND', '此本人通知游标当前不可访问。', 404);
+  }
   async list(actor: ActorContext, raw: unknown = {}) {
     const input = notificationListQuerySchema.parse(raw);
     return this.db.transaction(async (tx) => {
       await this.personal(tx, actor);
-      const cursor = input.cursor
-        ? (
-            await tx.query<{ created_at: Date; id: string }>(
-              `SELECT n.created_at,n.id FROM app.notifications n WHERE n.id=$2 AND ${canRead}`,
-              [actor.userId, input.cursor],
-            )
-          ).rows[0]
-        : null;
-      if (input.cursor && !cursor)
-        throw new DomainError('NOT_FOUND', '此本人通知游标当前不可访问。', 404);
+      await this.checkCursor(tx, actor, input.cursor);
       const rows = (
-        await tx.query<{
-          id: string;
-          project_id: string | null;
-          kind: string;
-          object_id: string;
-          title: string;
-          target_path: string;
-          read_at: Date | null;
-          created_at: Date;
-          asset_title: string | null;
-          asset_revision_id: string | null;
-          asset_revision_no: number | null;
-          project_name: string | null;
-        }>(
-          `SELECT n.*,ar.content->>'title' asset_title,ar.id asset_revision_id,ar.revision_no asset_revision_no,p.name project_name FROM app.notifications n
-           JOIN app.outbox e ON e.id=n.event_id
-           LEFT JOIN app.asset_revisions ar ON n.kind='assetReview' AND ar.asset_id=n.object_id AND ar.id::text=e.payload->>'revisionId'
-           LEFT JOIN app.projects p ON p.id=n.project_id WHERE ${canRead}
-    AND (NOT $2 OR n.read_at IS NULL) AND ($3::timestamptz IS NULL OR (n.created_at,n.id)<($3,$4::uuid)) ORDER BY n.created_at DESC,n.id DESC LIMIT $5`,
+        await tx.query<GroupRow>(
+          `${notificationView}, counts AS (
+            SELECT group_key,count(*)::text group_total,
+              count(*) FILTER(WHERE read_at IS NULL)::text group_unread
+            FROM notification_view WHERE lane=$2 GROUP BY group_key
+            HAVING NOT $3 OR bool_or(read_at IS NULL)
+          ), latest AS (
+            SELECT DISTINCT ON (v.group_key) v.*,c.group_total,c.group_unread
+            FROM notification_view v JOIN counts c USING (group_key)
+            WHERE lane=$2 ORDER BY v.group_key,v.created_at DESC,v.id DESC
+          ), selected AS (
+            SELECT * FROM latest
+            WHERE $4::uuid IS NULL OR (created_at,id)<(
+              SELECT created_at,id FROM app.notifications WHERE id=$4
+            )
+            ORDER BY created_at DESC,id DESC LIMIT $5
+          ), stats AS (
+            SELECT count(DISTINCT group_key)::text unread_groups FROM notification_view
+            WHERE lane='attention' AND read_at IS NULL
+          )
+          SELECT head.*,stats.unread_groups,${groupWatermark} read_through,
+            (SELECT json_agg(sample ORDER BY sample.created_at DESC,sample.id DESC) FROM (
+              SELECT v.* FROM notification_view v
+              WHERE v.lane=$2 AND v.group_key=head.group_key
+              ORDER BY v.created_at DESC,v.id DESC LIMIT 4
+            ) sample) preview
+          FROM stats LEFT JOIN selected head ON true
+          ORDER BY head.created_at DESC,head.id DESC`,
           [
             actor.userId,
+            input.lane,
             input.unreadOnly,
-            cursor?.created_at ?? null,
-            cursor?.id ?? null,
+            input.cursor ?? null,
             input.limit + 1,
           ],
         )
       ).rows;
-      const unread = (
-        await tx.query<{ n: string }>(
-          `SELECT count(*)::text n FROM app.notifications n WHERE ${canRead} AND n.read_at IS NULL`,
-          [actor.userId],
-        )
-      ).rows[0]!.n;
-      const visible = rows.slice(0, input.limit);
+      const visible = rows
+        .filter((row) => row.id !== null)
+        .slice(0, input.limit);
       return notificationListSchema.parse({
-        notifications: visible.map((n) => ({
-          id: n.id,
-          projectId: n.project_id,
-          kind: n.kind,
-          objectId: n.object_id,
-          title:
-            n.kind === 'assetReview' && n.asset_title
-              ? `${n.project_name ?? '项目'} · ${n.asset_title}${n.asset_revision_no ? ` · r${n.asset_revision_no}` : ''}有待评审内容`
-              : n.title,
-          targetPath:
-            n.kind === 'assetReview' && n.target_path.startsWith('/#cases?')
-              ? (() => {
-                  const query = new URLSearchParams(
-                    n.target_path.split('?')[1],
-                  );
-                  query.set('assetId', n.object_id);
-                  if (n.asset_revision_id)
-                    query.set('assetRevisionId', n.asset_revision_id);
-                  return `/#cases?${query}`;
-                })()
-              : n.target_path,
-          readAt: n.read_at?.toISOString() ?? null,
-          createdAt: n.created_at.toISOString(),
+        groups: visible.map((row) => ({
+          key: row.group_key,
+          projectId: row.project_id,
+          projectName: row.project_name,
+          kind: row.kind,
+          requirementId: row.requirement_id,
+          requirementTitle: row.requirement_title,
+          requirementVersionNo:
+            row.kind === 'assetReview' ? row.requirement_version_no : null,
+          assetKind: row.asset_kind,
+          title: row.requirement_title ?? notification(row).title,
+          latestAt: new Date(row.created_at).toISOString(),
+          itemCount: Number(row.group_total),
+          unreadCount: Number(row.group_unread),
+          readThrough: row.read_through,
+          preview: row.preview.map(notification),
         })),
-        unreadCount: Number(unread),
-        nextCursor: rows.length > input.limit ? visible.at(-1)!.id : null,
+        unreadCount: Number(rows[0]?.unread_groups ?? 0),
+        nextCursor:
+          rows.length > input.limit ? (visible.at(-1)?.id ?? null) : null,
+      });
+    });
+  }
+  async groupItems(actor: ActorContext, raw: unknown) {
+    const input = notificationGroupItemsQuerySchema.parse(raw);
+    return this.db.transaction(async (tx) => {
+      await this.personal(tx, actor);
+      await this.checkCursor(tx, actor, input.cursor);
+      const rows = (
+        await tx.query<NoticeRow>(
+          `${notificationView}
+          SELECT * FROM notification_view WHERE lane=$2 AND group_key=$3
+            AND (NOT $4 OR read_at IS NULL) AND ($5::uuid IS NULL OR (created_at,id)<(
+              SELECT created_at,id FROM app.notifications WHERE id=$5
+            ))
+          ORDER BY created_at DESC,id DESC LIMIT $6`,
+          [
+            actor.userId,
+            input.lane,
+            input.groupKey,
+            input.unreadOnly,
+            input.cursor ?? null,
+            input.limit + 1,
+          ],
+        )
+      ).rows;
+      const visible = rows.slice(0, input.limit);
+      return notificationGroupItemsSchema.parse({
+        notifications: visible.map(notification),
+        nextCursor:
+          rows.length > input.limit ? (visible.at(-1)?.id ?? null) : null,
+      });
+    });
+  }
+  async markGroupsRead(actor: ActorContext, raw: unknown) {
+    const input = markNotificationGroupsReadSchema.parse(raw);
+    return this.db.transaction(async (tx) => {
+      await this.personal(tx, actor);
+      const changed = await tx.query(
+        `${notificationView}, requested AS (
+          SELECT * FROM jsonb_to_recordset($3::jsonb) AS r(key text,"readThrough" timestamptz)
+        )
+        UPDATE app.notifications n SET read_at=clock_timestamp()
+        FROM notification_view v JOIN requested r ON r.key=v.group_key
+        WHERE n.id=v.id AND v.lane=$2 AND n.created_at<=r."readThrough"
+          AND n.read_at IS NULL AND ${canReadNotification}`,
+        [actor.userId, input.lane, JSON.stringify(input.groups)],
+      );
+      return markNotificationGroupsReadReceiptSchema.parse({
+        readCount: changed.rowCount,
       });
     });
   }
@@ -404,7 +599,7 @@ export class NotificationService {
     return this.db.transaction(async (tx) => {
       await this.personal(tx, actor);
       const rows = await tx.query<{ id: string }>(
-        `UPDATE app.notifications n SET read_at=COALESCE(read_at,clock_timestamp()) WHERE ${canRead} AND n.id=ANY($2::uuid[]) RETURNING id`,
+        `UPDATE app.notifications n SET read_at=COALESCE(read_at,clock_timestamp()) WHERE ${canReadNotification} AND n.id=ANY($2::uuid[]) RETURNING id`,
         [actor.userId, input.ids],
       );
       return { readIds: rows.rows.map((r) => r.id) };

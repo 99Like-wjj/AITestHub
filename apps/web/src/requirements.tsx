@@ -19,7 +19,6 @@ import {
   EyeOutlined,
   PlusOutlined,
   ReloadOutlined,
-  FolderOpenOutlined,
 } from '@ant-design/icons';
 import { z } from 'zod';
 import { idSchema } from '../../../packages/contracts/src/base';
@@ -49,6 +48,13 @@ import {
 } from './identity-commands';
 import { uiLayers } from './ui-layers';
 import { PageHeading } from './page-heading';
+import { BeijingTime, formatBeijingTime } from './beijing-time';
+import { StatusTag } from './semantic-status';
+import {
+  ResultFilters,
+  ResultListState,
+  ResultPagination,
+} from './result-list';
 import { CommandDialog, useBusinessCommand } from './business-command';
 import {
   downloadPrivateFile,
@@ -400,6 +406,12 @@ export function RequirementsPage({
     return () => window.removeEventListener('hashchange', followLink);
   }, [project?.id]);
 
+  function clearResultFilters() {
+    setSearch('');
+    setAppliedSearch('');
+    setStatus('all');
+    setPage(1);
+  }
   async function saved(id: string, savedVersionId: string) {
     await load();
     if (selectedId !== id) {
@@ -618,14 +630,6 @@ export function RequirementsPage({
             </>
           }
         />
-        {error && (
-          <Alert
-            type="error"
-            title={error}
-            showIcon
-            className="section-alert"
-          />
-        )}
         {tester && pendingDeletions.error && (
           <Alert
             type="warning"
@@ -662,68 +666,66 @@ export function RequirementsPage({
             ))}
           </div>
         )}
-        <div className="toolbar mb requirement-toolbar">
-          <div className="segmented" role="group" aria-label="需求范围">
-            <button
-              type="button"
-              className={`tab ${participation === 'all' ? 'active' : ''}`}
-              aria-pressed={participation === 'all'}
-              onClick={() => {
-                if (participation !== 'all' || page !== 1) {
-                  setLoading(true);
-                  setParticipation('all');
-                  setPage(1);
-                }
-              }}
-            >
-              全部需求
-            </button>
-            <button
-              type="button"
-              className={`tab ${participation === 'mine' ? 'active' : ''}`}
-              aria-pressed={participation === 'mine'}
-              onClick={() => {
-                if (participation !== 'mine' || page !== 1) {
-                  setLoading(true);
-                  setParticipation('mine');
-                  setPage(1);
-                }
-              }}
-            >
-              我参与的
-            </button>
-          </div>
-          <select
-            className="field"
-            aria-label="需求状态"
-            value={status}
-            onChange={(e) => {
-              setLoading(true);
-              setStatus(
-                requirementPageQuerySchema.shape.status.parse(e.target.value),
-              );
-              setPage(1);
+
+        <div className="mb">
+          <ResultFilters
+            search={{
+              label: '搜索需求名称或编号',
+              value: search,
+              onChange: setSearch,
             }}
+            onReset={clearResultFilters}
+            summary={
+              loading ? '正在读取' : error ? '读取失败' : `共 ${total} 个需求`
+            }
           >
-            <option value="all">当前需求</option>
-            <option value="inProgress">进行中</option>
-            <option value="inactive">长期未活跃</option>
-            <option value="archived">已归档</option>
-          </select>
-          <input
-            className="field searchbox"
-            aria-label="搜索需求名称或编号"
-            placeholder="搜索需求名称或编号"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-          <span className="caption">
-            {loading
-              ? '正在加载需求…'
-              : error
-                ? '需求列表尚未取得'
-                : `${total} 个需求 · 历史需求可查`}
-          </span>
+            <div className="segmented" role="group" aria-label="需求范围">
+              <button
+                type="button"
+                className={`tab ${participation === 'all' ? 'active' : ''}`}
+                aria-pressed={participation === 'all'}
+                onClick={() => {
+                  if (participation !== 'all' || page !== 1) {
+                    setLoading(true);
+                    setParticipation('all');
+                    setPage(1);
+                  }
+                }}
+              >
+                全部需求
+              </button>
+              <button
+                type="button"
+                className={`tab ${participation === 'mine' ? 'active' : ''}`}
+                aria-pressed={participation === 'mine'}
+                onClick={() => {
+                  if (participation !== 'mine' || page !== 1) {
+                    setLoading(true);
+                    setParticipation('mine');
+                    setPage(1);
+                  }
+                }}
+              >
+                我参与的
+              </button>
+            </div>
+            <Select
+              aria-label="需求状态"
+              value={status}
+              onChange={(value: typeof status) => {
+                if (value === status) return;
+                setLoading(true);
+                setStatus(value);
+                setPage(1);
+              }}
+              options={[
+                { value: 'all', label: '当前需求' },
+                { value: 'inProgress', label: '进行中' },
+                { value: 'inactive', label: '长期未活跃' },
+                { value: 'archived', label: '已归档' },
+              ]}
+            />
+          </ResultFilters>
         </div>
         <div className="card tablewrap requirement-list-card">
           <table aria-label="需求列表" aria-busy={loading}>
@@ -740,7 +742,7 @@ export function RequirementsPage({
               {loading || (!error && loadedProjectId !== project.id) ? (
                 <tr>
                   <td colSpan={5}>
-                    <Skeleton active paragraph={{ rows: 4 }} />
+                    <ResultListState state="loading" title="正在读取需求列表" />
                   </td>
                 </tr>
               ) : requirements.length ? (
@@ -754,11 +756,17 @@ export function RequirementsPage({
                       </div>
                     </td>
                     <td>
-                      <span
-                        className={`badge ${item.lifecycle === 'archived' ? '' : item.inactive ? 'amber' : 'green'}`}
+                      <StatusTag
+                        tone={
+                          item.lifecycle === 'archived'
+                            ? 'neutral'
+                            : item.inactive
+                              ? 'warning'
+                              : 'success'
+                        }
                       >
                         {statusLabel(item)}
-                      </span>
+                      </StatusTag>
                     </td>
                     <td>
                       <div className="avatars">
@@ -776,14 +784,8 @@ export function RequirementsPage({
                       </div>
                       <div className="sub">{item.participantCount} 人参与</div>
                     </td>
-                    <td
-                      title={new Date(item.businessUpdatedAt).toLocaleString(
-                        'zh-CN',
-                      )}
-                    >
-                      {new Date(item.businessUpdatedAt).toLocaleDateString(
-                        'sv-SE',
-                      )}
+                    <td>
+                      <BeijingTime value={item.businessUpdatedAt} />
                     </td>
                     <td>
                       <div className="row wrap">
@@ -820,65 +822,55 @@ export function RequirementsPage({
               ) : (
                 <tr>
                   <td colSpan={5}>
-                    <div className="empty">
-                      <FolderOpenOutlined />
-                      <h2>
-                        {error
-                          ? '尚未取得需求列表'
-                          : appliedSearch ||
-                              participation === 'mine' ||
-                              status !== 'all'
-                            ? archived
-                              ? '没有匹配的已归档需求'
-                              : '当前筛选没有匹配的需求'
-                            : '此项目暂无当前需求'}
-                      </h2>
-                      <p>
-                        {error
-                          ? '处理上方错误后重新加载。'
-                          : appliedSearch ||
-                              participation === 'mine' ||
-                              status !== 'all'
-                            ? '可清空搜索并切回全部当前需求；历史需求可通过状态筛选查看。'
-                            : tester
-                              ? '新增一条需求后即可维护版本和设计用例；已归档需求仍可通过状态筛选查看。'
-                              : '当前范围尚无需求。测试角色可新增需求，其他成员可查看有权限的需求及历史。'}
-                      </p>
-                      {!error &&
-                        (appliedSearch ||
-                        participation === 'mine' ||
-                        status !== 'all' ? (
-                          <Button
-                            onClick={() => {
-                              setSearch('');
-                              setAppliedSearch('');
-                              setParticipation('all');
-                              setStatus('all');
-                              setPage(1);
-                            }}
-                          >
-                            查看全部当前需求
+                    {error ? (
+                      <ResultListState
+                        state="error"
+                        title="需求列表读取失败"
+                        description={error}
+                        action={
+                          <Button onClick={() => void load()}>重新读取</Button>
+                        }
+                      />
+                    ) : appliedSearch || status !== 'all' ? (
+                      <ResultListState
+                        state="no-match"
+                        title={
+                          archived
+                            ? '没有匹配的已归档需求'
+                            : '没有符合条件的需求'
+                        }
+                        description="可调整搜索和状态，或清空结果筛选。"
+                        action={
+                          <Button onClick={clearResultFilters}>
+                            清空结果筛选
                           </Button>
-                        ) : tester ? (
-                          <Button
-                            type="primary"
-                            onClick={() => {
-                              setComposerRequirement(null);
-                              setComposerOpen(true);
-                            }}
-                          >
-                            新增需求
-                          </Button>
-                        ) : null)}
-                    </div>
+                        }
+                      />
+                    ) : (
+                      <ResultListState
+                        state="empty"
+                        title={
+                          participation === 'mine'
+                            ? '暂无我参与的需求'
+                            : '此项目暂无当前需求'
+                        }
+                        description={
+                          participation === 'mine'
+                            ? '可切换需求范围查看其他有权限的需求。'
+                            : '新增需求后可维护版本和设计用例。已归档需求可通过状态筛选查看。'
+                        }
+                      />
+                    )}
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
-        {!error && total > pageSize && (
-          <div className="row requirement-pagination">
+        {!error && total > 0 && (
+          <ResultPagination
+            summary={`第 ${page}／${Math.ceil(total / pageSize)} 页 · 共 ${total} 个需求`}
+          >
             <Pagination
               current={page}
               pageSize={pageSize}
@@ -890,9 +882,8 @@ export function RequirementsPage({
                 setPage(next);
                 setPageSize(size);
               }}
-              showTotal={(value) => `共 ${value} 个需求`}
             />
-          </div>
+          </ResultPagination>
         )}
         <p className="caption mt">
           长期未活跃仅是静默标记。例行接口回归、查看和参与名单变更不刷新业务活跃时间。
@@ -1055,7 +1046,7 @@ export function RequirementsPage({
                   onChange={setVersionId}
                   options={detail.versions.map((version) => ({
                     value: version.id,
-                    label: `v${version.versionNo} · ${new Date(version.createdAt).toLocaleString('zh-CN')}`,
+                    label: `v${version.versionNo} · ${formatBeijingTime(version.createdAt, true)}`,
                   }))}
                   style={{ minWidth: 280 }}
                 />

@@ -7,7 +7,6 @@ import {
   Checkbox,
   Collapse,
   Descriptions,
-  Drawer,
   Empty,
   Input,
   Modal,
@@ -44,16 +43,18 @@ import { precisePreviewSchema } from '../../../packages/contracts/src/domain';
 import { api, describeError } from './api';
 import { AssetEditor, targetTypeLabels } from './asset-editor';
 import type { AssetEditorTarget } from './asset-editor';
-import {
-  AssetReviewPanel,
-  reviewLabels,
-  reviewTones,
-} from './asset-review-panel';
+import { AssetReviewPanel } from './asset-review-panel';
+import { ReviewStateTag, reviewLabels } from './semantic-status';
+import { formatBeijingTime } from './beijing-time';
+import { DetailDrawer } from './detail-drawer';
 import type { CaseScope } from './requirements';
 import type { Project } from './types';
 import { PageHeading } from './page-heading';
 import { AppIcon } from './app-icon';
-import { ArchivedRequirementsToggle } from './archived-requirements-toggle';
+import {
+  RequirementDirectory,
+  RequirementDirectoryLabel,
+} from './requirement-directory';
 import './assets-layout.css';
 import { UiCaseText, UiReviewWorkspace } from './ui-review-workspace';
 import { AssetCoverage } from './asset-coverage';
@@ -389,6 +390,7 @@ export function AssetsPage({
   const [error, setError] = useState<string>();
   const [batchId, setBatchId] = useState<string>('all');
   const [search, setSearch] = useState('');
+  const [directorySearch, setDirectorySearch] = useState('');
   const [reviewFilter, setReviewFilter] = useState<string>(reviewFromUrl);
   const [includeRemoved, setIncludeRemoved] = useState(false);
   const [includeArchivedRequirements, setIncludeArchivedRequirements] =
@@ -826,58 +828,73 @@ export function AssetsPage({
     }
   }
 
-  const tree = useMemo<TreeDataNode[]>(
-    () =>
-      navigation.requirements.map((requirement) => ({
-        key: `requirement:${requirement.id}`,
-        title: (
-          <span>
-            {requirement.title}
-            {requirement.archived ? '（已归档）' : ''}{' '}
-            <Typography.Text type="secondary">
-              全版本 {requirement.caseCount}
-            </Typography.Text>
-          </span>
-        ),
-        children: assets
-          .filter(
+  const tree = useMemo<TreeDataNode[]>(() => {
+    const keyword = directorySearch.trim().toLocaleLowerCase();
+    return navigation.requirements.flatMap((requirement) => {
+      const requirementMatches = `${requirement.title} ${requirement.id}`
+        .toLocaleLowerCase()
+        .includes(keyword);
+      const children = assets
+        .filter(
+          (asset) =>
+            asset.targetType === 'scenario' &&
+            requirement.versions.some(
+              (version) => version.id === asset.requirementVersionId,
+            ) &&
+            (batchId === 'all' || asset.setId === batchId),
+        )
+        .flatMap((scenario) => {
+          const scenarioMatches =
+            requirementMatches ||
+            scenario.title.toLocaleLowerCase().includes(keyword);
+          const cases = assets.filter(
             (asset) =>
-              asset.targetType === 'scenario' &&
-              requirement.versions.some(
-                (version) => version.id === asset.requirementVersionId,
-              ) &&
-              (batchId === 'all' || asset.setId === batchId),
-          )
-          .map((scenario) => ({
-            key: `scenario:${scenario.id}`,
-            title: (
-              <span>
-                {scenario.title}{' '}
-                <Typography.Text type="secondary">
-                  v
-                  {
-                    requirement.versions.find(
-                      (version) => version.id === scenario.requirementVersionId,
-                    )?.versionNo
-                  }{' '}
-                  · {batches.find((set) => set.id === scenario.setId)?.title}
-                </Typography.Text>
-              </span>
-            ),
-            children: assets
-              .filter(
-                (asset) =>
-                  asset.targetType === 'case' && asset.parentId === scenario.id,
-              )
-              .map((asset) => ({
+              asset.targetType === 'case' &&
+              asset.parentId === scenario.id &&
+              (scenarioMatches ||
+                asset.title.toLocaleLowerCase().includes(keyword)),
+          );
+          if (!scenarioMatches && !cases.length) return [];
+          const version = requirement.versions.find(
+            (item) => item.id === scenario.requirementVersionId,
+          );
+          const set = assets.find((item) => item.id === scenario.setId);
+          const detail = [version && `v${version.versionNo}`, set?.title]
+            .filter(Boolean)
+            .join(' · ');
+          return [
+            {
+              key: `scenario:${scenario.id}`,
+              title: (
+                <RequirementDirectoryLabel
+                  title={scenario.title}
+                  detail={detail}
+                />
+              ),
+              children: cases.map((asset) => ({
                 key: `case:${asset.id}`,
-                title: asset.title,
+                title: <RequirementDirectoryLabel title={asset.title} />,
                 isLeaf: true,
               })),
-          })),
-      })),
-    [navigation, assets, batchId],
-  );
+            },
+          ];
+        });
+      if (!requirementMatches && !children.length) return [];
+      return [
+        {
+          key: `requirement:${requirement.id}`,
+          title: (
+            <RequirementDirectoryLabel
+              title={requirement.title}
+              count={`${requirement.caseCount} 条用例`}
+              archived={requirement.archived}
+            />
+          ),
+          children,
+        },
+      ];
+    });
+  }, [navigation, assets, batchId, directorySearch]);
   if (!project)
     return (
       <Card>
@@ -949,36 +966,6 @@ export function AssetsPage({
             </>
           }
         />
-        <div className="assets-unified-toolbar">
-          <div className="row wrap">
-            <ArchivedRequirementsToggle
-              label="已归档需求"
-              checked={includeArchivedRequirements}
-              disabled={editor !== null || preview !== null || committing}
-              onChange={(value) => {
-                loadEpoch.current += 1;
-                setAssets([]);
-                setNavigation({ requirements: [] });
-                setSelectedKeys([]);
-                setLoading(true);
-                setIncludeArchivedRequirements(value);
-              }}
-            />
-          </div>
-        </div>
-        {tester && scope && !batch && (
-          <Alert
-            type="info"
-            showIcon
-            className="mb"
-            title="新增场景前，请先创建或选择生成批次。"
-            action={
-              <Button size="small" onClick={() => openEditor('set')}>
-                新建批次
-              </Button>
-            }
-          />
-        )}
         {error && (
           <Alert
             type="error"
@@ -993,7 +980,7 @@ export function AssetsPage({
             type="info"
             showIcon
             title="当前需求版本不在本次浏览范围"
-            description="已归档需求默认隐藏。可开启“已归档需求”，或重新选择浏览范围；此开关不删除版本及历史资料。"
+            description="可在需求目录开启“显示已归档需求”，或重新选择浏览范围。"
             className="section-alert"
           />
         )}
@@ -1008,25 +995,44 @@ export function AssetsPage({
           />
         )}
         <div hidden={coverage && Boolean(scope)}>
-          <div className="asset-workspace live-asset-workspace">
-            <aside className="asset-tree">
-              <div className="tree-head">需求 / 场景 / 用例</div>
+          <div className="asset-workspace live-asset-workspace requirement-directory-layout">
+            <RequirementDirectory
+              includeArchived={includeArchivedRequirements}
+              archiveDisabled={
+                editor !== null || preview !== null || committing
+              }
+              onIncludeArchivedChange={(value) => {
+                loadEpoch.current += 1;
+                if (!value && selectedRequirement?.archived) {
+                  selectRequirement('all');
+                  setSelectedId(null);
+                }
+                setAssets([]);
+                setNavigation({ requirements: [] });
+                setSelectedKeys([]);
+                setLoading(true);
+                setIncludeArchivedRequirements(value);
+              }}
+              search={directorySearch}
+              onSearchChange={setDirectorySearch}
+              searchPlaceholder="搜索需求、场景或用例"
+            >
               <button
                 type="button"
-                className={`tree-node ${scope ? '' : 'active'}`}
+                className={`tree-node requirement-directory-button ${scope ? '' : 'active'}`}
+                aria-pressed={!scope}
                 onClick={() => selectRequirement('all')}
               >
-                <AppIcon name="folder-closed" />
-                <span className="grow">全部需求</span>
-                <span className="count">
-                  {navigation.requirements.reduce((n, r) => n + r.caseCount, 0)}
-                </span>
+                <RequirementDirectoryLabel
+                  title="全部需求"
+                  count={`${navigation.requirements.reduce((n, r) => n + r.caseCount, 0)} 条用例`}
+                />
               </button>
               {loading ? (
                 <Skeleton active />
               ) : (
                 <Tree
-                  key={`${kind}:${scope?.requirementVersionId ?? 'all'}:${batchId}`}
+                  key={`${kind}:${scope?.requirementVersionId ?? 'all'}:${batchId}:${directorySearch.trim()}`}
                   treeData={tree}
                   defaultExpandAll
                   blockNode
@@ -1052,7 +1058,7 @@ export function AssetsPage({
                   }}
                 />
               )}
-            </aside>
+            </RequirementDirectory>
             <section className="asset-pane">
               <div className="context-head">
                 <div>
@@ -1135,6 +1141,19 @@ export function AssetsPage({
                   )}
                 </div>
               </div>
+              {tester && scope && !batch && (
+                <Alert
+                  type="info"
+                  showIcon
+                  className="mb"
+                  title="新增场景前，请先创建或选择生成批次。"
+                  action={
+                    <Button size="small" onClick={() => openEditor('set')}>
+                      新建批次
+                    </Button>
+                  }
+                />
+              )}
               <div className="toolbar mb asset-toolbar">
                 <Input
                   className="searchbox"
@@ -1261,11 +1280,7 @@ export function AssetsPage({
                                 · {rows.length} 条当前筛选用例
                               </p>
                             </div>
-                            <span
-                              className={`badge ${reviewTones[scene.reviewState]}`}
-                            >
-                              {reviewLabels[scene.reviewState]}
-                            </span>
+                            <ReviewStateTag state={scene.reviewState} />
                             <Button
                               size="small"
                               onClick={() => selectAsset(scene)}
@@ -1306,11 +1321,7 @@ export function AssetsPage({
                                   {asset.removedAt ? ' · 已移除，历史保留' : ''}
                                 </p>
                               </div>
-                              <span
-                                className={`badge ${reviewTones[asset.reviewState]}`}
-                              >
-                                {reviewLabels[asset.reviewState]}
-                              </span>
+                              <ReviewStateTag state={asset.reviewState} />
                               <Button
                                 size="small"
                                 onClick={() => selectAsset(asset)}
@@ -1375,25 +1386,27 @@ export function AssetsPage({
           </div>
         </div>
       </div>
-      <Drawer
+      <DetailDrawer
         open={selectedId !== null}
-        title={
-          detail
-            ? `${targetTypeLabels[detail.asset.targetType]} · ${detail.asset.title}`
-            : '资产内容与评审'
+        title={detail?.asset.title ?? '资产内容与评审'}
+        meta={
+          detail && (
+            <>
+              {targetTypeLabels[detail.asset.targetType]} · {kind} · 当前编辑 r
+              {detail.asset.revisionNo}
+            </>
+          )
         }
-        width={1000}
+        wide={kind === 'API'}
         onClose={() => setSelectedId(null)}
-        destroyOnHidden
       >
         {detailLoading && <Skeleton active />}
         {detailError && <Alert type="error" showIcon title={detailError} />}
         {detail && revision && (
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
             <Space wrap>
-              <Tag>{kind}</Tag>
-              <Tag>当前编辑 r{detail.asset.revisionNo}</Tag>
-              <Tag>当前评审：{reviewLabels[detail.asset.reviewState]}</Tag>
+              <span className="caption">当前评审</span>
+              <ReviewStateTag state={detail.asset.reviewState} />
               {detail.asset.removedAt && <Tag>已移除，历史保留</Tag>}
             </Space>
             <Select
@@ -1402,7 +1415,7 @@ export function AssetsPage({
               onChange={setRevisionId}
               options={detail.revisions.map((item) => ({
                 value: item.id,
-                label: `r${item.revisionNo}${item.id === detail.asset.revisionId ? '（当前编辑）' : '（历史内容）'} · ${new Date(item.createdAt).toLocaleString('zh-CN')}`,
+                label: `r${item.revisionNo}${item.id === detail.asset.revisionId ? '（当前编辑）' : '（历史内容）'} · ${formatBeijingTime(item.createdAt, true)}`,
               }))}
             />
             {detail.asset.targetType === 'case' && (
@@ -1492,7 +1505,7 @@ export function AssetsPage({
             />
           </Space>
         )}
-      </Drawer>
+      </DetailDrawer>
       <AssetEditor
         userId={userId}
         projectId={project.id}

@@ -160,7 +160,7 @@ function usage(response: ModelResponse): UsageMetadata | undefined {
     : { input_tokens: input, output_tokens: output, total_tokens: total };
 }
 
-function modelTools(tools: BindToolsInput[]): ModelTool[] {
+export function modelTools(tools: BindToolsInput[]): ModelTool[] {
   return tools.map((candidate) => {
     // Function parameters describe incoming arguments. Zod output conversion
     // cannot represent nested normalizers (for example HH:mm -> HH:mm:ss).

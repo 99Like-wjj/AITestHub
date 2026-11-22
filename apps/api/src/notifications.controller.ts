@@ -2,7 +2,6 @@ import { All, Controller, Inject, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { IdentityService } from '../../../packages/application/src/identity/service.js';
 import { NotificationService } from '../../../packages/application/src/notifications/service.js';
-import { notificationListQuerySchema } from '../../../packages/contracts/src/notifications.js';
 import { DomainError } from '../../../packages/application/src/errors.js';
 @Controller('api/v1/me/notifications')
 export class NotificationsController {
@@ -29,19 +28,26 @@ export class NotificationsController {
     const path = req.path
       .replace(/^\/api\/v1\/me\/notifications\/?/, '')
       .replace(/\/$/, '');
-    if (!path && req.method === 'GET')
-      return res.json(
-        await this.notifications.list(
-          actor,
-          notificationListQuerySchema.parse({
-            ...(req.query.cursor ? { cursor: req.query.cursor } : {}),
-            ...(req.query.limit ? { limit: Number(req.query.limit) } : {}),
-            unreadOnly: req.query.unreadOnly === 'true',
+    if (req.method === 'GET') {
+      const query = {
+        ...(req.query.cursor ? { cursor: req.query.cursor } : {}),
+        ...(req.query.limit ? { limit: Number(req.query.limit) } : {}),
+        ...(req.query.lane ? { lane: req.query.lane } : {}),
+        unreadOnly: req.query.unreadOnly === 'true',
+      };
+      if (!path) return res.json(await this.notifications.list(actor, query));
+      if (path === 'groups')
+        return res.json(
+          await this.notifications.groupItems(actor, {
+            ...query,
+            groupKey: req.query.groupKey,
           }),
-        ),
-      );
+        );
+    }
     if (path === 'read' && req.method === 'POST')
       return res.json(await this.notifications.markRead(actor, req.body));
+    if (path === 'read-groups' && req.method === 'POST')
+      return res.json(await this.notifications.markGroupsRead(actor, req.body));
     throw new DomainError('NOT_FOUND', '没有此站内通知接口。', 404);
   }
 }

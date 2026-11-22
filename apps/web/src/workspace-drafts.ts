@@ -14,13 +14,13 @@ export interface ComposerInsertion {
   start: number;
   end: number;
   text: string;
-  restoreText?: string;
+  restoreText?: string | undefined;
 }
 export interface WorkspaceDraft {
   content: string;
   references: PreparedReference[];
-  operationTarget?: OperationTarget | null;
-  skillIds?: PlatformGuidanceSkillId[];
+  operationTarget?: OperationTarget | null | undefined;
+  skillIds?: PlatformGuidanceSkillId[] | undefined;
 }
 
 /** An edited queued message keeps its original target, including a personal

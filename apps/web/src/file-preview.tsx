@@ -41,6 +41,8 @@ import {
 } from './file-preview-data';
 import { FileTextPreview, DelimitedPreview } from './file-preview-text';
 import { uiLayers } from './ui-layers';
+import { FileKindTag, FileStatusTag } from './file-display-status';
+import { BeijingTime, formatBeijingTime } from './beijing-time';
 import './file-center.css';
 
 const PdfPreview = lazy(() => import('./file-preview-pdf'));
@@ -682,7 +684,7 @@ export function FilePreview({
               style={{ minWidth: 200 }}
               options={versions.map((version) => ({
                 value: version.revision,
-                label: `版本 ${version.revision} · ${new Date(version.createdAt).toLocaleString()}`,
+                label: `版本 ${version.revision} · ${formatBeijingTime(version.createdAt)}`,
                 disabled: !version.available,
               }))}
               onChange={(value) => {
@@ -692,11 +694,17 @@ export function FilePreview({
               }}
             />
           ) : null}
-          <Typography.Text type="secondary">
-            {selected
-              ? `${humanFileSize(selected.bytes)} · ${selected.kind === 'original' ? '用户原件，只读' : selected.kind === 'artifact' ? 'AI成果' : '历史文件'}`
-              : ''}
-          </Typography.Text>
+          {selected && (
+            <>
+              <FileKindTag kind={selected.kind} />
+              <FileStatusTag
+                status={selected.available ? 'available' : 'unavailable'}
+              />
+              <Typography.Text type="secondary">
+                {humanFileSize(selected.bytes)}
+              </Typography.Text>
+            </>
+          )}
         </Space>
         {selected ? (
           <details className="file-provenance">
@@ -706,7 +714,7 @@ export function FilePreview({
             </p>
             <p>
               修改主体：{selected.provenance.createdByName ?? '历史未记录'} ·{' '}
-              {new Date(selected.updatedAt).toLocaleString()}
+              <BeijingTime value={selected.updatedAt} detail />
               {selected.provenance.baseRevision
                 ? ` · 基于版本 ${selected.provenance.baseRevision}`
                 : ''}
