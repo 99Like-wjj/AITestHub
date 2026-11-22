@@ -841,6 +841,7 @@ export function PlansPage({
   const tester = Boolean(userId && project?.roles.includes('tester'));
   const listGeneration = useRef(0);
   const detailGeneration = useRef(0);
+  const detailTrigger = useRef<HTMLElement | null>(null);
   useEffect(() => {
     const onHashChange = () => {
       const linked = readPlanHandoff(project?.id);
@@ -1210,7 +1211,10 @@ export function PlansPage({
               <div className="row wrap">
                 <Button
                   icon={<EyeOutlined />}
-                  onClick={() => void inspect(plan)}
+                  onClick={(event) => {
+                    detailTrigger.current = event.currentTarget;
+                    void inspect(plan);
+                  }}
                 >
                   详情
                 </Button>
@@ -1234,11 +1238,12 @@ export function PlansPage({
                   <Button
                     type="primary"
                     disabled={!tester || pending || locked}
-                    onClick={() =>
+                    onClick={(event) => {
+                      detailTrigger.current = event.currentTarget;
                       void inspect(plan).then((opened) => {
                         if (opened) void fixedScope(plan);
-                      })
-                    }
+                      });
+                    }}
                   >
                     在本地 AI 发起
                   </Button>
@@ -1323,6 +1328,7 @@ export function PlansPage({
         }
         wide={uiScope !== null}
         open={detail !== null || detailLoading}
+        returnFocusRef={detailTrigger}
         onClose={() => {
           detailGeneration.current += 1;
           setDetailLoading(false);
