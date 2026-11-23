@@ -67,10 +67,121 @@ export function EvidenceGapList({ gaps }: { gaps: readonly Gap[] }) {
           {gap.ordinal && (
             <span className="result-review-muted">步骤 {gap.ordinal}</span>
           )}
+          {gap.assertionIds?.length ? (
+            <span className="result-review-muted">
+              断言 {gap.assertionIds.join('、')}
+            </span>
+          ) : null}
           <p className="result-review-lines">{gap.reason}</p>
         </article>
       ))}
     </div>
+  );
+}
+
+function BusinessAssertions({
+  scope,
+  content,
+  evidence,
+  onOpen,
+}: {
+  scope: Scope | undefined;
+  content: Content;
+  evidence: readonly EvidenceGalleryItem[];
+  onOpen: (item: EvidenceGalleryItem) => void;
+}) {
+  const records = content.observations ?? [];
+  const assertions = scope?.assertions ?? [];
+  const looseRecords = records.filter(
+    (entry) => !entry.assertionIds?.length && !entry.stepOrdinals?.length,
+  );
+  if (!assertions.length && !looseRecords.length) return null;
+  return (
+    <section
+      className="result-business-assertions"
+      aria-label="业务断言与实际观察"
+    >
+      <h3>业务断言与实际观察</h3>
+      {assertions.map((assertion, index) => {
+        const judgment = content.assertionResults?.find(
+          (entry) => entry.assertionId === assertion.id,
+        );
+        const observations = records.filter((entry) =>
+          entry.assertionIds?.includes(assertion.id),
+        );
+        const refs = new Set(
+          observations.flatMap((entry) => entry.evidenceRefs ?? []),
+        );
+        const gaps = (content.evidenceGaps ?? []).filter((entry) =>
+          entry.assertionIds?.includes(assertion.id),
+        );
+        return (
+          <article className="result-review-panel" key={assertion.id}>
+            <div className="result-review-header">
+              <span className="result-review-muted">断言 {index + 1}</span>
+              {judgment ? (
+                <ResultOutcomeTag outcome={judgment.outcome} />
+              ) : (
+                <Tag>未记录断言结论</Tag>
+              )}
+            </div>
+            <div className="result-review-comparison">
+              <div>
+                <span className="result-review-muted">可核对预期</span>
+                <p className="result-review-lines">{assertion.expected}</p>
+              </div>
+              <div
+                className={
+                  judgment?.outcome === 'failed'
+                    ? 'result-review-actual-failed'
+                    : undefined
+                }
+              >
+                <span className="result-review-muted">实际观察</span>
+                {observations.length ? (
+                  observations.map((entry, ordinal) => (
+                    <div key={ordinal} className="result-review-lines">
+                      <p>{entry.actual}</p>
+                      {!!entry.actionOrdinals?.length && (
+                        <small className="caption">
+                          实际操作 {entry.actionOrdinals.join('、')}
+                        </small>
+                      )}
+                    </div>
+                  ))
+                ) : (
+                  <p>{judgment?.reason || '该断言没有对应实际观察。'}</p>
+                )}
+              </div>
+            </div>
+            {judgment?.reason && observations.length > 0 && (
+              <p className="result-review-lines caption">{judgment.reason}</p>
+            )}
+            <EvidenceGallery
+              items={evidence.filter((item) =>
+                refs.has(item.manifest.localEvidenceId),
+              )}
+              onOpen={onOpen}
+              emptyText="该断言没有关联原件"
+            />
+            <EvidenceGapList gaps={gaps} />
+          </article>
+        );
+      })}
+      {looseRecords.map((entry, index) => (
+        <article key={index} className="result-review-panel">
+          <h4>其它现场观察</h4>
+          <p className="result-review-lines">{entry.actual}</p>
+          <EvidenceGallery
+            items={evidence.filter((item) =>
+              entry.evidenceRefs?.includes(item.manifest.localEvidenceId),
+            )}
+            onOpen={onOpen}
+            emptyText="该观察没有关联原件"
+          />
+        </article>
+      ))}
+    </section>
   );
 }
 
@@ -113,8 +224,14 @@ export function ResultUiSteps({
   }
   const step = steps[ordinal - 1];
   const observation = observations.find((record) => record.ordinal === ordinal);
+  const linked = (content.observations ?? []).filter((entry) =>
+    entry.stepOrdinals?.includes(ordinal),
+  );
   const observedStep = observedOnly && observation;
-  const refs = new Set(observation?.evidenceRefs ?? []);
+  const refs = new Set([
+    ...(observation?.evidenceRefs ?? []),
+    ...linked.flatMap((entry) => entry.evidenceRefs ?? []),
+  ]);
   return (
     <div className="result-review-content">
       {scope && (scope.preconditions.length > 0 || scope.expected) && (
@@ -147,11 +264,26 @@ export function ResultUiSteps({
           ]}
         />
       )}
+      {!!content.actualActions?.length && (
+        <Card title="本轮实际操作" size="small">
+          <ol className="result-review-lines">
+            {content.actualActions.map((action, index) => (
+              <li key={index}>{action}</li>
+            ))}
+          </ol>
+        </Card>
+      )}
+      <BusinessAssertions
+        scope={scope}
+        content={content}
+        evidence={evidence}
+        onOpen={onOpen}
+      />
       {entries.length > 0 ? (
         <div className="result-review-layout">
           <aside className="result-review-panel" aria-label="执行步骤">
             <div className="result-review-header">
-              <h3>执行步骤</h3>
+              <h3>{observedOnly ? '实录步骤' : '参考步骤'}</h3>
               <small className="result-review-muted">
                 共 {entries.length} 步
               </small>
@@ -215,9 +347,19 @@ export function ResultUiSteps({
                     }
                   >
                     <span className="result-review-muted">实际观察</span>
-                    <p className="result-review-lines">
-                      {observation?.actual ?? '没有单独记录该步骤的实际观察'}
-                    </p>
+                    {observation && (
+                      <p className="result-review-lines">
+                        {observation.actual}
+                      </p>
+                    )}
+                    {linked.map((entry, index) => (
+                      <p key={index} className="result-review-lines">
+                        {entry.actual}
+                      </p>
+                    ))}
+                    {!observation && !linked.length && (
+                      <p>没有单独记录该步骤的实际观察</p>
+                    )}
                   </div>
                 </div>
                 <h3>步骤证据</h3>
@@ -252,14 +394,23 @@ export function ResultUiSteps({
           description="此结果保留整体观察和原执行动作。"
         />
       )}
-      <OverallObservation content={content} />
+      <OverallObservation content={content} hideActions />
     </div>
   );
 }
 
-export function OverallObservation({ content }: { content: Content }) {
+export function OverallObservation({
+  content,
+  hideActions = false,
+}: {
+  content: Content;
+  hideActions?: boolean;
+}) {
   return (
-    <Card size="small" title="整体观察与实际动作">
+    <Card
+      size="small"
+      title={hideActions ? '用例级整体观察' : '整体观察与实际动作'}
+    >
       <Typography.Paragraph className="message-prose">
         {content.actualObservations}
       </Typography.Paragraph>
@@ -268,7 +419,7 @@ export function OverallObservation({ content }: { content: Content }) {
           {content.reason}
         </Typography.Paragraph>
       )}
-      {content.actualActions?.length ? (
+      {!hideActions && content.actualActions?.length ? (
         <ol>
           {content.actualActions.map((action, index) => (
             <li className="result-review-lines" key={index}>

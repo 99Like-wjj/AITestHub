@@ -23,8 +23,11 @@ interface ReviewImageAttachmentsProps {
   value: readonly string[];
   onChange: (ids: string[]) => void;
   onBusyChange: (busy: boolean) => void;
+  pendingFiles?: readonly ReviewPendingFile[];
+  onPendingFilesChange?: (files: ReviewPendingFile[]) => void;
   children?: ReactNode;
 }
+export type ReviewPendingFile = Pick<ImageDraft, 'key' | 'file' | 'error'>;
 
 interface ImageDraft {
   key: string;
@@ -159,7 +162,24 @@ function AttachmentsEditor(props: ReviewImageAttachmentsProps) {
     propsRef.current.onBusyChange(
       next.some((entry) => entry.status !== 'verified'),
     );
+    propsRef.current.onPendingFilesChange?.(
+      next
+        .filter((entry) => entry.status !== 'verified')
+        .map(({ key, file, error }) => ({ key, file, error })),
+    );
   }
+
+  useEffect(() => {
+    if (props.pendingFiles?.length) {
+      update(
+        props.pendingFiles.map((entry) => ({
+          ...entry,
+          url: URL.createObjectURL(entry.file),
+          status: 'failed',
+        })),
+      );
+    }
+  }, []);
 
   async function upload(draft: ImageDraft) {
     const controller = new AbortController();
@@ -259,7 +279,19 @@ function AttachmentsEditor(props: ReviewImageAttachmentsProps) {
   }
 
   return (
-    <div className="review-image-composer" onPaste={onPaste}>
+    <div
+      className="review-image-composer"
+      onPaste={onPaste}
+      onDragOver={(event) => {
+        if (!disabled && event.dataTransfer.types.includes('Files'))
+          event.preventDefault();
+      }}
+      onDrop={(event) => {
+        if (!event.dataTransfer.files.length) return;
+        event.preventDefault();
+        if (!disabled) add(Array.from(event.dataTransfer.files));
+      }}
+    >
       {children}
       <Space size={8} wrap>
         <Button
@@ -274,7 +306,7 @@ function AttachmentsEditor(props: ReviewImageAttachmentsProps) {
           添加复核截图
         </Button>
         <Typography.Text type="secondary" className="review-image-hint">
-          可在说明框内粘贴截图
+          可粘贴、拖入截图
         </Typography.Text>
       </Space>
       <input

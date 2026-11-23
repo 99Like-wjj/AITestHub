@@ -20,6 +20,7 @@ resultSubmissionReceiptSchema,
 runStateSchema,
 apiDataRowAnchorSchema,
 apiPreparationAnchorSchema,
+  uiAssertionSchema,
 } from './domain.js';
 
 export const claimLocalExecutionInputSchema =
@@ -153,6 +154,7 @@ export const resultScopeItemSchema = z.strictObject({
   title: z.string(),
   dataRow: apiDataRowAnchorSchema.optional(),
   preparationSources: z.array(apiPreparationAnchorSchema).optional(),
+  assertions: z.array(uiAssertionSchema).optional(),
   preconditions: z.array(z.string()),
   expected: z.string().nullable(),
   steps: z.array(z.strictObject({ action: z.string(), expected: z.string().optional() })),
@@ -207,6 +209,7 @@ const outcomeCounts = z.strictObject({
 export const reportFactsSchema = z.strictObject({
   runId: idSchema,
   projectId: idSchema,
+  environmentName: z.string().optional(),
   kind: z.enum(['UI', 'API']),
   executionState: z.string(),
   cleanupState: cleanupStateSchema,
@@ -262,6 +265,7 @@ export const reportFactsSchema = z.strictObject({
       ]),
       originalName: z.string(),
       downloadPath: z.string(),
+      fileAvailable: z.boolean().optional(),
     }),
   ),
   missingFileIds: z.array(idSchema),

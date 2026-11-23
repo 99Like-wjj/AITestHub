@@ -6,6 +6,7 @@ import {
   problemReviewImageSchema,
   problemReviewRetestSchema,
   reportProblemReviewScopeSchema,
+  resultRetestSchema,
   type ReportProblemReviewScope,
 } from '../../../contracts/src/issues.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
@@ -13,6 +14,11 @@ import type { SqlExecutor } from '../../../persistence/src/database.js';
 import { DomainError, stale } from '../errors.js';
 
 const reviewRetestFactSchema = problemReviewRetestSchema.omit({
+  actorId: true,
+  createdAt: true,
+  images: true,
+});
+export const resultRetestFactSchema = resultRetestSchema.omit({
   actorId: true,
   createdAt: true,
   images: true,
@@ -33,7 +39,7 @@ const confirmationFactSchema = z.object({
 
 type ReviewRetestFact = z.infer<typeof reviewRetestFactSchema>;
 
-async function reviewImages(
+export async function reviewImages(
   tx: SqlExecutor,
   projectId: string,
   reviewId: string,
@@ -103,6 +109,20 @@ export type ReviewHistoryEvent = {
   created_at: Date;
 };
 
+export async function projectResultRetest(
+  tx: SqlExecutor,
+  projectId: string,
+  event: Pick<ReviewHistoryEvent, 'actor_id' | 'created_at' | 'payload'>,
+) {
+  const fact = resultRetestFactSchema.parse(event.payload);
+  return resultRetestSchema.parse({
+    ...fact,
+    actorId: event.actor_id,
+    createdAt: event.created_at.toISOString(),
+    images: await reviewImages(tx, projectId, fact.id),
+  });
+}
+
 export async function savedReviewRetests(
   tx: SqlExecutor,
   projectId: string,
@@ -137,6 +157,35 @@ export async function issueConfirmationEvidence(
 ) {
   const reviews = [];
   for (const event of events) {
+    if (event.action === 'report-source-linked') {
+      const fact = z
+        .strictObject({
+          reportReview: reportProblemReviewScopeSchema,
+          retestId: idSchema.optional(),
+        })
+        .parse(event.payload);
+      const retest = fact.retestId
+        ? await readResultRetestFact(
+            tx,
+            projectId,
+            fact.reportReview,
+            fact.retestId,
+          )
+        : undefined;
+      reviews.push({
+        eventId: event.id,
+        problemId: null,
+        resultId: fact.reportReview.resultId,
+        resultRevisionId: fact.reportReview.resultRevisionId,
+        note: retest?.reproduction ?? '',
+        ...(retest ? { retestNote: retest.note } : {}),
+        reportReview: fact.reportReview,
+        actorId: event.actor_id,
+        createdAt: event.created_at.toISOString(),
+        images: retest ? await reviewImages(tx, projectId, retest.id) : [],
+      });
+      continue;
+    }
     if (
       event.action !== 'problem-confirmed' ||
       !event.payload ||
@@ -179,6 +228,30 @@ export async function issueConfirmationEvidence(
     });
   }
   return reviews;
+}
+
+export async function readResultRetestFact(
+  tx: SqlExecutor,
+  projectId: string,
+  source: ReportProblemReviewScope,
+  retestId: string,
+) {
+  const row = (
+    await tx.query<{ payload: unknown }>(
+      `SELECT payload FROM app.audit_events
+       WHERE project_id=$1 AND object_id=$2 AND action='result.human-retest'
+         AND payload->>'id'=$3 AND payload#>>'{reportReview,resultRevisionId}'=$4
+         AND payload#>>'{reportReview,reportId}'=$5`,
+      [
+        projectId,
+        source.resultId,
+        retestId,
+        source.resultRevisionId,
+        source.reportId,
+      ],
+    )
+  ).rows[0];
+  return row ? resultRetestFactSchema.parse(row.payload) : undefined;
 }
 
 /** Serialize against result correction and report capture on the same run. */

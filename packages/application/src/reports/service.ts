@@ -54,6 +54,13 @@ export async function reportFacts(
 ) {
   const run = await readRun(tx, projectId, runId, 'share');
   const scope = reportExecutionScopeSchema.parse(run.scope_snapshot);
+  const environment = (
+    await tx.query<{ name: string | null }>(
+      `SELECT content->>'name' name FROM app.test_configuration_revisions
+       WHERE id=$1 AND configuration_id=$2 AND project_id=$3 AND kind='environment'`,
+      [scope.environmentRevisionId, scope.environmentId, projectId],
+    )
+  ).rows[0];
   const rows = await tx.query<ResultFactRow>(
     `SELECT r.id,r.run_item_id,r.current_revision_id,v.content,v.revision_no,i.content initial_content,
      a.id assessment_id,a.result_revision_id assessment_basis_revision_id,a.final_outcome,a.reason assessment_reason,ri.cleanup_state FROM app.results r
@@ -148,6 +155,7 @@ export async function reportFacts(
   return {
     runId,
     projectId,
+    ...(environment?.name ? { environmentName: environment.name } : {}),
     kind: run.kind,
     executionState: run.state,
     cleanupState: run.cleanup_state,
@@ -168,6 +176,7 @@ export async function reportFacts(
       fileId: row.file_id,
       manifest: evidenceManifestItemSchema.parse(row.manifest),
       lastKnownFileStatus: row.status,
+      fileAvailable: row.status === 'verified' && row.deleted_at === null,
       originalName: row.original_name,
       downloadPath: `/api/v1/files/${row.file_id}/content`,
     })),

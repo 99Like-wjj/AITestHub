@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { createPortal } from 'react-dom';
 import {
   Alert,
   Button,
@@ -32,11 +31,12 @@ import {
   type UiPlanEligibility,
 } from './ui-case-plan-handoff';
 import './ui-review-workspace.css';
+import { readUiReviewReceipt, uiReviewPath } from './ui-review-transport';
 
 export type UiReviewRoom = z.infer<typeof uiReviewMeetingDetailSchema>;
 type Room = UiReviewRoom;
 type AssessmentOutcome = z.infer<typeof uiCaseAssessmentOutcomeSchema>;
-export type UiCaseAssessmentDraft = {
+type UiCaseAssessmentDraft = {
   outcome: AssessmentOutcome | undefined;
   note: string;
   instruction: string;
@@ -51,7 +51,6 @@ const assessmentLabels: Record<AssessmentOutcome, string> = {
   needsRework: '需要补改',
   inconclusive: '无法确认',
 };
-export { assessmentLabels };
 type Meetings = z.infer<typeof uiReviewMeetingListSchema>['meetings'];
 type Target = 'case' | 'scenario' | 'set';
 type Command = {
@@ -88,15 +87,6 @@ export function UiReviewWorkspace({
   tester,
   onApprove,
   updated,
-  inlineCaseId,
-  inlineActions,
-  onOpenTeam,
-  inlineDrafts,
-  inlineAssessments,
-  onBusyChange,
-  onSupplement,
-  onRead,
-  onCompare,
 }: {
   projectId: string;
   userId: string;
@@ -109,21 +99,8 @@ export function UiReviewWorkspace({
   tester: boolean;
   onApprove: (ids: string[]) => Promise<void>;
   updated: () => Promise<void>;
-  inlineCaseId?: string;
-  inlineActions?: HTMLElement | null;
-  onOpenTeam?: (id: string) => void;
-  inlineDrafts?: Map<string, string>;
-  inlineAssessments?: Map<string, UiCaseAssessmentDraft>;
-  onBusyChange?: (busy: boolean) => void;
-  onSupplement?: (origin: {
-    meetingId: string;
-    opinionId: string;
-    round: number;
-  }) => void;
-  onRead?: (room: Room | undefined) => void;
-  onCompare?: (from: string, to: string) => void;
 }) {
-  const path = '/projects/' + projectId + '/assets/ui-review-meetings';
+  const path = uiReviewPath(projectId);
   const storageKey =
     'aitesthub:ui-review-command:' +
     userId +
@@ -134,11 +111,9 @@ export function UiReviewWorkspace({
   const [roomId, setRoomId] = useState<string>();
   const [room, setRoom] = useState<Room>();
   const [meetings, setMeetings] = useState<Meetings>([]);
-  const [focus, setFocus] = useState(inlineCaseId ?? '');
+  const [focus, setFocus] = useState('');
   const [selection, setSelection] = useState(initialCases);
-  const [body, setBody] = useState(() =>
-    inlineCaseId ? (inlineDrafts?.get(inlineCaseId) ?? '') : '',
-  );
+  const [body, setBody] = useState('');
   const [target, setTarget] = useState<Target>('case');
   const [affected, setAffected] = useState<string[]>([]);
   const [editId, setEditId] = useState<string>();
@@ -183,16 +158,6 @@ export function UiReviewWorkspace({
   const [confirmAssessment, setConfirmAssessment] = useState<string>();
 
   useEffect(() => {
-    onRead?.(room);
-    return () => onRead?.(undefined);
-  }, [onRead, room]);
-
-  useEffect(() => {
-    onBusyChange?.(submitting);
-    return () => onBusyChange?.(false);
-  }, [onBusyChange, submitting]);
-
-  useEffect(() => {
     try {
       const raw = localStorage.getItem(storageKey);
       if (raw) {
@@ -213,7 +178,6 @@ export function UiReviewWorkspace({
   useEffect(() => {
     const controller = new AbortController();
     const query = new URLSearchParams({ requirementVersionId });
-    if (inlineCaseId) query.set('caseId', inlineCaseId);
     void api(
       path + '?' + query,
       { signal: controller.signal },
@@ -225,11 +189,7 @@ export function UiReviewWorkspace({
         const requested = new URLSearchParams(
           window.location.hash.split('?')[1],
         ).get('meetingId');
-        if (inlineCaseId) setRoomId(reply.meetings[0]?.id);
-        else if (
-          requested &&
-          reply.meetings.some((item) => item.id === requested)
-        )
+        if (requested && reply.meetings.some((item) => item.id === requested))
           setRoomId(requested);
         setLoading(false);
       })
@@ -240,7 +200,7 @@ export function UiReviewWorkspace({
         }
       });
     return () => controller.abort();
-  }, [path, requirementVersionId, inlineCaseId]);
+  }, [path, requirementVersionId]);
   useEffect(() => {
     if (!roomId) {
       setRoom(undefined);
@@ -255,14 +215,6 @@ export function UiReviewWorkspace({
     )
       .then((value) => {
         if (controller.signal.aborted) return;
-        if (
-          inlineCaseId &&
-          !value.cases.some((item) => item.id === inlineCaseId)
-        ) {
-          setError('此评审会话不包含当前用例。');
-          setRoom(undefined);
-          return;
-        }
         setRoom(value);
         if (!value.cases.some((item) => item.id === focus))
           setFocus(value.cases[0]?.id ?? '');
@@ -271,7 +223,7 @@ export function UiReviewWorkspace({
         if (!controller.signal.aborted) setError(describeError(err));
       });
     return () => controller.abort();
-  }, [path, roomId, focus, assets, inlineCaseId]);
+  }, [path, roomId, focus, assets]);
   const active = room?.cases.find((item) => item.id === focus);
   const items = room?.state.items ?? [];
   const openItems = room && active ? latestItems(items, active.id) : [];
@@ -348,15 +300,13 @@ export function UiReviewWorkspace({
       ? [targetId]
       : affected.filter((id) => applicable.some((asset) => asset.id === id));
   const activateRoom = (id: string | undefined) => {
-    if (!inlineCaseId) {
-      const query = new URLSearchParams(window.location.hash.split('?')[1]);
-      if (id) query.set('meetingId', id);
-      else query.delete('meetingId');
-      window.history.replaceState(null, '', '#cases?' + query.toString());
-    }
+    const query = new URLSearchParams(window.location.hash.split('?')[1]);
+    if (id) query.set('meetingId', id);
+    else query.delete('meetingId');
+    window.history.replaceState(null, '', '#cases?' + query.toString());
     if (roomId !== id) {
       setRoom(undefined);
-      setFocus(inlineCaseId ?? '');
+      setFocus('');
     }
     setRoomId(id);
   };
@@ -428,21 +378,10 @@ export function UiReviewWorkspace({
     setSubmitting(true);
     setError(undefined);
     try {
-      const operation =
-        command.path === path
-          ? 'reviews.meeting-create'
-          : 'reviews.meeting-update';
-      const raw = await api(
-        path +
-          '/receipt/' +
-          encodeURIComponent(command.commandId) +
-          '?operation=' +
-          operation,
-        {},
-        z.strictObject({
-          status: z.enum(['completed', 'failed', 'pending', 'unknown']),
-          response: uiReviewMeetingMutationSchema.nullable(),
-        }),
+      const raw = await readUiReviewReceipt(
+        path,
+        command.path,
+        command.commandId,
       );
       if (raw.status === 'completed' && raw.response) {
         localStorage.removeItem(storageKey);
@@ -505,7 +444,6 @@ export function UiReviewWorkspace({
       },
     });
     if (result) {
-      if (inlineCaseId) inlineDrafts?.delete(inlineCaseId);
       resetEditor();
     }
     return result;
@@ -533,9 +471,7 @@ export function UiReviewWorkspace({
   const assessmentDraft =
     (localAssessment?.key === assessmentKey
       ? localAssessment?.draft
-      : undefined) ??
-    (assessmentKey ? inlineAssessments?.get(assessmentKey) : undefined) ??
-    emptyAssessmentDraft;
+      : undefined) ?? emptyAssessmentDraft;
   const {
     outcome: assessmentOutcome,
     note: assessmentNote,
@@ -548,7 +484,6 @@ export function UiReviewWorkspace({
   function changeAssessment(change: Partial<UiCaseAssessmentDraft>) {
     if (!assessmentKey) return;
     const draft = { ...assessmentDraft, ...change };
-    inlineAssessments?.set(assessmentKey, draft);
     setLocalAssessment({ key: assessmentKey, draft });
     setAssessmentError(undefined);
   }
@@ -581,7 +516,6 @@ export function UiReviewWorkspace({
           : {}),
       })
     ) {
-      inlineAssessments?.delete(assessmentKey);
       setLocalAssessment(undefined);
       setConfirmAssessment(undefined);
     }
@@ -594,7 +528,7 @@ export function UiReviewWorkspace({
       openItems.length) &&
     openItems.every((item) => item.state === 'resolved') &&
     currentAssessment?.outcome !== 'inconclusive' &&
-    (!inlineCaseId ||
+    (!room.state.caseWorkbenchRound ||
       (currentAssessment?.outcome === 'resolved' && !assessmentChanged)),
   );
   const blocked = submitting || Boolean(uncertain);
@@ -621,78 +555,6 @@ export function UiReviewWorkspace({
       保存评审结果
     </Button>
   );
-  const inlineControls = room && active && (
-    <Space wrap size={6}>
-      {!!outstanding.filter((item) => item.basis.caseId === active.id).length &&
-        room.state.finalized && (
-          <Button size="small" onClick={() => setHandoff(true)}>
-            查看交接说明
-          </Button>
-        )}
-      {tester &&
-        !frozenFocus &&
-        room.state.finalized &&
-        active.reviewState !== 'approved' && (
-          <>
-            {assessmentSave}
-            <Button
-              size="small"
-              type="primary"
-              disabled={blocked || !checkReady}
-              onClick={() => void onApprove([active.id])}
-            >
-              批准当前修订
-            </Button>
-          </>
-        )}
-      {tester && !frozenFocus && !room.state.finalized && (
-        <>
-          <Button
-            size="small"
-            disabled={
-              blocked ||
-              room.state.noChange.some((basis) => basis.caseId === active.id)
-            }
-            onClick={() =>
-              void update({ action: 'no-change', caseId: active.id })
-            }
-          >
-            {room.state.noChange.some((basis) => basis.caseId === active.id)
-              ? '已记录无需修改'
-              : '记录无需修改'}
-          </Button>
-          {room.cases.length > 1 ? (
-            <Button
-              size="small"
-              disabled={blocked}
-              onClick={() => onOpenTeam?.(room.meeting.id)}
-            >
-              打开团队评审
-            </Button>
-          ) : (
-            <Button
-              size="small"
-              type="primary"
-              disabled={
-                blocked ||
-                (!body.trim() &&
-                  !room.state.draftOpinions.length &&
-                  !room.state.noChange.length)
-              }
-              onClick={() =>
-                void (async () => {
-                  if (body.trim() && !(await saveOpinion())) return;
-                  setFinalize(true);
-                })()
-              }
-            >
-              预览意见定稿
-            </Button>
-          )}
-        </>
-      )}
-    </Space>
-  );
   const controls = (
     <Space wrap>
       {room?.state.finalized && (
@@ -712,7 +574,7 @@ export function UiReviewWorkspace({
           确认本次意见
         </Button>
       )}
-      {room?.state.finalized && tester && !inlineCaseId && (
+      {room?.state.finalized && tester && (
         <Button
           disabled={!awaitingReview.length || blocked}
           onClick={() => void onApprove(awaitingReview)}
@@ -720,7 +582,7 @@ export function UiReviewWorkspace({
           预览批准（{awaitingReview.length}）
         </Button>
       )}
-      {room?.state.finalized && tester && !inlineCaseId && (
+      {room?.state.finalized && tester && (
         <Button
           type="primary"
           disabled={!eligible.length || blocked}
@@ -732,11 +594,11 @@ export function UiReviewWorkspace({
     </Space>
   );
   const sessionPicker = (
-    <div className={inlineCaseId ? 'ui-review-inline-session' : 'panel pad mb'}>
+    <div className="panel pad mb">
       <Space wrap>
         <Select
           aria-label="评审会话"
-          style={inlineCaseId ? { maxWidth: '100%' } : { minWidth: 280 }}
+          style={{ minWidth: 280 }}
           value={roomId ?? ''}
           disabled={loading || blocked}
           options={[
@@ -748,7 +610,7 @@ export function UiReviewWorkspace({
           ]}
           onChange={(id: string) => {
             activateRoom(id || undefined);
-            if (!inlineCaseId) resetEditor();
+            resetEditor();
           }}
         />
         {room && (
@@ -771,23 +633,15 @@ export function UiReviewWorkspace({
       </Space>
     </div>
   );
-  const startingAssets = inlineCaseId
-    ? assets.filter((asset) => asset.id === inlineCaseId)
-    : assets;
+  const startingAssets = assets;
   return (
     <>
-      {inlineCaseId ? (
-        inlineActions &&
-        inlineControls &&
-        createPortal(inlineControls, inlineActions)
-      ) : (
-        <PageHeading
-          eyebrow="UI CASE REVIEW"
-          title="用例评审"
-          description={requirementTitle + ' · v' + versionNo}
-          actions={controls}
-        />
-      )}
+      <PageHeading
+        eyebrow="UI CASE REVIEW"
+        title="用例评审"
+        description={requirementTitle + ' · v' + versionNo}
+        actions={controls}
+      />
       {error && (
         <Alert
           className="mb"
@@ -819,19 +673,11 @@ export function UiReviewWorkspace({
       {receiptNotice && (
         <Alert className="mb" type="success" showIcon title={receiptNotice} />
       )}
-      {!inlineCaseId && sessionPicker}
-      {inlineCaseId && !room && Boolean(meetings.length) && (
-        <details className="ui-review-inline-session">
-          <summary>评审会话</summary>
-          {sessionPicker}
-        </details>
-      )}
+      {sessionPicker}
       {roomId && !room ? (
         <Skeleton active />
       ) : !room ? (
-        <section
-          className={inlineCaseId ? 'ui-review-inline-session' : 'panel pad'}
-        >
+        <section className="panel pad">
           <h2>确认本次评审范围</h2>
           {startingAssets.length ? (
             <>
@@ -885,211 +731,187 @@ export function UiReviewWorkspace({
         </section>
       ) : (
         <>
-          {!inlineCaseId && (
-            <div
-              className="ui-review-stages panel pad mb"
-              aria-label="评审进程"
-            >
-              {stepLabels.map((label, i) => (
-                <div key={label} className={stage === i ? 'selected' : ''}>
-                  <strong>{label}</strong>
-                  <small>
-                    {i === 0
-                      ? room.state.finalized
-                        ? '意见已定稿'
-                        : '记录意见与范围'
-                      : i === 1
-                        ? outstanding.length
-                          ? outstanding.length + ' 项待回传'
-                          : '经官方 MCP 交接'
-                        : '逐条确认、批准或退回补改'}
-                  </small>
-                </div>
-              ))}
-            </div>
-          )}
-          {!inlineCaseId && room.state.finalized && currentRound > 0 && (
+          <div className="ui-review-stages panel pad mb" aria-label="评审进程">
+            {stepLabels.map((label, i) => (
+              <div key={label} className={stage === i ? 'selected' : ''}>
+                <strong>{label}</strong>
+                <small>
+                  {i === 0
+                    ? room.state.finalized
+                      ? '意见已定稿'
+                      : '记录意见与范围'
+                    : i === 1
+                      ? outstanding.length
+                        ? outstanding.length + ' 项待回传'
+                        : '经官方 MCP 交接'
+                      : '逐条确认、批准或退回补改'}
+                </small>
+              </div>
+            ))}
+          </div>
+          {room.state.finalized && currentRound > 0 && (
             <p className="caption mb" role="status">
               第 {currentRound} 轮 · 人工复审可退回 AI 补改，已批准{' '}
               {eligible.length} / {reviewedCases.size} 条
             </p>
           )}
-          <div
-            className={
-              inlineCaseId ? 'ui-review-inline-room' : 'ui-review-layout'
-            }
-          >
-            {!inlineCaseId && (
-              <>
-                <aside className="panel pad">
-                  <h2>评审目录</h2>
-                  {[...new Set(room.cases.map((asset) => asset.parentId))].map(
-                    (parent) => (
-                      <section key={parent ?? ''} className="mb">
-                        <h3>
-                          {scenarioTitles.get(parent ?? '') ?? '用例场景'}
-                        </h3>
-                        {room.cases
-                          .filter((asset) => asset.parentId === parent)
-                          .map((asset) => (
-                            <button
-                              type="button"
-                              key={asset.id}
-                              className={
-                                asset.id === focus
-                                  ? 'ui-review-entry selected'
-                                  : 'ui-review-entry'
-                              }
-                              onClick={() => openCase(asset.id)}
-                            >
-                              <strong>{asset.title}</strong>
-                              <small>
-                                r{asset.revisionNo} ·{' '}
-                                {asset.removedAt
-                                  ? '已移除'
-                                  : asset.reviewState === 'approved'
-                                    ? '已批准'
-                                    : latestItems(items, asset.id).some(
-                                          (item) => item.state === 'waiting',
-                                        )
-                                      ? '待修改'
-                                      : '待复审'}
-                              </small>
-                            </button>
-                          ))}
-                      </section>
-                    ),
-                  )}
-                </aside>
-                <section className="panel pad">
-                  {active ? (
-                    <>
-                      <Space wrap className="mb">
-                        <h2>{active.title}</h2>
-                        <Tag>当前 r{active.revisionNo}</Tag>
-                      </Space>
-                      {tester &&
-                        (!room.state.finalized ? (
-                          <Button
-                            size="small"
-                            disabled={
-                              blocked ||
-                              frozenFocus ||
-                              room.state.noChange.some(
-                                (basis) => basis.caseId === active.id,
-                              )
-                            }
-                            onClick={() =>
-                              void update({
-                                action: 'no-change',
-                                caseId: active.id,
-                              })
-                            }
-                          >
-                            {room.state.noChange.some(
-                              (basis) => basis.caseId === active.id,
-                            )
-                              ? '已记录无需修改'
-                              : '记录无需修改'}
-                          </Button>
-                        ) : (
-                          <Button
-                            type="primary"
-                            size="small"
-                            disabled={
-                              blocked ||
-                              !checkReady ||
-                              active.reviewState === 'approved'
-                            }
-                            onClick={() => void onApprove([active.id])}
-                          >
-                            {active.reviewState === 'approved'
-                              ? '已批准'
-                              : '批准当前修订'}
-                          </Button>
-                        ))}
-                      <UiCaseText content={active.content} />
-                      {items.filter(
-                        (item) => item.basis.caseId === active.id && item.reply,
-                      ).length > 0 && (
-                        <section>
-                          <h3>历次回传与版本差异</h3>
-                          {[...items]
-                            .reverse()
-                            .filter(
-                              (item) =>
-                                item.basis.caseId === active.id && item.reply,
-                            )
-                            .map((item) => {
-                              const source = room.revisions.find(
-                                (rev) => rev.id === item.basis.revisionId,
-                              );
-                              const reply = room.revisions.find(
-                                (rev) => rev.id === item.reply?.revisionId,
-                              );
-                              const text = (revision: typeof source) =>
-                                revision
-                                  ? [
-                                      revision.content.testPoint,
-                                      ...(revision.content.steps?.map(
-                                        (step) =>
-                                          step.action +
-                                          (step.expected
-                                            ? '\n预期 ' + step.expected
-                                            : ''),
-                                      ) ?? []),
-                                      revision.content.expected,
-                                    ].join('\n')
-                                  : '版本内容加载中';
-                              return (
-                                <details
-                                  key={item.opinionId + '-' + item.round}
-                                  className="ui-review-diff"
-                                >
-                                  <summary>
-                                    第 {item.round} 轮 · r
-                                    {item.basis.revisionNo} → r
-                                    {(item.reply &&
-                                      revisionLabel(
-                                        room,
-                                        item.reply.revisionId,
-                                      )) ||
-                                      '—'}{' '}
-                                    · {statuses[item.state]}
-                                  </summary>
-                                  <p className="preserve-lines">
-                                    {item.reply?.body}
-                                  </p>
-                                  <div className="ui-review-compare">
-                                    <div>
-                                      <strong>基准修订</strong>
-                                      <pre>{text(source)}</pre>
-                                    </div>
-                                    <div>
-                                      <strong>回传修订</strong>
-                                      <pre>{text(reply)}</pre>
-                                    </div>
-                                  </div>
-                                </details>
-                              );
-                            })}
-                        </section>
-                      )}
-                    </>
-                  ) : (
-                    <Empty description="请选择用例" />
-                  )}
-                </section>
-              </>
-            )}
-            <aside
-              className={
-                inlineCaseId ? 'ui-review-inline-opinions' : 'panel pad'
-              }
-            >
-              {!inlineCaseId && (
-                <h2>{room.state.finalized ? '评审意见与复审' : '会议意见'}</h2>
+          <div className="ui-review-layout">
+            <aside className="panel pad">
+              <h2>评审目录</h2>
+              {[...new Set(room.cases.map((asset) => asset.parentId))].map(
+                (parent) => (
+                  <section key={parent ?? ''} className="mb">
+                    <h3>{scenarioTitles.get(parent ?? '') ?? '用例场景'}</h3>
+                    {room.cases
+                      .filter((asset) => asset.parentId === parent)
+                      .map((asset) => (
+                        <button
+                          type="button"
+                          key={asset.id}
+                          className={
+                            asset.id === focus
+                              ? 'ui-review-entry selected'
+                              : 'ui-review-entry'
+                          }
+                          onClick={() => openCase(asset.id)}
+                        >
+                          <strong>{asset.title}</strong>
+                          <small>
+                            r{asset.revisionNo} ·{' '}
+                            {asset.removedAt
+                              ? '已移除'
+                              : asset.reviewState === 'approved'
+                                ? '已批准'
+                                : latestItems(items, asset.id).some(
+                                      (item) => item.state === 'waiting',
+                                    )
+                                  ? '待修改'
+                                  : '待复审'}
+                          </small>
+                        </button>
+                      ))}
+                  </section>
+                ),
               )}
+            </aside>
+            <section className="panel pad">
+              {active ? (
+                <>
+                  <Space wrap className="mb">
+                    <h2>{active.title}</h2>
+                    <Tag>当前 r{active.revisionNo}</Tag>
+                  </Space>
+                  {tester &&
+                    (!room.state.finalized ? (
+                      <Button
+                        size="small"
+                        disabled={
+                          blocked ||
+                          frozenFocus ||
+                          room.state.noChange.some(
+                            (basis) => basis.caseId === active.id,
+                          )
+                        }
+                        onClick={() =>
+                          void update({
+                            action: 'no-change',
+                            caseId: active.id,
+                          })
+                        }
+                      >
+                        {room.state.noChange.some(
+                          (basis) => basis.caseId === active.id,
+                        )
+                          ? '已记录无需修改'
+                          : '记录无需修改'}
+                      </Button>
+                    ) : (
+                      <Button
+                        type="primary"
+                        size="small"
+                        disabled={
+                          blocked ||
+                          !checkReady ||
+                          active.reviewState === 'approved'
+                        }
+                        onClick={() => void onApprove([active.id])}
+                      >
+                        {active.reviewState === 'approved'
+                          ? '已批准'
+                          : '批准当前修订'}
+                      </Button>
+                    ))}
+                  <UiCaseText content={active.content} />
+                  {items.filter(
+                    (item) => item.basis.caseId === active.id && item.reply,
+                  ).length > 0 && (
+                    <section>
+                      <h3>历次回传与版本差异</h3>
+                      {[...items]
+                        .reverse()
+                        .filter(
+                          (item) =>
+                            item.basis.caseId === active.id && item.reply,
+                        )
+                        .map((item) => {
+                          const source = room.revisions.find(
+                            (rev) => rev.id === item.basis.revisionId,
+                          );
+                          const reply = room.revisions.find(
+                            (rev) => rev.id === item.reply?.revisionId,
+                          );
+                          const text = (revision: typeof source) =>
+                            revision
+                              ? [
+                                  revision.content.testPoint,
+                                  ...(revision.content.steps?.map(
+                                    (step) =>
+                                      step.action +
+                                      (step.expected
+                                        ? '\n预期 ' + step.expected
+                                        : ''),
+                                  ) ?? []),
+                                  revision.content.expected,
+                                ].join('\n')
+                              : '版本内容加载中';
+                          return (
+                            <details
+                              key={item.opinionId + '-' + item.round}
+                              className="ui-review-diff"
+                            >
+                              <summary>
+                                第 {item.round} 轮 · r{item.basis.revisionNo} →
+                                r
+                                {(item.reply &&
+                                  revisionLabel(room, item.reply.revisionId)) ||
+                                  '—'}{' '}
+                                · {statuses[item.state]}
+                              </summary>
+                              <p className="preserve-lines">
+                                {item.reply?.body}
+                              </p>
+                              <div className="ui-review-compare">
+                                <div>
+                                  <strong>基准修订</strong>
+                                  <pre>{text(source)}</pre>
+                                </div>
+                                <div>
+                                  <strong>回传修订</strong>
+                                  <pre>{text(reply)}</pre>
+                                </div>
+                              </div>
+                            </details>
+                          );
+                        })}
+                    </section>
+                  )}
+                </>
+              ) : (
+                <Empty description="请选择用例" />
+              )}
+            </section>
+            <aside className="panel pad">
+              <h2>{room.state.finalized ? '评审意见与复审' : '会议意见'}</h2>
               {assessmentAllowed && (
                 <section className="ui-review-opinion ui-review-opinion-form">
                   <h3>人工评审结果</h3>
@@ -1104,7 +926,6 @@ export function UiReviewWorkspace({
                     <Select
                       aria-label="复审结论"
                       placeholder="请选择复审结论"
-                      size={inlineCaseId ? 'small' : 'middle'}
                       value={assessmentOutcome}
                       options={uiCaseAssessmentOutcomeSchema.options.map(
                         (value) => ({ value, label: assessmentLabels[value] }),
@@ -1145,7 +966,7 @@ export function UiReviewWorkspace({
                       {assessmentError}
                     </p>
                   )}
-                  {!inlineCaseId && assessmentSave}
+                  {assessmentSave}
                   {currentAssessment?.outcome === 'resolved' &&
                     openItems.some((item) => item.state === 'returned') && (
                       <p className="caption">
@@ -1167,7 +988,6 @@ export function UiReviewWorkspace({
                       );
                       return (
                         <article key={opinion.id} className="ui-review-opinion">
-                          {inlineCaseId && <h3>本轮原意见</h3>}
                           <Space wrap size={5}>
                             <Tag>
                               {opinion.target === 'case'
@@ -1179,21 +999,6 @@ export function UiReviewWorkspace({
                             {assessment && (
                               <Tag>{statuses[assessment.state]}</Tag>
                             )}
-                            {tester && onSupplement && assessment && (
-                              <Button
-                                size="small"
-                                disabled={blocked}
-                                onClick={() =>
-                                  onSupplement({
-                                    meetingId: room.meeting.id,
-                                    opinionId: opinion.id,
-                                    round: assessment.round,
-                                  })
-                                }
-                              >
-                                补充用例
-                              </Button>
-                            )}
                           </Space>
                           <p className="preserve-lines">{opinion.body}</p>
                           {assessment?.instruction && (
@@ -1202,64 +1007,41 @@ export function UiReviewWorkspace({
                             </p>
                           )}
                           {assessment?.reply && (
-                            <div
-                              className={
-                                inlineCaseId ? 'ui-case-return-card' : undefined
-                              }
-                            >
-                              {inlineCaseId && <h4>AI 回传说明</h4>}
+                            <div>
                               <p className="preserve-lines">
-                                {inlineCaseId ? '' : '处理说明 '}
+                                处理说明
                                 {assessment.reply.body}
                               </p>
-                              {onCompare && (
-                                <Button
-                                  size="small"
-                                  onClick={() => {
-                                    if (assessment.reply)
-                                      onCompare(
-                                        assessment.basis.revisionId,
-                                        assessment.reply.revisionId,
-                                      );
-                                  }}
-                                >
-                                  查看本轮修订差异
-                                </Button>
-                              )}
                             </div>
                           )}
-                          {tester &&
-                            !room.state.finalized &&
-                            (!inlineCaseId ||
-                              (opinion.target === 'case' &&
-                                opinion.caseIds.length === 1)) && (
-                              <Space wrap>
-                                <Button
-                                  size="small"
-                                  disabled={blocked}
-                                  onClick={() => {
-                                    setEditId(opinion.id);
-                                    setBody(opinion.body);
-                                    setTarget(opinion.target);
-                                    setAffected(opinion.caseIds);
-                                  }}
-                                >
-                                  编辑
-                                </Button>
-                                <Button
-                                  size="small"
-                                  disabled={blocked}
-                                  onClick={() =>
-                                    void update({
-                                      action: 'remove-draft',
-                                      opinionId: opinion.id,
-                                    })
-                                  }
-                                >
-                                  移除
-                                </Button>
-                              </Space>
-                            )}
+                          {tester && !room.state.finalized && (
+                            <Space wrap>
+                              <Button
+                                size="small"
+                                disabled={blocked}
+                                onClick={() => {
+                                  setEditId(opinion.id);
+                                  setBody(opinion.body);
+                                  setTarget(opinion.target);
+                                  setAffected(opinion.caseIds);
+                                }}
+                              >
+                                编辑
+                              </Button>
+                              <Button
+                                size="small"
+                                disabled={blocked}
+                                onClick={() =>
+                                  void update({
+                                    action: 'remove-draft',
+                                    opinionId: opinion.id,
+                                  })
+                                }
+                              >
+                                移除
+                              </Button>
+                            </Space>
+                          )}
                           {tester &&
                             assessment &&
                             room.state.finalized &&
@@ -1314,21 +1096,19 @@ export function UiReviewWorkspace({
                             ? '补充修改意见'
                             : '记录评审意见'}
                       </h3>
-                      {!inlineCaseId && (
-                        <Radio.Group
-                          aria-label="意见对象"
-                          value={target}
-                          onChange={(event) => {
-                            setTarget(event.target.value as Target);
-                            setAffected([active.id]);
-                          }}
-                        >
-                          <Radio.Button value="case">用例</Radio.Button>
-                          <Radio.Button value="scenario">场景</Radio.Button>
-                          <Radio.Button value="set">测试集</Radio.Button>
-                        </Radio.Group>
-                      )}
-                      {!inlineCaseId && target !== 'case' && (
+                      <Radio.Group
+                        aria-label="意见对象"
+                        value={target}
+                        onChange={(event) => {
+                          setTarget(event.target.value as Target);
+                          setAffected([active.id]);
+                        }}
+                      >
+                        <Radio.Button value="case">用例</Radio.Button>
+                        <Radio.Button value="scenario">场景</Radio.Button>
+                        <Radio.Button value="set">测试集</Radio.Button>
+                      </Radio.Group>
+                      {target !== 'case' && (
                         <Checkbox.Group
                           aria-label="受影响用例"
                           className="ui-review-start-list"
@@ -1346,11 +1126,7 @@ export function UiReviewWorkspace({
                         value={body}
                         autoSize={{ minRows: 3, maxRows: 8 }}
                         maxLength={10000}
-                        onChange={(event) => {
-                          setBody(event.target.value);
-                          if (inlineCaseId && !editId)
-                            inlineDrafts?.set(inlineCaseId, event.target.value);
-                        }}
+                        onChange={(event) => setBody(event.target.value)}
                         disabled={blocked}
                       />
                       <Space wrap>
@@ -1359,23 +1135,18 @@ export function UiReviewWorkspace({
                             取消编辑
                           </Button>
                         )}
-                        {(!inlineCaseId ||
-                          room.cases.length > 1 ||
-                          room.state.finalized ||
-                          editId) && (
-                          <Button
-                            type="primary"
-                            size="small"
-                            disabled={
-                              blocked || !body.trim() || !affectedCaseIds.length
-                            }
-                            onClick={() => void saveOpinion()}
-                          >
-                            {room.state.finalized
-                              ? '记录并退回 AI'
-                              : '保存评审意见'}
-                          </Button>
-                        )}
+                        <Button
+                          type="primary"
+                          size="small"
+                          disabled={
+                            blocked || !body.trim() || !affectedCaseIds.length
+                          }
+                          onClick={() => void saveOpinion()}
+                        >
+                          {room.state.finalized
+                            ? '记录并退回 AI'
+                            : '保存评审意见'}
+                        </Button>
                       </Space>
                     </div>
                   )}
@@ -1383,12 +1154,6 @@ export function UiReviewWorkspace({
               )}
             </aside>
           </div>
-          {inlineCaseId && (
-            <details className="ui-review-inline-session">
-              <summary>评审会话</summary>
-              {sessionPicker}
-            </details>
-          )}
         </>
       )}
       <Modal

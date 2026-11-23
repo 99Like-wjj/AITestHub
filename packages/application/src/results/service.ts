@@ -29,6 +29,7 @@ import {
 } from './evidence.js';
 import { persistReportRevision } from '../reports/service.js';
 import { assertSafeResultContent } from './safety.js';
+import { readHumanRetests, recordHumanRetest } from './human-retests.js';
 import { ensureFailedProblemInTransaction } from '../issues/problems.js';
 import { lockReportResult } from '../issues/review-evidence.js';
 import { missingUiFiles } from './preparation.js';
@@ -75,6 +76,14 @@ export class ResultService {
   }
   missingUiFiles(actor: ActorContext, projectId: string, runId: string) {
     return missingUiFiles(this.db, actor, projectId, runId);
+  }
+
+  readHumanRetests(actor: ActorContext, projectId: string, raw: unknown) {
+    return readHumanRetests(this.db, actor, projectId, raw);
+  }
+
+  recordHumanRetest(actor: ActorContext, projectId: string, raw: unknown) {
+    return recordHumanRetest(this.operations, actor, projectId, raw);
   }
 
   async receipt(actor: ActorContext, projectId: string, submissionId: string) {

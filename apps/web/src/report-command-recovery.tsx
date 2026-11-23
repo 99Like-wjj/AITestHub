@@ -20,7 +20,9 @@ export type ReportReviewOperation =
   | 'problems.confirm-batch'
   | 'problems.review-retest'
   | 'problems.report-extra'
-  | 'results.assess';
+  | 'results.assess'
+  | 'results.human-retest'
+  | 'issues.file-from-report';
 
 /** Persist only a receipt locator. The notes and attachment selection stay in the form. */
 export function useReportCommandRecovery(

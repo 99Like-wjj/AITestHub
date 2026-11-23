@@ -10,6 +10,7 @@ export type UiCaseRevision = {
 
 type UiCase = Extract<AssetContent, { kind: 'UI'; testPoint: string }>;
 type Step = NonNullable<UiCase['steps']>[number];
+type Assertion = NonNullable<UiCase['assertions']>[number];
 
 function uiCase(content: AssetContent): UiCase | undefined {
   return 'testPoint' in content && content.kind === 'UI' ? content : undefined;
@@ -37,7 +38,7 @@ export function UiCaseText({ content }: { content: AssetContent }) {
         </div>
       )}
       <div>
-        <dt>业务步骤与逐步预期</dt>
+        <dt>参考路径与逐步预期</dt>
         <dd>
           {value.steps?.length ? (
             <ol className="ui-case-steps">
@@ -54,7 +55,32 @@ export function UiCaseText({ content }: { content: AssetContent }) {
               ))}
             </ol>
           ) : (
-            <span className="muted">该修订未记录文字业务步骤</span>
+            <span className="muted">该修订未记录参考路径</span>
+          )}
+        </dd>
+      </div>
+      <div>
+        <dt>业务断言与取证参考</dt>
+        <dd>
+          {value.assertions?.length ? (
+            <ul className="ui-case-assertion-list">
+              {value.assertions.map((assertion) => (
+                <li key={assertion.id}>
+                  <span className="caption">{assertion.id}</span>
+                  {' · '}
+                  {assertion.expected}
+                  {assertion.evidenceHint && (
+                    <div className="muted">
+                      取证参考 · {assertion.evidenceHint}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <span className="muted">
+              待完善 · 该修订未单列可独立核对的业务断言。
+            </span>
           )}
         </dd>
       </div>
@@ -82,6 +108,16 @@ function stepText(step: Step | undefined) {
   return step
     ? [step.action, step.expected].filter(Boolean).join('\n预期 ')
     : '';
+}
+
+function assertionText(assertion: Assertion | undefined) {
+  if (!assertion) return '';
+  return [
+    assertion.expected,
+    assertion.evidenceHint && '取证参考 · ' + assertion.evidenceHint,
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function changedOrder(before: Step[], after: Step[]) {
@@ -131,6 +167,12 @@ function RevisionCompare({
     return <Empty description="未读取到可比较的两份修订。" />;
   const beforeSteps = before.steps ?? [];
   const afterSteps = after.steps ?? [];
+  const beforeAssertions = new Map(
+    before.assertions?.map((item) => [item.id, item]),
+  );
+  const afterAssertions = new Map(
+    after.assertions?.map((item) => [item.id, item]),
+  );
   const fields = [
     ['标题', before.title, after.title],
     ['测试点', before.testPoint, after.testPoint],
@@ -148,6 +190,13 @@ function RevisionCompare({
       ],
     ),
     ['整体预期', before.expected, after.expected],
+    ...[
+      ...new Set([...beforeAssertions.keys(), ...afterAssertions.keys()]),
+    ].map((id) => [
+      '业务断言 ' + id,
+      assertionText(beforeAssertions.get(id)),
+      assertionText(afterAssertions.get(id)),
+    ]),
     [
       '需求依据',
       before.basisRefs.map((ref) => ref.description).join('\n'),

@@ -8,21 +8,29 @@ import {
   manualVerificationInputSchema,
   issueDetailSchema,
   manualVerificationScopeSchema,
+  fileReportIssueInputSchema,
+  fileReportIssueReceiptSchema,
   type Issue,
 } from '../../../contracts/src/issues.js';
+import { reportScopeItemSchema } from '../../../contracts/src/ui-archives.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import type {
   Database,
   SqlExecutor,
 } from '../../../persistence/src/database.js';
 import { requireProject } from '../access/policy.js';
+import { audit } from '../events.js';
 import { issueListFilter } from './list-filter.js';
 import { readIssueCounts } from './counts.js';
 import { OperationService } from '../operations/service.js';
 import { forbidden, DomainError, stale } from '../errors.js';
 import { assertSafeResultContent } from '../results/safety.js';
 import { recordRequirementActivity } from '../requirements/service.js';
-import { issueConfirmationEvidence } from './review-evidence.js';
+import {
+  issueConfirmationEvidence,
+  lockReportResult,
+  readResultRetestFact,
+} from './review-evidence.js';
 import {
   issueDto,
   issueRow,
@@ -131,6 +139,192 @@ export class IssueService {
       },
       projectId,
     );
+  }
+  async fileFromReport(actor: ActorContext, projectId: string, raw: unknown) {
+    assertSafeResultContent(raw);
+    const input = fileReportIssueInputSchema.parse(raw);
+    const scope = input.reportReview;
+    return this.operations.execute(
+      actor,
+      'issues.file-from-report',
+      input.commandId,
+      { projectId, ...input },
+      async (tx) => {
+        await requireProject(tx, actor, projectId, 'reviews.approve');
+        await lockIssueProject(tx, projectId);
+      },
+      async (tx) => {
+        const source = await lockReportResult(tx, projectId, scope);
+        const retest = input.retestId
+          ? await readResultRetestFact(tx, projectId, scope, input.retestId)
+          : undefined;
+        if (input.retestId && !retest)
+          throw new DomainError(
+            'NOT_FOUND',
+            '复测记录不属于此报告结果修订。',
+            404,
+          );
+        const observedFailure =
+          source.content.originalOutcome === 'failed' &&
+          Boolean(
+            source.content.actualObservations.trim() ||
+            source.content.stepObservations?.length ||
+            source.content.observations?.length,
+          );
+        if (retest?.outcome !== 'reproduced' && !observedFailure)
+          throw new DomainError(
+            'PRECONDITIONS_MISSING',
+            '请登记可复现的人工观察后再提缺陷。',
+            422,
+          );
+        const prior = (
+          await tx.query<{ issue_id: string }>(
+            `SELECT l.issue_id FROM app.issue_result_links l JOIN app.issues i ON i.id=l.issue_id
+             WHERE l.project_id=$1 AND l.result_id=$2 AND l.source_revision_id=$3
+               AND i.merged_into_id IS NULL ORDER BY i.number LIMIT 1`,
+            [projectId, scope.resultId, scope.resultRevisionId],
+          )
+        ).rows[0];
+        if (
+          prior &&
+          input.target === 'existing' &&
+          prior.issue_id !== input.issueId
+        )
+          throw new DomainError(
+            'BUSINESS_CONFLICT',
+            '当前结果修订已有正式缺陷，请核对后继续处理。',
+            409,
+          );
+        if (prior)
+          return fileReportIssueReceiptSchema.parse({
+            issue: issueDto(await issueRow(tx, projectId, prior.issue_id)),
+            alreadyLinked: true,
+            source: scope,
+          });
+
+        const item = reportScopeItemSchema.parse(source.snapshot);
+        let issue;
+        if (input.target === 'new') {
+          const requirementVersionId =
+            item.requirementVersionId ?? input.requirementVersionId ?? null;
+          const version = requirementVersionId
+            ? (
+                await tx.query<{ requirement_id: string }>(
+                  'SELECT requirement_id FROM app.requirement_versions WHERE project_id=$1 AND id=$2',
+                  [projectId, requirementVersionId],
+                )
+              ).rows[0]
+            : undefined;
+          const requirementId =
+            ('requirementId' in item ? item.requirementId : null) ??
+            version?.requirement_id ??
+            input.requirementId;
+          if (!requirementId)
+            throw new DomainError(
+              'PRECONDITIONS_MISSING',
+              '此执行项需要明确的缺陷归属需求。',
+              422,
+            );
+          issue = await createIssueInTransaction(tx, actor, projectId, {
+            title: input.title,
+            description: input.description,
+            severity: input.severity,
+            assigneeId: input.assigneeId,
+            requirementId,
+            requirementVersionId,
+            source: 'manualTester',
+            resultIds: [],
+          });
+        } else {
+          const existing = await issueRow(tx, projectId, input.issueId, true);
+          if (existing.row_version !== input.issueRowVersion) stale();
+          if (existing.merged_into_id)
+            throw new DomainError(
+              'BUSINESS_CONFLICT',
+              '该缺陷已合并，请选择保留的正式缺陷。',
+              409,
+            );
+          issue = issueDto(existing);
+          await tx.query(
+            'UPDATE app.issues SET row_version=row_version+1,updated_at=clock_timestamp() WHERE id=$1',
+            [issue.id],
+          );
+        }
+        await tx.query(
+          `INSERT INTO app.issue_result_links(project_id,issue_id,result_id,source_revision_id)
+           VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+          [projectId, issue.id, scope.resultId, scope.resultRevisionId],
+        );
+        const candidate = (
+          await tx.query<{ id: string }>(
+            `UPDATE app.problem_candidates SET state='confirmed',decision_note='',row_version=row_version+1,updated_at=clock_timestamp()
+             WHERE project_id=$1 AND source_result_id=$2 AND source_result_revision_id=$3 AND state='pendingConfirmation'
+             RETURNING id`,
+            [projectId, scope.resultId, scope.resultRevisionId],
+          )
+        ).rows[0];
+        if (candidate) {
+          await tx.query(
+            'INSERT INTO app.issue_problem_links(project_id,issue_id,problem_id) VALUES($1,$2,$3)',
+            [projectId, issue.id, candidate.id],
+          );
+          await audit(tx, actor, 'problem.confirmed', candidate.id, projectId, {
+            issueId: issue.id,
+            sourceResultId: scope.resultId,
+            previousState: 'pendingConfirmation',
+            reportReview: scope,
+          });
+        }
+        const current = await issueRow(tx, projectId, issue.id);
+        if (input.target === 'existing')
+          await recordRequirementActivity(
+            tx,
+            projectId,
+            current.requirement_id,
+          );
+        await issueEvent(
+          tx,
+          actor,
+          current,
+          'report-source-linked',
+          current.assignee_id,
+          current.assignee_id,
+          {
+            reportReview: scope,
+            ...(retest ? { retestId: retest.id } : {}),
+          },
+        );
+        return fileReportIssueReceiptSchema.parse({
+          issue: issueDto(current),
+          alreadyLinked: false,
+          source: scope,
+        });
+      },
+      projectId,
+    );
+  }
+  async reportAssignees(actor: ActorContext, projectId: string) {
+    return this.db.transaction(async (tx) => {
+      await requireProject(tx, actor, projectId, 'reviews.approve');
+      const result = await tx.query<{
+        id: string;
+        display_name: string;
+        developer: boolean;
+      }>(
+        `SELECT u.id,u.display_name,'developer'=ANY(m.roles) AS developer
+         FROM app.project_members m JOIN app.users u ON u.id=m.user_id
+         WHERE m.project_id=$1 AND m.active AND u.active
+         ORDER BY developer DESC,u.display_name,u.id`,
+        [projectId],
+      );
+      return {
+        users: result.rows.map((user) => ({
+          id: user.id,
+          displayName: user.display_name,
+          developer: user.developer,
+        })),
+      };
+    });
   }
   async list(actor: ActorContext, projectId: string, raw: unknown = {}) {
     const input = issueListQuerySchema.parse(raw);

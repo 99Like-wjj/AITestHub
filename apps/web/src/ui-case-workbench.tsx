@@ -35,10 +35,10 @@ import { StandaloneWorkbenchHeader } from './standalone-workbench-header';
 import { AppIcon } from './app-icon';
 import { UiCaseReader } from './ui-case-reader';
 import {
-  UiReviewWorkspace,
+  UiCaseReviewPane,
   assessmentLabels,
-  type UiCaseAssessmentDraft,
-} from './ui-review-workspace';
+  type UiCaseReviewDraft,
+} from './ui-case-review-pane';
 import type { CaseScope } from './requirements';
 import {
   matchingApproval,
@@ -211,10 +211,10 @@ export function UiCaseWorkbench({
   onEdit,
   onDetails,
   onOpenTeam,
+  onOpenHistory,
   onSupplement,
   onChanged,
-  inlineDrafts,
-  inlineAssessments,
+  reviewDrafts,
 }: {
   scope: CaseScope;
   projectName: string;
@@ -235,13 +235,13 @@ export function UiCaseWorkbench({
   onEdit: (asset: Asset) => void;
   onDetails: (asset: Asset) => void;
   onOpenTeam: (meetingId: string) => void;
+  onOpenHistory: (meetingId: string, caseId: string) => void;
   onSupplement: (
     asset: Asset,
     origin?: { meetingId: string; opinionId: string; round: number },
   ) => void;
   onChanged: () => Promise<void>;
-  inlineDrafts: Map<string, string>;
-  inlineAssessments: Map<string, UiCaseAssessmentDraft>;
+  reviewDrafts: Map<string, UiCaseReviewDraft>;
 }) {
   const [filter, setFilter] = useState<Filter>('all');
   const [search, setSearch] = useState('');
@@ -264,7 +264,6 @@ export function UiCaseWorkbench({
   }>();
   const [readError, setReadError] = useState<string>();
   const [busy, setBusy] = useState(false);
-  const [reviewActions, setReviewActions] = useState<HTMLElement | null>(null);
   const [scopePlan, setScopePlan] = useState(false);
   const [planItems, setPlanItems] = useState<UiPlanEligibility[]>();
   const [planError, setPlanError] = useState<string>();
@@ -477,7 +476,7 @@ export function UiCaseWorkbench({
   );
   const caseRound = review?.cases.some((row) => row.id === activeId)
     ? Math.max(
-        1,
+        review.state.caseWorkbenchRound ?? 1,
         ...(texts ?? []).map((item) => item.round),
         ...(assessments ?? []).map((item) => item.round),
       )
@@ -900,7 +899,7 @@ export function UiCaseWorkbench({
                   aria-label="评审与复审"
                 >
                   <header className="ui-case-column-head">
-                    <h2>评审与复审</h2>
+                    <h2>用例评审</h2>
                     {(readonly || earlier || caseRound) && (
                       <span className="ui-case-round">
                         {readonly || earlier
@@ -928,17 +927,50 @@ export function UiCaseWorkbench({
                       </div>
                     )}
                     {readonly || earlier ? (
-                      <Alert
-                        type="info"
-                        showIcon
-                        title={
-                          earlier ? '当前阅读的是历史修订。' : '当前范围只读。'
-                        }
-                      />
+                      <>
+                        <Alert
+                          type="info"
+                          showIcon
+                          title={
+                            earlier
+                              ? '当前阅读的是历史修订。'
+                              : '当前范围只读。'
+                          }
+                        />
+                        {earlier && (
+                          <Button size="small" onClick={() => onRevision()}>
+                            切到当前修订
+                          </Button>
+                        )}
+                      </>
                     ) : (
                       active &&
                       focusedDetail?.asset.revisionId === active.revisionId && (
                         <>
+                          <UiCaseReviewPane
+                            key={active.id + ':' + active.revisionId}
+                            asset={active}
+                            userId={userId}
+                            writable={writable}
+                            drafts={reviewDrafts}
+                            onRead={setLiveReview}
+                            onBusy={setBusy}
+                            onCompare={(from, to) =>
+                              setComparison({
+                                assetId: active.id,
+                                from,
+                                to,
+                                key: crypto.randomUUID(),
+                              })
+                            }
+                            onApprove={onApprove}
+                            onChanged={onChanged}
+                            onOpenTeam={onOpenTeam}
+                            onOpenHistory={(id) => onOpenHistory(id, active.id)}
+                            onSupplement={(origin) =>
+                              onSupplement(active, origin)
+                            }
+                          />
                           <Space wrap size={6}>
                             {writable && (
                               <Button
@@ -973,66 +1005,10 @@ export function UiCaseWorkbench({
                               />
                             </Dropdown>
                           </Space>
-                          {caseStage(active) === 'approved' && (
-                            <article className="ui-case-approved-note">
-                              <strong>当前修订已批准</strong>
-                              <p>
-                                批准修订 r{active.revisionNo}
-                                。通过执行范围预览核对本轮可带入的用例。
-                              </p>
-                            </article>
-                          )}
-                          <UiReviewWorkspace
-                            key={active.id}
-                            projectId={scope.projectId}
-                            userId={userId}
-                            requirementVersionId={scope.requirementVersionId}
-                            requirementTitle={scope.title}
-                            versionNo={scope.versionNo}
-                            assets={currentCases}
-                            scenarioTitles={scenarios}
-                            initialCases={[active.id]}
-                            inlineCaseId={active.id}
-                            inlineActions={reviewActions}
-                            onOpenTeam={onOpenTeam}
-                            inlineDrafts={inlineDrafts}
-                            inlineAssessments={inlineAssessments}
-                            onRead={setLiveReview}
-                            onCompare={(from, to) =>
-                              setComparison({
-                                assetId: active.id,
-                                from,
-                                to,
-                                key: crypto.randomUUID(),
-                              })
-                            }
-                            tester={writable}
-                            onApprove={onApprove}
-                            updated={onChanged}
-                            onBusyChange={setBusy}
-                            onSupplement={(origin) =>
-                              onSupplement(active, origin)
-                            }
-                          />
                         </>
                       )
                     )}
                   </div>
-                  <footer
-                    ref={setReviewActions}
-                    className="ui-case-column-foot ui-case-review-actions"
-                  >
-                    {writable && active && caseStage(active) === 'approved' && (
-                      <Button
-                        size="small"
-                        type="primary"
-                        aria-label="从当前用例预览执行范围"
-                        onClick={() => setScopePlan(true)}
-                      >
-                        预览执行范围
-                      </Button>
-                    )}
-                  </footer>
                 </aside>
               </div>
             </>

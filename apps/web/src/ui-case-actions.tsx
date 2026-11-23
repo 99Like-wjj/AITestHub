@@ -14,6 +14,11 @@ import { api, describeError, isUncertainMutationError } from './api';
 import { currentIdentityOwner } from './identity-context';
 import { workspaceDrafts } from './workspace-drafts';
 import type { CaseScope } from './requirements';
+import {
+  UiAssertionFields,
+  uiAssertionContent,
+  type UiAssertionDraft,
+} from './ui-assertion-fields';
 
 export type UiSupplementSource = {
   caseId: string;
@@ -40,6 +45,7 @@ type Fields = {
   testPoint?: string;
   preconditions?: string;
   steps?: { action?: string; expected?: string }[];
+  assertions?: UiAssertionDraft[];
   expected?: string;
   basis?: string;
   goal?: string;
@@ -191,6 +197,7 @@ export function UiCaseActionDialog({
           ...(step.expected?.trim() ? { expected: step.expected.trim() } : {}),
         })),
         expected: values.expected,
+        ...uiAssertionContent(values.assertions),
         basisRefs: values.basis?.trim()
           ? [
               {
@@ -589,7 +596,7 @@ export function UiCaseActionDialog({
               >
                 <Input.TextArea
                   rows={8}
-                  placeholder="粘贴用例数组。每条包含 kind、title、testPoint、preconditions、steps、expected 和 basisRefs。"
+                  placeholder="粘贴 UI 用例数组。每条包含 kind、title、testPoint、preconditions、steps、expected、basisRefs，可补充 assertions。"
                 />
               </Form.Item>
             ) : (
@@ -646,6 +653,7 @@ export function UiCaseActionDialog({
                     </div>
                   )}
                 </Form.List>
+                <UiAssertionFields disabled={locked} />
                 <Form.Item
                   name="expected"
                   label="整体预期"

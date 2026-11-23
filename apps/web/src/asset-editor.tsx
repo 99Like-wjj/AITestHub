@@ -26,6 +26,11 @@ import { basisRefSchema } from '../../../packages/contracts/src/domain';
 import { api, isUncertainMutationError, describeError } from './api';
 import { idSchema } from '../../../packages/contracts/src/base';
 import { uiLayers } from './ui-layers';
+import {
+  UiAssertionFields,
+  uiAssertionContent,
+  type UiAssertionDraft,
+} from './ui-assertion-fields';
 
 export type AssetEditorTarget = {
   targetType: AssetTargetType;
@@ -44,6 +49,7 @@ interface Fields {
   expected: string;
   testPoint: string;
   steps: { action: string; expected?: string | undefined }[];
+  assertions: UiAssertionDraft[];
 }
 const lines = (value: string | undefined) =>
   (value ?? '')
@@ -141,6 +147,10 @@ export function AssetEditor({
             : '',
       expected: content && 'expected' in content ? content.expected : '',
       testPoint: content && 'testPoint' in content ? content.testPoint : '',
+      assertions:
+        content && 'assertions' in content && content.kind === 'UI'
+          ? (content.assertions ?? [])
+          : [],
       steps:
         content &&
         'kind' in content &&
@@ -184,6 +194,7 @@ export function AssetEditor({
           kind: 'UI',
           scenarioId: target.scenarioId,
           ...caseCommon(values, basis),
+          ...uiAssertionContent(values.assertions),
           steps: values.steps.map(({ action, expected }) => ({
             action,
             ...(expected?.trim() ? { expected } : {}),
@@ -401,6 +412,9 @@ export function AssetEditor({
                 maxLength={100000}
               />
             </Form.Item>
+          )}
+          {target?.targetType === 'case' && (
+            <UiAssertionFields disabled={pending || uncertain} />
           )}
           {target?.targetType === 'case' && (
             <Form.Item

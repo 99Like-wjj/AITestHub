@@ -46,10 +46,8 @@ import {
   RequirementDirectoryLabel,
 } from './requirement-directory';
 import { UiCaseText } from './ui-case-reader';
-import {
-  UiReviewWorkspace,
-  type UiCaseAssessmentDraft,
-} from './ui-review-workspace';
+import { UiReviewWorkspace } from './ui-review-workspace';
+import type { UiCaseReviewDraft } from './ui-case-review-pane';
 import {
   UiCaseWorkbench,
   UiReviewHistory,
@@ -180,8 +178,7 @@ export function AssetsPage({
     checkpoint?: CoverageCheckpoint;
   }>();
   const recentCase = useRef(new Map<string, string>());
-  const inlineDrafts = useRef(new Map<string, string>());
-  const inlineAssessments = useRef(new Map<string, UiCaseAssessmentDraft>());
+  const caseReviewDrafts = useRef(new Map<string, UiCaseReviewDraft>());
   const libraryScroll = useRef(0);
   const reviewWorkspace = caseRoute.mode === 'meeting';
   const readerWorkspace = caseRoute.mode === 'workbench';
@@ -932,6 +929,9 @@ export function AssetsPage({
           onEdit={edit}
           onDetails={selectAsset}
           onOpenTeam={(id) => openWorkspace(scope, 'meeting', undefined, id)}
+          onOpenHistory={(id, caseId) =>
+            openWorkspace(scope, 'workbench', caseId, id)
+          }
           onSupplement={(asset, origin) => {
             setCaseAction({
               kind: 'supplement',
@@ -945,8 +945,7 @@ export function AssetsPage({
             });
           }}
           onChanged={changed}
-          inlineDrafts={inlineDrafts.current}
-          inlineAssessments={inlineAssessments.current}
+          reviewDrafts={caseReviewDrafts.current}
         />
       )}
       {reviewWorkspace && scope && (

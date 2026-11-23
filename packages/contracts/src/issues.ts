@@ -92,6 +92,42 @@ export const problemReviewRetestOutcomeSchema = z.enum([
   'notReproduced',
   'inconclusive',
 ]);
+export const resultRetestFields = {
+  outcome: problemReviewRetestOutcomeSchema.exclude(['waiting']),
+  reproduction: z.string().trim().min(1).max(10_000),
+  note: z.string().trim().min(1).max(10_000),
+  observedAt: timestampSchema,
+  reviewAttachmentFileIds: reviewAttachmentFileIdsSchema,
+};
+export const resultRetestInputSchema = z.strictObject({
+  commandId: commandIdSchema,
+  reportReview: reportProblemReviewScopeSchema,
+  baseRetestId: idSchema.nullable(),
+  ...resultRetestFields,
+});
+const reportIssueFields = {
+  commandId: commandIdSchema,
+  reportReview: reportProblemReviewScopeSchema,
+  retestId: idSchema.optional(),
+};
+export const fileReportIssueInputSchema = z.discriminatedUnion('target', [
+  z.strictObject({
+    ...reportIssueFields,
+    target: z.literal('new'),
+    title: titleSchema,
+    description,
+    severity: issueSeveritySchema,
+    assigneeId: idSchema,
+    requirementId: idSchema.optional(),
+    requirementVersionId: idSchema.optional(),
+  }),
+  z.strictObject({
+    ...reportIssueFields,
+    target: z.literal('existing'),
+    issueId: idSchema,
+    issueRowVersion: persistedRowVersionSchema,
+  }),
+]);
 export const recordProblemReviewRetestInputSchema = z.strictObject({
   commandId: commandIdSchema,
   rowVersion: persistedRowVersionSchema,
@@ -139,6 +175,8 @@ export const problemOperationLookupSchema = z.strictObject({
     'problems.review-retest',
     'problems.report-extra',
     'results.assess',
+    'results.human-retest',
+    'issues.file-from-report',
   ]),
   key: commandIdSchema,
 });
@@ -345,6 +383,32 @@ export const problemReviewImageSchema = z.strictObject({
   fileAvailable: z.boolean(),
   downloadPath: z.string(),
 });
+export const resultRetestSchema = z.strictObject({
+  id: idSchema,
+  reportReview: reportProblemReviewScopeSchema,
+  ...resultRetestFields,
+  images: z.array(problemReviewImageSchema),
+  actorId: idSchema,
+  createdAt: timestampSchema,
+});
+export const resultRetestListSchema = z.strictObject({
+  retests: z.array(resultRetestSchema),
+});
+export const resultRetestReceiptSchema = z.strictObject({
+  retest: resultRetestSchema,
+});
+export const fileReportIssueReceiptSchema = z.strictObject({
+  issue: issueSchema,
+  alreadyLinked: z.boolean(),
+  source: reportProblemReviewScopeSchema,
+});
+export const reportIssueAssigneesSchema = z.strictObject({
+  users: z.array(z.strictObject({
+    id: idSchema,
+    displayName: z.string(),
+    developer: z.boolean(),
+  })),
+});
 export const problemReviewRetestSchema = z.strictObject({
   id: idSchema,
   reportReview: reportProblemReviewScopeSchema,
@@ -525,7 +589,7 @@ export const issueDetailSchema = z.strictObject({
   evidence: z.array(problemEvidenceSchema),
   reviewEvidence: z.array(z.strictObject({
     eventId: idSchema,
-    problemId: idSchema,
+    problemId: idSchema.nullable(),
     resultId: idSchema.nullable(),
     resultRevisionId: idSchema.nullable(),
     reportReview: reportProblemReviewScopeSchema.optional(),

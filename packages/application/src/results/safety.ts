@@ -9,7 +9,7 @@ export function assertSafeResultContent(value: unknown): void {
   const reject = (): never => {
     throw new DomainError(
       'VALIDATION_ERROR',
-      '结果含未脱敏凭据，请在本地生成安全副本后重新提交。',
+      '结果文字含有认证凭据，请在观察说明中引用证据原件并移除凭据。',
       400,
     );
   };

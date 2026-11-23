@@ -145,6 +145,60 @@ function sharedBindingMatches(a: UiReviewBasis, b: UiReviewBasis) {
   );
 }
 
+function caseReviewRound(state: UiReviewMeetingState, caseId: string) {
+  return Math.max(
+    state.caseWorkbenchRound ?? 1,
+    ...state.items
+      .filter((item) => item.basis.caseId === caseId)
+      .map((item) => item.round),
+  );
+}
+
+function currentCaseAssessment(
+  state: UiReviewMeetingState,
+  current: UiReviewBasis,
+) {
+  return state.assessments?.findLast(
+    (entry) =>
+      entry.caseId === current.caseId &&
+      entry.revisionId === current.revisionId,
+  );
+}
+
+function currentCaseReview(
+  state: UiReviewMeetingState,
+  current: UiReviewBasis,
+) {
+  return (
+    state.noChange.some(
+      (basis) =>
+        basis.caseId === current.caseId && bindingMatches(basis, current),
+    ) ||
+    latestUiReviewItems(state).some(
+      (item) =>
+        item.basis.caseId === current.caseId &&
+        item.reply?.revisionId === current.revisionId &&
+        sharedBindingMatches(item.basis, current),
+    )
+  );
+}
+
+function caseHasOpenItems(state: UiReviewMeetingState, caseId: string) {
+  return latestUiReviewItems(state).some(
+    (item) => item.basis.caseId === caseId && item.state !== 'resolved',
+  );
+}
+
+function pendingCaseReview(
+  state: UiReviewMeetingState,
+  current: UiReviewBasis,
+) {
+  return (
+    currentCaseReview(state, current) &&
+    currentCaseAssessment(state, current)?.outcome !== 'resolved'
+  );
+}
+
 function makeBasis(asset: AssetRow, chain: AssetRow[]): UiReviewBasis {
   const scene = chain.find((row) => row.target_type === 'scenario');
   const set = chain.find((row) => row.target_type === 'set');
@@ -168,7 +222,7 @@ export async function uiMeetingGate(
   const current = makeBasis(asset, chain);
   const rooms = (
     await tx.query<Pick<Room, 'id' | 'state'>>(
-      'SELECT id,state FROM app.ui_review_meetings WHERE project_id=$1 AND case_ids @> ARRAY[$2]::uuid[] ORDER BY id',
+      'SELECT id,state FROM app.ui_review_meetings WHERE project_id=$1 AND case_ids @> ARRAY[$2]::uuid[] ORDER BY created_at DESC,id DESC',
       [asset.project_id, asset.id],
     )
   ).rows;
@@ -179,13 +233,20 @@ export async function uiMeetingGate(
     round: number;
     revisionId: string;
   }> = [];
+  let checkedCurrentReview = false;
   for (const room of rooms) {
     const state = uiReviewMeetingStateSchema.parse(room.state);
     if (!state.finalized) continue;
-    const assessment = state.assessments?.findLast(
-      (entry) =>
-        entry.caseId === asset.id && entry.revisionId === current.revisionId,
-    );
+    const assessment = currentCaseAssessment(state, current);
+    if (
+      !checkedCurrentReview &&
+      state.caseWorkbenchRound &&
+      currentCaseReview(state, current)
+    ) {
+      checkedCurrentReview = true;
+      if (assessment?.outcome !== 'resolved')
+        reasons.push('请保存当前修订的人工复审通过结论后再批准。');
+    }
     if (assessment?.outcome === 'inconclusive')
       reasons.push('当前修订的人工复审结论为无法确认。');
     for (const item of latestUiReviewItems(state).filter(
@@ -211,6 +272,7 @@ export async function uiMeetingGate(
       }
     }
   }
+  history.sort((a, b) => a.meetingId.localeCompare(b.meetingId));
   return { reasons: [...new Set(reasons)], history };
 }
 
@@ -251,6 +313,7 @@ export class UiReviewService {
       );
       const waiting = new Set<string>();
       const human = new Set<string>();
+      const reopened = new Set<string>();
       const uncertain = new Set<string>();
       const states = (
         await tx.query<{ state: unknown }>(
@@ -261,9 +324,15 @@ export class UiReviewService {
       ).rows;
       for (const row of states) {
         const state = uiReviewMeetingStateSchema.parse(row.state);
-        for (const basis of state.noChange)
-          if (revisions.get(basis.caseId) === basis.revisionId)
-            human.add(basis.caseId);
+        for (const basis of state.noChange) {
+          if (revisions.get(basis.caseId) !== basis.revisionId) continue;
+          human.add(basis.caseId);
+          if (
+            state.caseWorkbenchRound &&
+            currentCaseAssessment(state, basis)?.outcome !== 'resolved'
+          )
+            reopened.add(basis.caseId);
+        }
         for (const entry of latestUiReviewItems(state)) {
           const revisionId = revisions.get(entry.basis.caseId);
           if (
@@ -274,8 +343,10 @@ export class UiReviewService {
           if (
             entry.state === 'returned' &&
             revisionId === entry.reply?.revisionId
-          )
+          ) {
             human.add(entry.basis.caseId);
+            if (state.caseWorkbenchRound) reopened.add(entry.basis.caseId);
+          }
         }
         const assessed = new Map<string, string>();
         for (const entry of state.assessments ?? [])
@@ -291,7 +362,7 @@ export class UiReviewService {
           stage:
             waiting.has(asset.id) || asset.review_state === 'needsOptimization'
               ? 'needsOptimization'
-              : uncertain.has(asset.id)
+              : uncertain.has(asset.id) || reopened.has(asset.id)
                 ? 'waitingHuman'
                 : asset.review_state === 'approved'
                   ? 'approved'
@@ -321,11 +392,40 @@ export class UiReviewService {
           [projectId, requirementVersionId, caseId ?? null, archivedOnly],
         )
       ).rows;
-      return {
-        meetings: rows.map((row) =>
-          meetingSummary(row, uiReviewMeetingStateSchema.parse(row.state)),
-        ),
-      };
+      const meetings = rows.map((row) =>
+        meetingSummary(row, uiReviewMeetingStateSchema.parse(row.state)),
+      );
+      if (!caseId || archivedOnly || !rows.length) return { meetings };
+      const [asset] = await this.assets(
+        tx,
+        projectId,
+        [caseId],
+        requirementVersionId,
+      );
+      if (!asset) return { meetings };
+      const basis = makeBasis(asset, await ancestors(tx, asset));
+      const candidates = rows.map((row) => ({
+        id: row.id,
+        state: uiReviewMeetingStateSchema.parse(row.state),
+      }));
+      const active =
+        candidates.find(({ state }) => caseHasOpenItems(state, caseId)) ??
+        candidates.find(
+          ({ state }) =>
+            !state.finalized &&
+            state.scope.some(
+              (entry) =>
+                entry.caseId === caseId && bindingMatches(entry, basis, true),
+            ),
+        ) ??
+        candidates.find(
+          ({ state }) =>
+            state.finalized &&
+            currentCaseReview(state, basis) &&
+            (asset.review_state !== 'approved' ||
+              (state.caseWorkbenchRound && pendingCaseReview(state, basis))),
+        );
+      return { meetings, ...(active ? { activeMeetingId: active.id } : {}) };
     });
   }
 
@@ -408,6 +508,59 @@ export class UiReviewService {
         };
         for (const asset of refreshed)
           state.scope.push(makeBasis(asset, await ancestors(tx, asset)));
+        if (input.caseWorkbenchBasis) {
+          const [basis] = state.scope;
+          if (
+            input.caseIds.length !== 1 ||
+            !basis ||
+            basis.revisionId !== input.caseWorkbenchBasis.revisionId ||
+            basis.rowVersion !== input.caseWorkbenchBasis.rowVersion
+          )
+            stale();
+          const existing = (
+            await tx.query<Pick<Room, 'state'>>(
+              'SELECT state FROM app.ui_review_meetings WHERE project_id=$1 AND case_ids @> ARRAY[$2]::uuid[]',
+              [projectId, basis.caseId],
+            )
+          ).rows.map((row) => uiReviewMeetingStateSchema.parse(row.state));
+          if (
+            existing.some(
+              (entry) =>
+                caseHasOpenItems(entry, basis.caseId) ||
+                (entry.finalized &&
+                  entry.caseWorkbenchRound &&
+                  pendingCaseReview(entry, basis)) ||
+                (!entry.finalized &&
+                  entry.scope.some(
+                    (previous) =>
+                      previous.caseId === basis.caseId &&
+                      bindingMatches(previous, basis, true),
+                  )),
+            )
+          )
+            conflict('当前用例有可继续处理的评审会话，请打开该会话。');
+          state.caseWorkbenchRound =
+            1 +
+            existing.reduce(
+              (round, entry) =>
+                entry.finalized
+                  ? Math.max(round, caseReviewRound(entry, basis.caseId))
+                  : round,
+              0,
+            );
+          const draft = input.caseWorkbenchBasis.draft;
+          if (draft?.kind === 'no-change') state.noChange.push(basis);
+          if (draft?.kind === 'opinion')
+            state.draftOpinions.push({
+              id: randomUUID(),
+              authorId: actor.userId,
+              createdAt: new Date().toISOString(),
+              body: draft.body,
+              target: 'case',
+              targetId: basis.caseId,
+              caseIds: [basis.caseId],
+            });
+        }
         const row = (
           await tx.query<Room>(
             'INSERT INTO app.ui_review_meetings(project_id,requirement_version_id,case_ids,state,created_by) VALUES($1,$2,$3,$4,$5) RETURNING *',
@@ -457,6 +610,15 @@ export class UiReviewService {
             );
             if (input.opinion.id && !previous)
               conflict('草稿已移除或不属于本次评审。');
+            if (state.caseWorkbenchRound) {
+              if (previous && previous.authorId !== actor.userId)
+                conflict('只能编辑自己的评审草稿。');
+              for (const id of input.opinion.caseIds) {
+                const current = await this.basis(tx, projectId, room, id);
+                const opened = state.scope.find((entry) => entry.caseId === id);
+                if (!opened || !bindingMatches(opened, current, true)) stale();
+              }
+            }
             const entry = await this.opinion(
               tx,
               projectId,
@@ -474,7 +636,11 @@ export class UiReviewService {
           case 'remove-draft':
             if (
               state.finalized ||
-              !state.draftOpinions.some((o) => o.id === input.opinionId)
+              !state.draftOpinions.some(
+                (o) =>
+                  o.id === input.opinionId &&
+                  (!state.caseWorkbenchRound || o.authorId === actor.userId),
+              )
             )
               conflict('只有本次尚未定稿的意见可移除。');
             state.draftOpinions = state.draftOpinions.filter(
@@ -524,7 +690,7 @@ export class UiReviewService {
                 state.items.push({
                   opinionId: entry.id,
                   basis,
-                  round: 1,
+                  round: state.caseWorkbenchRound ?? 1,
                   state: 'waiting',
                 });
               }
@@ -536,12 +702,19 @@ export class UiReviewService {
                 !state.items.some((item) => item.basis.caseId === b.caseId),
             );
             state.finalized = true;
-            await this.markCases(tx, projectId, [...included], 'pending');
+            await this.markCases(
+              tx,
+              projectId,
+              [...included],
+              'pending',
+              Boolean(state.caseWorkbenchRound),
+            );
             await this.markCases(
               tx,
               projectId,
               state.items.map((item) => item.basis.caseId),
               'needsOptimization',
+              Boolean(state.caseWorkbenchRound),
             );
             break;
           }
@@ -582,22 +755,34 @@ export class UiReviewService {
             if (!state.finalized) conflict('请先完成会议定稿。');
             const current = await this.basis(tx, projectId, room, input.caseId);
             if (current.revisionId !== input.revisionId) stale();
-            const unresolved = latestUiReviewItems(state).filter(
+            const open = latestUiReviewItems(state).filter(
               (item) =>
-                item.basis.caseId === input.caseId && item.state === 'waiting',
+                item.basis.caseId === input.caseId && item.state !== 'resolved',
             );
-            if (unresolved.length)
+            if (open.some((item) => item.state === 'waiting'))
               conflict(
                 '此用例仍有等待 AI 回传的意见。回传后可保存人工复审结论。',
               );
-            const round = state.items.reduce(
-              (maximum, item) =>
-                item.basis.caseId === input.caseId
-                  ? Math.max(maximum, item.round)
-                  : maximum,
-              1,
-            );
+            if (state.caseWorkbenchRound && !currentCaseReview(state, current))
+              stale();
+            const round = caseReviewRound(state, input.caseId);
             const time = new Date().toISOString();
+            const decision = { actorId: actor.userId, time };
+            if (state.caseWorkbenchRound && input.outcome === 'resolved') {
+              for (const item of open) {
+                if (
+                  item.state !== 'returned' ||
+                  item.reply?.revisionId !== current.revisionId ||
+                  !sharedBindingMatches(item.basis, current)
+                )
+                  stale();
+                item.state = 'resolved';
+                item.decision = {
+                  ...decision,
+                  acceptedRevisionId: current.revisionId,
+                };
+              }
+            }
             if (input.outcome === 'needsRework') {
               if (!input.instruction)
                 throw new DomainError(
@@ -605,35 +790,47 @@ export class UiReviewService {
                   '请填写本轮补改要求。',
                   400,
                 );
-              const entry = await this.opinion(
-                tx,
-                projectId,
-                room,
-                {
-                  target: 'case',
-                  targetId: input.caseId,
-                  caseIds: [input.caseId],
-                  body: input.instruction,
-                },
-                actor.userId,
-              );
-              state.opinions.push(entry);
-              state.items.push({
-                opinionId: entry.id,
-                basis: current,
-                round:
-                  1 +
-                  state.items.reduce(
-                    (maximum, item) => Math.max(maximum, item.round),
-                    0,
-                  ),
-                state: 'waiting',
-              });
+              const next =
+                Math.max(round, ...state.items.map((item) => item.round)) + 1;
+              if (state.caseWorkbenchRound && open.length) {
+                for (const item of open) {
+                  item.state = 'rework';
+                  item.decision = decision;
+                  state.items.push({
+                    opinionId: item.opinionId,
+                    basis: current,
+                    round: next,
+                    state: 'waiting',
+                    instruction: input.instruction,
+                  });
+                }
+              } else {
+                const entry = await this.opinion(
+                  tx,
+                  projectId,
+                  room,
+                  {
+                    target: 'case',
+                    targetId: input.caseId,
+                    caseIds: [input.caseId],
+                    body: input.instruction,
+                  },
+                  actor.userId,
+                );
+                state.opinions.push(entry);
+                state.items.push({
+                  opinionId: entry.id,
+                  basis: current,
+                  round: next,
+                  state: 'waiting',
+                });
+              }
               await this.markCases(
                 tx,
                 projectId,
                 [input.caseId],
                 'needsOptimization',
+                Boolean(state.caseWorkbenchRound),
               );
             }
             (state.assessments ??= []).push({
@@ -794,7 +991,13 @@ export class UiReviewService {
           time: new Date().toISOString(),
         };
         item.state = 'returned';
-        await this.markCases(tx, projectId, [input.caseId], 'aiOptimized');
+        await this.markCases(
+          tx,
+          projectId,
+          [input.caseId],
+          'aiOptimized',
+          Boolean(state.caseWorkbenchRound),
+        );
         return this.save(tx, actor, projectId, room, state, 'reply');
       },
       projectId,
@@ -919,11 +1122,13 @@ export class UiReviewService {
     projectId: string,
     ids: string[],
     value: AssetRow['review_state'],
+    preserveApproved = false,
   ) {
     if (!ids.length) return;
     await tx.query(
-      'UPDATE app.test_assets SET review_state=$3,row_version=row_version+1,updated_at=clock_timestamp() WHERE project_id=$1 AND id=ANY($2::uuid[])',
-      [projectId, ids, value],
+      `UPDATE app.test_assets SET review_state=$3,row_version=row_version+1,updated_at=clock_timestamp()
+       WHERE project_id=$1 AND id=ANY($2::uuid[]) AND (NOT $4 OR review_state<>'approved')`,
+      [projectId, ids, value, preserveApproved],
     );
   }
   private async save(

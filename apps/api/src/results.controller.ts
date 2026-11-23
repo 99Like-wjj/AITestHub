@@ -245,6 +245,35 @@ export class ResultsController {
       ),
     );
   }
+  @Get('results/:resultId/human-retests')
+  async humanRetests(@Req() req: Request, @Res() res: Response) {
+    return res.json(
+      await this.results.readHumanRetests(
+        await this.actor(req, res),
+        this.project(req),
+        { ...req.query, resultId: idSchema.parse(req.params.resultId) },
+      ),
+    );
+  }
+  @Post('results/:resultId/human-retests')
+  async recordHumanRetest(@Req() req: Request, @Res() res: Response) {
+    const raw = z
+      .object({ reportReview: z.object({ resultId: idSchema }) })
+      .parse(req.body);
+    if (raw.reportReview.resultId !== idSchema.parse(req.params.resultId))
+      throw new DomainError(
+        'VALIDATION_ERROR',
+        '路径与人工复测结果不一致。',
+        400,
+      );
+    return res.json(
+      await this.results.recordHumanRetest(
+        await this.actor(req, res),
+        this.project(req),
+        req.body,
+      ),
+    );
+  }
   @Post('results/:resultId/evidence-additions')
   async evidence(@Req() req: Request, @Res() res: Response) {
     const actor = await this.actor(req, res);

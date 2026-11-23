@@ -126,6 +126,12 @@ export class IssuesController {
           );
       }
     } else {
+      if (path === 'file-from-report' && req.method === 'POST')
+        return res.json(
+          await this.issues.fileFromReport(actor, projectId, req.body),
+        );
+      if (path === 'report-assignees' && req.method === 'GET')
+        return res.json(await this.issues.reportAssignees(actor, projectId));
       if (path === 'counts' && req.method === 'GET')
         return res.json(
           await this.issues.counts(

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { CheckOutlined } from '@ant-design/icons';
 import {
   Alert,
@@ -20,8 +20,8 @@ import type { ReportHandling } from '../../../packages/contracts/src/report-hand
 import type { ReportProblemReviewScope } from '../../../packages/contracts/src/issues';
 import { EvidenceGallery } from './evidence-gallery';
 import type { EvidenceGalleryItem } from './evidence-gallery';
-import { ArchiveFindingDialog } from './archive-finding-dialog';
-import type { ArchiveFinding } from './archive-finding-dialog';
+import { ReportResultReview } from './report-result-review';
+import type { ReviewPendingFile } from './review-image-attachments';
 import { ResultDetailPanel } from './result-detail';
 import { outcomeLabels, ResultOutcomeTag } from './result-steps';
 import {
@@ -109,6 +109,7 @@ function observed(item: Item) {
     item.result.reportedOutcome !== 'notExecuted' &&
     (item.result.content.actualObservations.trim().length > 0 ||
       (item.result.content.stepObservations?.length ?? 0) > 0 ||
+      (item.result.content.observations?.length ?? 0) > 0 ||
       (item.result.content.actualActions?.length ?? 0) > 0 ||
       item.result.content.evidenceRefs.length > 0)
   );
@@ -145,9 +146,20 @@ function reviewStep(item: Item, requested?: number) {
   const content = item.scopeItem.content;
   if (content.kind !== 'UI' || !item.result) return undefined;
   const observations = item.result.content.stepObservations ?? [];
+  const failedAssertion = item.result.content.assertionResults?.find(
+    (entry) => entry.outcome === 'failed',
+  );
+  const failedStep =
+    failedAssertion &&
+    item.result.content.observations?.find(
+      (entry) =>
+        entry.assertionIds?.includes(failedAssertion.assertionId) &&
+        entry.stepOrdinals?.length,
+    )?.stepOrdinals?.[0];
   const ordinal =
     requested ??
-    observations.find((step) => step.outcome === 'failed')?.ordinal;
+    observations.find((step) => step.outcome === 'failed')?.ordinal ??
+    failedStep;
   if (!ordinal || ordinal > 100) return undefined;
   return observations.some((step) => step.ordinal === ordinal) ||
     ('steps' in content && !!content.steps?.[ordinal - 1])
@@ -157,6 +169,82 @@ function reviewStep(item: Item, requested?: number) {
 function displayCoverage(rows: Item[]) {
   const covered = rows.filter(observed).length;
   return `${covered}/${rows.length} 已执行`;
+}
+
+function reportEvidenceCoverage(facts: Facts) {
+  const missing = new Set(facts.missingFileIds);
+  const files = new Map(
+    facts.evidence.map((item) => [item.localEvidenceId, item]),
+  );
+  const available = (refs: readonly string[]) =>
+    refs.some((ref) => {
+      const file = files.get(ref);
+      return (
+        file?.lastKnownFileStatus === 'verified' &&
+        file.fileAvailable !== false &&
+        !missing.has(file.fileId)
+      );
+    });
+  let steps = 0,
+    observedSteps = 0,
+    evidencedSteps = 0;
+  let assertions = 0,
+    observedAssertions = 0,
+    evidencedAssertions = 0;
+  let refs = 0,
+    gaps = 0;
+  const distinct = new Set<string>();
+  for (const row of facts.items) {
+    const {
+      scopeItem: { content },
+      result,
+    } = row;
+    const stepsForItem =
+      content.kind === 'UI' && 'steps' in content ? (content.steps ?? []) : [];
+    const assertionsForItem =
+      'assertions' in content ? (content.assertions ?? []) : [];
+    const observations = result?.content.observations ?? [];
+    const legacy = result?.content.stepObservations ?? [];
+    steps += stepsForItem.length;
+    assertions += assertionsForItem.length;
+    for (const [index] of stepsForItem.entries()) {
+      const ordinal = index + 1;
+      const records = [
+        ...legacy.filter((entry) => entry.ordinal === ordinal),
+        ...observations.filter((entry) =>
+          entry.stepOrdinals?.includes(ordinal),
+        ),
+      ];
+      if (records.length) observedSteps++;
+      if (records.some((entry) => available(entry.evidenceRefs ?? [])))
+        evidencedSteps++;
+    }
+    for (const { id } of assertionsForItem) {
+      const records = observations.filter((entry) =>
+        entry.assertionIds?.includes(id),
+      );
+      if (records.length) observedAssertions++;
+      if (records.some((entry) => available(entry.evidenceRefs ?? [])))
+        evidencedAssertions++;
+    }
+    for (const ref of result?.content.evidenceRefs ?? []) {
+      refs++;
+      const file = files.get(ref);
+      if (file) distinct.add(file.fileId);
+    }
+    gaps += result?.content.evidenceGaps?.length ?? 0;
+  }
+  return {
+    steps,
+    observedSteps,
+    evidencedSteps,
+    assertions,
+    observedAssertions,
+    evidencedAssertions,
+    refs,
+    gaps,
+    distinct: distinct.size,
+  };
 }
 
 export function ReportWorkbench({
@@ -197,7 +285,7 @@ export function ReportWorkbench({
     id: string;
     number: string;
   }>();
-  const [archiveFinding, setArchiveFinding] = useState<ArchiveFinding>();
+  const reviewPendingFiles = useRef(new Map<string, ReviewPendingFile[]>());
   const byResult = useMemo(() => {
     const map = new Map<string, Candidate[]>();
     for (const problem of handling?.problems ?? [])
@@ -306,7 +394,6 @@ export function ReportWorkbench({
   }
   function clearFocusedResult() {
     setUnreportedItemId(null);
-    setArchiveFinding(undefined);
     if (selection)
       setHash((query) => {
         for (const key of [
@@ -325,7 +412,6 @@ export function ReportWorkbench({
     window.location.hash = `reports?${query}`;
   }
   function focus(item: Item) {
-    setArchiveFinding(undefined);
     setUnreportedItemId(item.result ? null : item.scopeItem.runItemId);
     setHash((query) => {
       for (const key of [
@@ -352,22 +438,6 @@ export function ReportWorkbench({
   }
   function issueLink(id: string) {
     return `#issues?${new URLSearchParams({ projectId: project.id, issueId: id })}`;
-  }
-  function scopeForArchive(item: Item) {
-    if (!item.result || !('requirementId' in item.scopeItem)) return;
-    const source = reportScope(report.id, report.revisionId, item)!;
-    const ordinal = reviewStep(item, selection?.initialStep);
-    if (ordinal) source.stepOrdinal = ordinal;
-    setArchiveFinding({
-      runId: facts.runId,
-      resultId: item.result.id,
-      requirementId: item.scopeItem.requirementId,
-      requirementVersionId: item.scopeItem.requirementVersionId,
-      title: item.scopeItem.content.title,
-      observations: item.result.content.actualObservations,
-      evidenceRefs: item.result.content.evidenceRefs,
-      reportReview: source,
-    });
   }
   function chooseResultRevision(resultId: string, revisionId: string | null) {
     setHash((query) => {
@@ -477,8 +547,19 @@ export function ReportWorkbench({
     const result = item.result;
     const candidates = byResult.get(result.id) ?? [];
     const scope = reportScope(report.id, viewedRevisionId, item)!;
+    if (focusedRevision) scope.resultRevisionId = focusedRevision;
     const step = reviewStep(item, selection?.initialStep);
     if (step) scope.stepOrdinal = step;
+    const reason = archived
+      ? '历史报告只读，可查看该来源的复测与缺陷。'
+      : previousRevision
+        ? '历史结果修订只读。返回当前结果后可登记复测和提缺陷。'
+        : detached
+          ? '请重新选择此报告的结果后处理。'
+          : !canReview
+            ? '仅有项目测试角色可登记复测、提单和指派。'
+            : undefined;
+    const draftKey = `${userId}:${project.id}:${scope.resultRevisionId}`;
     const issues =
       handling?.issues.filter(
         (issue) =>
@@ -487,6 +568,27 @@ export function ReportWorkbench({
       ) ?? [];
     return (
       <>
+        <ReportResultReview
+          key={draftKey}
+          projectId={project.id}
+          userId={userId}
+          scope={scope}
+          item={item}
+          runId={facts.runId}
+          environment={facts.environmentName ?? facts.scope.environmentId}
+          issues={issues}
+          readOnlyReason={reason}
+          pendingFiles={reviewPendingFiles.current.get(draftKey)}
+          onPendingFiles={(files) => {
+            if (files.length) reviewPendingFiles.current.set(draftKey, files);
+            else reviewPendingFiles.current.delete(draftKey);
+          }}
+          onOpenFile={onPreview}
+          onIssueSaved={(issue) => {
+            setReceivedIssue(issue);
+            void onChanged();
+          }}
+        />
         <div className="report-review-status">
           <div>
             <span>执行原判</span>
@@ -540,45 +642,26 @@ export function ReportWorkbench({
             }
           />
         )}
-        {candidates.length ? (
-          candidates.map((candidate) => (
-            <ReportReviewPanel
-              key={candidate.id}
-              candidate={candidate}
-              project={project}
-              userId={userId}
-              item={item}
-              facts={facts}
-              scope={scope}
-              readOnly={!writableDetail}
-              snapshot={archived}
-              onChanged={onChanged}
-              onConfirmed={(issue) => setReceivedIssue(issue)}
-              onPreview={onPreview}
-            />
-          ))
-        ) : (
-          <Typography.Text type="secondary">
-            当前结果没有关联的候选问题。
-          </Typography.Text>
-        )}
-        {!candidates.length &&
-          writableDetail &&
-          facts.scope.sourceType === 'uiArchive' && (
-            <Button onClick={() => scopeForArchive(item)}>
-              登记待确认问题
-            </Button>
-          )}
-        {archiveFinding?.resultId === result.id && writableDetail && (
-          <ArchiveFindingDialog
-            key={result.id}
-            project={project}
-            finding={archiveFinding}
-            onSaved={() => {
-              void onChanged();
-            }}
-            onClose={() => setArchiveFinding(undefined)}
-          />
+        {candidates.length > 0 && (
+          <details className="report-review-history">
+            <summary>候选问题与原处理记录 · {candidates.length}</summary>
+            {candidates.map((candidate) => (
+              <ReportReviewPanel
+                key={candidate.id}
+                candidate={candidate}
+                project={project}
+                userId={userId}
+                item={item}
+                facts={facts}
+                scope={scope}
+                readOnly={!writableDetail}
+                snapshot={archived}
+                onChanged={onChanged}
+                onConfirmed={(issue) => setReceivedIssue(issue)}
+                onPreview={onPreview}
+              />
+            ))}
+          </details>
         )}
       </>
     );
@@ -594,6 +677,7 @@ export function ReportWorkbench({
   const coverage = [...groups.values()].filter((group) =>
     group.rows.some(observed),
   ).length;
+  const evidenceCoverage = reportEvidenceCoverage(facts);
   return (
     <div className="report-workbench-content">
       <div className="report-workbench-heading">
@@ -677,6 +761,37 @@ export function ReportWorkbench({
           </button>
         ))}
       </div>
+      <div className="report-evidence-coverage" aria-label="观察与证据覆盖">
+        <div>
+          <span>关键观察</span>
+          <strong>
+            {evidenceCoverage.assertions
+              ? `${evidenceCoverage.observedAssertions}/${evidenceCoverage.assertions} 个业务断言`
+              : `${evidenceCoverage.observedSteps}/${evidenceCoverage.steps} 个冻结步骤`}
+          </strong>
+        </div>
+        <div>
+          <span>已核验证据</span>
+          <strong>
+            {evidenceCoverage.assertions
+              ? `${evidenceCoverage.evidencedAssertions}/${evidenceCoverage.assertions} 个业务断言`
+              : `${evidenceCoverage.evidencedSteps}/${evidenceCoverage.steps} 个冻结步骤`}
+          </strong>
+        </div>
+        <div>
+          <span>原件与引用</span>
+          <strong>
+            {evidenceCoverage.distinct} 件 · {evidenceCoverage.refs} 次引用
+          </strong>
+        </div>
+        <div>
+          <span>文件交付与采集</span>
+          <strong>
+            待核验 {facts.missingFileIds.length} 件 · 缺口{' '}
+            {evidenceCoverage.gaps} 项
+          </strong>
+        </div>
+      </div>
       <Collapse
         items={[
           {
@@ -701,7 +816,13 @@ export function ReportWorkbench({
                   {
                     key: 'env',
                     label: '冻结环境',
-                    children: facts.scope.environmentId,
+                    children:
+                      facts.environmentName ?? facts.scope.environmentId,
+                  },
+                  {
+                    key: 'observations',
+                    label: '全轮冻结步骤',
+                    children: `${evidenceCoverage.steps} 步 · 已记录 ${evidenceCoverage.observedSteps} · 有可读证据 ${evidenceCoverage.evidencedSteps}`,
                   },
                   {
                     key: 'state',
@@ -854,8 +975,8 @@ export function ReportWorkbench({
         <section className="report-result-pane" aria-label="执行结果">
           {detail(focused)}
         </section>
-        <aside className="report-review-rail" aria-label="人工复核">
-          <h2>人工复核</h2>
+        <aside className="report-review-rail" aria-label="人工复核与缺陷">
+          <h2>人工复核与缺陷</h2>
           {review(focused)}
         </aside>
       </div>
@@ -888,6 +1009,9 @@ export function ReportWorkbench({
                     manifest: row.manifest,
                     originalName: row.originalName,
                     fileStatus: row.lastKnownFileStatus,
+                    ...(row.fileAvailable !== undefined
+                      ? { fileAvailable: row.fileAvailable }
+                      : {}),
                     source: row.manifest.source,
                   }))}
                   onOpen={onPreview}

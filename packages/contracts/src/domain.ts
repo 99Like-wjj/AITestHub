@@ -148,6 +148,12 @@ const uiBusinessStepsSchema = z.array(z.strictObject({
   expected: z.string().trim().min(1).max(10_000).optional(),
 })).min(1).max(100);
 
+export const uiAssertionSchema = z.strictObject({
+  id: localIdSchema,
+  expected: z.string().trim().min(1).max(10_000),
+  evidenceHint: z.string().trim().min(1).max(2000).optional(),
+});
+
 export const uiCaseContentSchema = z.strictObject({
   kind: z.literal('UI'),
   scenarioId: idSchema,
@@ -155,6 +161,9 @@ export const uiCaseContentSchema = z.strictObject({
   testPoint: safeTextSchema,
   preconditions: z.array(z.string().max(10_000)).max(100),
   steps: uiBusinessStepsSchema.optional(),
+  assertions: z.array(uiAssertionSchema).min(1).max(100)
+    .refine((items) => new Set(items.map((item) => item.id)).size === items.length, '业务断言标识不可重复')
+    .optional(),
   expected: safeTextSchema,
   basisRefs: z.array(basisRefSchema).max(100),
 });
@@ -641,6 +650,21 @@ export const evidenceManifestItemSchema = z.strictObject({
   source: z.enum(['original', 'derived', 'manualAddition']).default('original'),
 });
 const evidenceStepOrdinal = z.number().int().min(1).max(100);
+const uniqueList = <T extends z.ZodType>(entry: T, limit: number) =>
+  z.array(entry).max(limit).refine((values) => new Set(values).size === values.length, '关联项不可重复');
+const observationAssertionIds = uniqueList(localIdSchema, 100);
+export const resultObservationSchema = z.strictObject({
+  actual: z.string().trim().min(1).max(10_000),
+  assertionIds: observationAssertionIds.optional(),
+  stepOrdinals: uniqueList(evidenceStepOrdinal, 100).optional(),
+  actionOrdinals: uniqueList(z.number().int().min(1).max(1000), 1000).optional(),
+  evidenceRefs: uniqueList(localIdSchema, 100).optional(),
+});
+export const resultAssertionSchema = z.strictObject({
+  assertionId: localIdSchema,
+  outcome: uiOutcomeSchema,
+  reason: z.string().trim().min(1).max(10_000).optional(),
+});
 export const resultStepObservationSchema = z.strictObject({
   ordinal: evidenceStepOrdinal,
   actual: z.string().trim().min(1).max(10_000),
@@ -649,6 +673,7 @@ export const resultStepObservationSchema = z.strictObject({
 });
 export const resultEvidenceGapSchema = z.strictObject({
   ordinal: evidenceStepOrdinal.optional(),
+  assertionIds: observationAssertionIds.optional(),
   label: z.string().trim().min(1).max(200),
   state: z.enum(['notCaptured', 'pendingUpload', 'uploadFailed']),
   reason: z.string().trim().min(1).max(2000),
@@ -667,6 +692,10 @@ export const resultItemSchema = z.strictObject({
     .array(resultStepObservationSchema)
     .max(100)
     .refine((steps) => new Set(steps.map((step) => step.ordinal)).size === steps.length, '步骤序号不可重复')
+    .optional(),
+  observations: z.array(resultObservationSchema).max(1000).optional(),
+  assertionResults: z.array(resultAssertionSchema).max(100)
+    .refine((items) => new Set(items.map((item) => item.assertionId)).size === items.length, '断言结论不可重复')
     .optional(),
   evidenceGaps: z.array(resultEvidenceGapSchema).max(100).optional(),
   startedAt: timestampSchema.optional(),

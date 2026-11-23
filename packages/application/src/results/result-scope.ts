@@ -46,6 +46,9 @@ export async function readResultScope(
     expected: 'expected' in content ? content.expected : null,
     steps:
       content.kind === 'UI' && 'steps' in content ? (content.steps ?? []) : [],
+    ...('assertions' in content && content.assertions
+      ? { assertions: content.assertions }
+      : {}),
   };
 }
 
@@ -58,11 +61,21 @@ export async function assertResultEvidenceScope(
   assertResultStepEvidenceReferences(item);
   const ordinals = [
     ...(item.stepObservations ?? []).map((step) => step.ordinal),
+    ...(item.observations ?? []).flatMap(
+      (observation) => observation.stepOrdinals ?? [],
+    ),
     ...(item.evidenceGaps ?? []).flatMap((gap) =>
       gap.ordinal === undefined ? [] : [gap.ordinal],
     ),
   ];
-  if (!ordinals.length) return;
+  const assertionIds = [
+    ...(item.observations ?? []).flatMap(
+      (observation) => observation.assertionIds ?? [],
+    ),
+    ...(item.assertionResults ?? []).map((assertion) => assertion.assertionId),
+    ...(item.evidenceGaps ?? []).flatMap((gap) => gap.assertionIds ?? []),
+  ];
+  if (!ordinals.length && !assertionIds.length) return;
   const scope = await readResultScope(tx, projectId, runId, item.runItemId);
   if (
     !scope ||
@@ -74,6 +87,15 @@ export async function assertResultEvidenceScope(
       '步骤观察须定位到此执行项的冻结 UI 用例步骤。',
       422,
     );
+  const knownAssertions = new Set(
+    scope.assertions?.map((assertion) => assertion.id),
+  );
+  if (assertionIds.some((id) => !knownAssertions.has(id)))
+    throw new DomainError(
+      'VALIDATION_ERROR',
+      '观察与断言结论须引用此执行项冻结的业务断言。',
+      422,
+    );
 }
 
 /** An independent archive may record observed steps without claiming a frozen testcase. */
@@ -82,13 +104,25 @@ export function assertResultStepEvidenceReferences(
 ) {
   const declared = new Set(item.evidenceRefs);
   if (
-    item.stepObservations?.some((step) =>
-      step.evidenceRefs.some((ref) => !declared.has(ref)),
+    [...(item.stepObservations ?? []), ...(item.observations ?? [])].some(
+      (entry) => entry.evidenceRefs?.some((ref) => !declared.has(ref)),
     )
   )
     throw new DomainError(
       'VALIDATION_ERROR',
-      '步骤证据须引用同一结果已声明的证据。',
+      '观察证据须引用同一结果已声明的证据。',
+      422,
+    );
+  if (
+    item.observations?.some((observation) =>
+      observation.actionOrdinals?.some(
+        (ordinal) => ordinal > (item.actualActions?.length ?? 0),
+      ),
+    )
+  )
+    throw new DomainError(
+      'VALIDATION_ERROR',
+      '观察引用的实际操作须属于同一结果。',
       422,
     );
 }

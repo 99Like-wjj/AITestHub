@@ -12,6 +12,14 @@ export const uiReviewStartSchema = z.strictObject({
   commandId: commandIdSchema,
   requirementVersionId: idSchema,
   caseIds,
+  caseWorkbenchBasis: z.strictObject({
+    revisionId: idSchema,
+    rowVersion,
+    draft: z.discriminatedUnion('kind', [
+      z.strictObject({ kind: z.literal('opinion'), body: opinionBody }),
+      z.strictObject({ kind: z.literal('no-change') }),
+    ]).optional(),
+  }).optional(),
 });
 
 const basis = z.strictObject({
@@ -78,6 +86,7 @@ export const uiReviewMeetingStateSchema = z.strictObject({
   opinions: z.array(opinion),
   items: z.array(workItem),
   assessments: z.array(uiCaseAssessmentSchema).optional(),
+  caseWorkbenchRound: roundNo.optional(),
   finalized: z.boolean(),
 });
 export type UiReviewMeetingState = z.infer<typeof uiReviewMeetingStateSchema>;
@@ -166,7 +175,10 @@ export const uiCaseReviewStageListSchema = z.strictObject({
   ),
 });
 
-export const uiReviewMeetingListSchema = z.strictObject({ meetings: z.array(uiReviewRoomSummarySchema) });
+export const uiReviewMeetingListSchema = z.strictObject({
+  meetings: z.array(uiReviewRoomSummarySchema),
+  activeMeetingId: idSchema.optional(),
+});
 export const uiReviewMeetingMutationSchema = z.strictObject({ meeting: uiReviewRoomSummarySchema });
 export const uiReviewMeetingDetailSchema = uiReviewMeetingMutationSchema.extend({
   state:uiReviewMeetingStateSchema,
