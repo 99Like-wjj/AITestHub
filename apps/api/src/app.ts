@@ -599,9 +599,21 @@ export async function createApp(db: Database) {
       'http://localhost:5300',
       'http://localhost:5173',
     ]);
+    const crossSite = req.header('sec-fetch-site') === 'cross-site';
+    // The Markdown preview runs in an opaque sandbox. Its two public,
+    // immutable script assets load as cross-site classic scripts.
+    const markdownDiagramScript =
+      crossSite &&
+      (req.method === 'GET' || req.method === 'HEAD') &&
+      (origin === undefined || origin === 'null') &&
+      req.header('sec-fetch-mode') === 'no-cors' &&
+      req.header('sec-fetch-dest') === 'script' &&
+      /^\/assets\/(?:mermaid\.tiny|markdown-mermaid-frame)-[\w-]{8}\.js$/.test(
+        req.path,
+      );
     if (
-      (origin && !allowed.has(origin)) ||
-      req.header('sec-fetch-site') === 'cross-site'
+      !markdownDiagramScript &&
+      ((origin && !allowed.has(origin)) || crossSite)
     ) {
       res.status(403).json({
         error: { code: 'FORBIDDEN', message: '请求来源不受允许。' },
