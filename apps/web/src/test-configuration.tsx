@@ -16,12 +16,7 @@ import {
   Tabs,
   Typography,
 } from 'antd';
-import {
-  DeleteOutlined,
-  EditOutlined,
-  PlusOutlined,
-  ReloadOutlined,
-} from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
 import { z } from 'zod';
 import {
   configurationKindSchema,
@@ -340,6 +335,7 @@ function ConfigurationEditor({
   open,
   onClose,
   onSaved,
+  onReload,
   canManageEnvironment = false,
   layer = uiLayers.dialog,
 }: {
@@ -349,6 +345,7 @@ function ConfigurationEditor({
   open: boolean;
   onClose: () => void;
   onSaved: (configuration: Configuration) => Promise<void>;
+  onReload: () => Promise<void>;
   canManageEnvironment?: boolean;
   layer?: number;
 }) {
@@ -534,8 +531,11 @@ function ConfigurationEditor({
             type="warning"
             showIcon
             title={`本次保存回执未知：${commandId.current}`}
-            description="已禁重复提交，请先刷新核对当前配置；保留原提交标识，不通过新标识重放未知操作。"
+            description="本次提交标识和输入仍保留。可重新读取配置供核对。"
             className="section-alert"
+            action={
+              <Button onClick={() => void onReload()}>重新读取配置</Button>
+            }
           />
         )}
         {referenceError && (
@@ -906,6 +906,7 @@ function ConfigurationEditor({
           canManageEnvironment={canManageEnvironment}
           layer={uiLayers.nestedDialog}
           onClose={() => setEnvironmentEditor(null)}
+          onReload={refreshEnvironments}
           onSaved={async (saved) => {
             if (environmentEditor.epoch !== editorEpoch.current) return;
             setReferences((current) => [
@@ -962,11 +963,13 @@ function CredentialEditor({
   target,
   onClose,
   onSaved,
+  onReload,
 }: {
   projectId: string;
   target: Configuration | null;
   onClose: () => void;
   onSaved: () => Promise<void>;
+  onReload: () => Promise<void>;
 }) {
   const [form] = Form.useForm<{
     username: string;
@@ -1051,8 +1054,9 @@ function CredentialEditor({
           type="warning"
           showIcon
           title={`本次凭据保存回执未知：${commandId.current}`}
-          description="已清空输入并禁重发；刷新当前配置核对版本，不通过新标识重复提交未知操作。"
+          description="凭据输入已清空。可重新读取配置核对当前版本。"
           className="section-alert"
+          action={<Button onClick={() => void onReload()}>重新读取配置</Button>}
         />
       )}
       <Form
@@ -1184,13 +1188,6 @@ export function TestConfigurationPage({
           <div className="row">
             <Button
               size="small"
-              icon={<ReloadOutlined />}
-              loading={loading}
-              onClick={() => void load()}
-              aria-label="刷新测试配置"
-            />
-            <Button
-              size="small"
               type="primary"
               icon={<PlusOutlined />}
               disabled={!canWrite}
@@ -1241,6 +1238,11 @@ export function TestConfigurationPage({
             showIcon
             title={error}
             className="section-alert"
+            action={
+              <Button loading={loading} onClick={() => void load()}>
+                重新读取配置
+              </Button>
+            }
           />
         )}
         {referenceError && kind === 'environment' && (
@@ -1249,6 +1251,11 @@ export function TestConfigurationPage({
             showIcon
             title={`绑定摘要未完整取得：${referenceError}`}
             className="section-alert"
+            action={
+              <Button loading={loading} onClick={() => void load()}>
+                重新读取配置
+              </Button>
+            }
           />
         )}
         {loading ? (
@@ -1356,6 +1363,7 @@ export function TestConfigurationPage({
           project.isAdmin || project.roles.includes('tester')
         }
         onClose={() => setEditor(false)}
+        onReload={() => load()}
         onSaved={async () => {
           await load();
           void message.success('配置已保存；未执行接口或数据库操作。');
@@ -1365,6 +1373,7 @@ export function TestConfigurationPage({
         projectId={project.id}
         target={credential}
         onClose={() => setCredential(null)}
+        onReload={() => load()}
         onSaved={async () => {
           await load();
           void message.success('受保护凭据已保存，输入已清空。');
@@ -1454,13 +1463,6 @@ function SkillGuidanceSettings({ ownerId }: { ownerId: string }) {
     <>
       <div className="between mt">
         <h3>当前 Skill 指引目录</h3>
-        <Button
-          size="small"
-          loading={loading}
-          onClick={() => setRefresh((value) => value + 1)}
-        >
-          刷新目录
-        </Button>
       </div>
       {loading && (
         <p role="status" className="caption mt">
@@ -1473,6 +1475,11 @@ function SkillGuidanceSettings({ ownerId }: { ownerId: string }) {
           type="warning"
           showIcon
           title={`Skill 目录未取得：${error}`}
+          action={
+            <Button onClick={() => setRefresh((value) => value + 1)}>
+              重新读取目录
+            </Button>
+          }
         />
       )}
       <div className="two mt">

@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { ReloadOutlined } from '@ant-design/icons';
 import {
   Alert,
   Button,
   Card,
-  Collapse,
   Descriptions,
   Empty,
   Form,
@@ -37,6 +35,11 @@ import { PageHeading } from './page-heading';
 import { ExecutionRecords } from './execution-records';
 import { UiArchiveDialog } from './ui-archive-dialog';
 import { UiDeliveryPanel } from './ui-delivery-panel';
+import {
+  RecoveryBlock,
+  RecoveryDrawer,
+  RecoveryQueryForm,
+} from './recovery-block';
 import { formatBeijingTime } from './beijing-time';
 import { DeliveryStatusTag, ExecutionStateTag } from './semantic-status';
 import {
@@ -101,11 +104,7 @@ export function ResultsPage({
 }) {
   const [recordsVersion, setRecordsVersion] = useState(0);
   const [archiveOpen, setArchiveOpen] = useState(false);
-  const [lookupOpen, setLookupOpen] = useState(() =>
-    Boolean(
-      new URLSearchParams(window.location.hash.split('?')[1]).get('runId'),
-    ),
-  );
+  const [lookupOpen, setLookupOpen] = useState(false);
   const [reportId, setReportId] = useState<string | null>(initialReportId);
   const [report, setReport] = useState<Report | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -116,6 +115,7 @@ export function ResultsPage({
   > | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string>();
+  const [historyRetry, setHistoryRetry] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [reportNotice, setReportNotice] = useState<string>();
   useEffect(() => setReportNotice(undefined), [reportId, revisionId]);
@@ -259,7 +259,7 @@ export function ResultsPage({
           setHistoryLoading(false);
       });
     return () => controller.abort();
-  }, [revisionId, project?.id, reportId]);
+  }, [revisionId, project?.id, reportId, historyRetry]);
   useEffect(() => {
     function followLinkedRecord() {
       if (!project) return;
@@ -282,6 +282,7 @@ export function ResultsPage({
           ...(returnTo ? { returnTo } : {}),
         });
       } else if (runId.success) {
+        setLookupOpen(true);
         lookupForm.setFieldsValue({ kind: 'run', id: runId.data });
         void lookup({ kind: 'run', id: runId.data });
       } else setSelectedResult((active) => (active?.linked ? null : active));
@@ -457,7 +458,9 @@ export function ResultsPage({
       project={project}
       {...(visibleResult?.kind ? { executionKind: visibleResult.kind } : {})}
       inline={standalone}
-      readOnly={!!visibleResult?.revisionId}
+      readOnly={Boolean(
+        visibleResult?.revisionId || visibleResult?.lookupRequest,
+      )}
       resultId={visibleResult?.id ?? null}
       {...(visibleResult?.revisionId
         ? { reportBasisRevisionId: visibleResult.revisionId }
@@ -511,9 +514,6 @@ export function ResultsPage({
           })),
         ]}
       />
-      <Button onClick={() => void loadReport()} loading={detailLoading}>
-        刷新报告
-      </Button>
       <Button onClick={copyReportLink}>复制链接</Button>
       <Button
         loading={exporting}
@@ -552,13 +552,32 @@ export function ResultsPage({
                   <Skeleton active />
                 ) : null}
                 {detailError && (
-                  <Alert type="error" showIcon title={detailError} />
+                  <Alert
+                    type="error"
+                    showIcon
+                    title={detailError}
+                    action={
+                      <Button
+                        loading={detailLoading}
+                        onClick={() => void loadReport()}
+                      >
+                        重新读取报告
+                      </Button>
+                    }
+                  />
                 )}
                 {historyError && (
                   <Alert
                     type="error"
                     showIcon
                     title={`所选报告修订未取得：${historyError}`}
+                    action={
+                      <Button
+                        onClick={() => setHistoryRetry((value) => value + 1)}
+                      >
+                        重新读取此修订
+                      </Button>
+                    }
                   />
                 )}
                 {report && facts && (
@@ -599,19 +618,14 @@ export function ResultsPage({
           title="执行与报告"
           description="保留当轮范围、实际修订、业务结论与独立交付状态。"
           actions={
-            <>
-              <Button
-                icon={<ReloadOutlined />}
-                onClick={() => setRecordsVersion((version) => version + 1)}
-              >
-                刷新
-              </Button>
+            <Space wrap>
+              <Button onClick={() => setLookupOpen(true)}>查询原记录</Button>
               {project.roles.includes('tester') && (
                 <Button type="primary" onClick={() => setArchiveOpen(true)}>
                   上传本地独立归档
                 </Button>
               )}
-            </>
+            </Space>
           }
         />
         <UiArchiveDialog
@@ -636,180 +650,144 @@ export function ResultsPage({
             void lookup({ kind: 'run', id });
           }}
         />
-        <Collapse
-          className="mt"
-          activeKey={lookupOpen ? ['original'] : []}
-          onChange={(keys) =>
-            setLookupOpen(Array.isArray(keys) && keys.includes('original'))
-          }
-          items={[
-            {
-              key: 'original',
-              label: '原轮次、结果或提交找回（只读）',
-              children: (
-                <Card title="执行、结果与交付完整性">
-                  <Alert
-                    type="info"
-                    showIcon
-                    title="进度不等于结果，测试结论与交付完整性分别记录"
-                    description="平台本地UI执行能力只接收固定范围/进度/结果/证据，不从此页面唤醒本地AI或启动服务器UI执行器。合成协议提交必须保留来源标记。"
-                    className="section-alert"
-                  />
-                  <Form
-                    form={lookupForm}
-                    layout="inline"
-                    initialValues={{ kind: 'run' }}
-                    onValuesChange={clearLookup}
-                    onFinish={(values) => void lookup(values)}
-                  >
-                    <Form.Item name="kind" label="只读查询">
-                      <Select
-                        style={{ minWidth: 150 }}
-                        options={[
-                          { value: 'run', label: '原执行轮次ID' },
-                          { value: 'result', label: '原结果ID' },
-                          { value: 'submission', label: '本人结果提交ID' },
-                        ]}
-                      />
-                    </Form.Item>
-                    <Form.Item
-                      name="id"
-                      label="原UUID"
-                      rules={[{ required: true }]}
-                    >
-                      <Input
-                        placeholder="不创建/重放执行"
-                        style={{ minWidth: 290 }}
-                      />
-                    </Form.Item>
-                    <Form.Item>
+        <RecoveryDrawer
+          open={lookupOpen && !standalone}
+          onClose={() => setLookupOpen(false)}
+          forceRender
+        >
+          <RecoveryBlock
+            title="查询原执行记录"
+            description="按原轮次、结果或本人提交标识核对已有记录、进度与交付完整性。"
+          >
+            <RecoveryQueryForm
+              form={lookupForm}
+              initialValues={{ kind: 'run' }}
+              onValuesChange={clearLookup}
+              onFinish={(values) => void lookup(values)}
+            >
+              <Form.Item name="kind" label="记录类型">
+                <Select
+                  options={[
+                    { value: 'run', label: '原执行轮次ID' },
+                    { value: 'result', label: '原结果ID' },
+                    { value: 'submission', label: '本人结果提交ID' },
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item name="id" label="原UUID" rules={[{ required: true }]}>
+                <Input placeholder="输入原记录标识" autoComplete="off" />
+              </Form.Item>
+              <Form.Item className="recovery-query-submit">
+                <Button
+                  type="primary"
+                  htmlType="submit"
+                  loading={feedback?.loading ?? false}
+                >
+                  查询原记录
+                </Button>
+              </Form.Item>
+            </RecoveryQueryForm>
+            {feedback?.error && (
+              <Alert type="error" title={feedback.error} showIcon />
+            )}
+            {run && (
+              <Descriptions
+                column={1}
+                bordered
+                items={[
+                  { key: 'id', label: '原执行', children: run.runId },
+                  {
+                    key: 'state',
+                    label: '执行状态',
+                    children: (() => {
+                      const state = runStateSchema.safeParse(run.state);
+                      return state.success ? (
+                        <ExecutionStateTag state={state.data} />
+                      ) : (
+                        run.state
+                      );
+                    })(),
+                  },
+                  {
+                    key: 'progress',
+                    label: '进度声明',
+                    children: `${run.completedItems}/${run.totalItems} · sequence ${run.progressSequence} · ${run.progressClosedAt ? '平台进度展示已关闭，仍按协议接收上报' : '平台进度展示未关闭'}`,
+                  },
+                  {
+                    key: 'delivery',
+                    label: '交付状态',
+                    children: <DeliveryStatusTag status={run.deliveryStatus} />,
+                  },
+                  {
+                    key: 'origin',
+                    label: '执行来源',
+                    children:
+                      run.executionProvenance === 'protocol-synthetic'
+                        ? '合成协议结果，不是真实UI执行'
+                        : run.executionProvenance,
+                  },
+                  {
+                    key: 'report',
+                    label: '实际报告',
+                    children: run.reportId ? (
                       <Button
-                        type="primary"
-                        htmlType="submit"
-                        loading={feedback?.loading ?? false}
+                        type="link"
+                        onClick={() => openReport(run.reportId!)}
                       >
-                        查询原记录
+                        打开已存在报告
                       </Button>
-                    </Form.Item>
-                  </Form>
-                  {feedback?.error && (
-                    <Alert
-                      type="error"
-                      title={feedback.error}
-                      showIcon
-                      className="section-alert"
-                    />
-                  )}
-                  {run && (
-                    <Descriptions
-                      className="section-alert"
-                      column={1}
-                      bordered
-                      items={[
-                        { key: 'id', label: '原执行', children: run.runId },
-                        {
-                          key: 'state',
-                          label: '执行状态',
-                          children: (() => {
-                            const state = runStateSchema.safeParse(run.state);
-                            return state.success ? (
-                              <ExecutionStateTag state={state.data} />
-                            ) : (
-                              run.state
-                            );
-                          })(),
-                        },
-                        {
-                          key: 'progress',
-                          label: '进度声明',
-                          children: `${run.completedItems}/${run.totalItems} · sequence ${run.progressSequence} · ${run.progressClosedAt ? '平台进度展示已关闭，仍按协议接收上报' : '平台进度展示未关闭'}`,
-                        },
-                        {
-                          key: 'delivery',
-                          label: '交付状态',
-                          children: (
-                            <DeliveryStatusTag status={run.deliveryStatus} />
-                          ),
-                        },
-                        {
-                          key: 'origin',
-                          label: '执行来源',
-                          children:
-                            run.executionProvenance === 'protocol-synthetic'
-                              ? '合成协议结果，不是真实UI执行'
-                              : run.executionProvenance,
-                        },
-                        {
-                          key: 'report',
-                          label: '实际报告',
-                          children: run.reportId ? (
-                            <Button
-                              type="link"
-                              onClick={() => openReport(run.reportId!)}
-                            >
-                              打开已存在报告
-                            </Button>
-                          ) : (
-                            '尚无报告，进度/文件本身不生成报告'
-                          ),
-                        },
-                        {
-                          key: 'scope',
-                          label: '固定范围',
-                          children: `${run.scope.items.length}项 · ${run.scope.snapshotDigest}`,
-                        },
-                      ]}
-                    />
-                  )}
-                  {run?.kind === 'UI' &&
-                    run.scope.sourceType !== 'uiArchive' && (
-                      <UiDeliveryPanel
-                        key={run.runId}
-                        projectId={project.id}
-                        runId={run.runId}
-                        scopeItems={run.scope.items}
-                      />
-                    )}
-                  {receipt && (
-                    <Card
-                      className="section-alert"
-                      size="small"
-                      title={`本人原提交 ${receipt.receipt.submissionId}`}
-                    >
-                      <Space wrap>
-                        <Tag>当时接收 {receipt.receipt.resultsAccepted} 项</Tag>
-                        <span className="caption">原回执</span>
-                        <DeliveryStatusTag
-                          status={receipt.receipt.deliveryStatus}
-                        />
-                        <span className="caption">当前状态</span>
-                        <DeliveryStatusTag
-                          status={receipt.currentDelivery.status}
-                        />
-                      </Space>
-                      <Typography.Paragraph>
-                        当前缺失文件：
-                        {receipt.currentDelivery.missingFileIds.length
-                          ? receipt.currentDelivery.missingFileIds.join('、')
-                          : '无登记缺失文件'}
-                      </Typography.Paragraph>
-                      <Table
-                        rowKey="objectId"
-                        pagination={false}
-                        dataSource={receipt.receipt.perItemResults}
-                        columns={[
-                          { title: '固定对象', dataIndex: 'objectId' },
-                          { title: '原处理状态', dataIndex: 'status' },
-                          { title: '说明', dataIndex: 'message' },
-                        ]}
-                      />
-                    </Card>
-                  )}
-                </Card>
-              ),
-            },
-          ]}
-        />
+                    ) : (
+                      '尚无报告，进度/文件本身不生成报告'
+                    ),
+                  },
+                  {
+                    key: 'scope',
+                    label: '固定范围',
+                    children: `${run.scope.items.length}项 · ${run.scope.snapshotDigest}`,
+                  },
+                ]}
+              />
+            )}
+            {run?.kind === 'UI' && run.scope.sourceType !== 'uiArchive' && (
+              <UiDeliveryPanel
+                key={run.runId}
+                projectId={project.id}
+                runId={run.runId}
+                scopeItems={run.scope.items}
+              />
+            )}
+            {receipt && (
+              <Card
+                size="small"
+                title={`本人原提交 ${receipt.receipt.submissionId}`}
+              >
+                <Space wrap>
+                  <Tag>当时接收 {receipt.receipt.resultsAccepted} 项</Tag>
+                  <span className="caption">原回执</span>
+                  <DeliveryStatusTag status={receipt.receipt.deliveryStatus} />
+                  <span className="caption">当前状态</span>
+                  <DeliveryStatusTag status={receipt.currentDelivery.status} />
+                </Space>
+                <Typography.Paragraph>
+                  当前缺失文件：
+                  {receipt.currentDelivery.missingFileIds.length
+                    ? receipt.currentDelivery.missingFileIds.join('、')
+                    : '无登记缺失文件'}
+                </Typography.Paragraph>
+                <Table
+                  rowKey="objectId"
+                  pagination={false}
+                  dataSource={receipt.receipt.perItemResults}
+                  columns={[
+                    { title: '固定对象', dataIndex: 'objectId' },
+                    { title: '原处理状态', dataIndex: 'status' },
+                    { title: '说明', dataIndex: 'message' },
+                  ]}
+                />
+              </Card>
+            )}
+          </RecoveryBlock>
+        </RecoveryDrawer>
       </div>
       {!standalone && detailPanel()}
       <EvidenceViewer

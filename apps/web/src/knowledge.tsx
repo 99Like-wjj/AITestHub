@@ -23,6 +23,7 @@ import { idSchema } from '../../../packages/contracts/src/base';
 import { api, ApiError, describeError } from './api';
 import { useBusinessCommand } from './business-command';
 import { uiLayers } from './ui-layers';
+import { RecoveryBlock } from './recovery-block';
 import type { Project } from './types';
 import type { PreparedReference } from './workspace-references';
 import {
@@ -269,44 +270,50 @@ function Recovery<T>({
   const [status, setStatus] = useState('');
   if (!command.uncertain) return null;
   return (
-    <div className="mt">
-      <Button
-        disabled={checking}
-        onClick={() => {
-          setChecking(true);
-          void api(
-            `${base(projectId)}/operation-status?operation=${encodeURIComponent(operation)}&key=${encodeURIComponent(command.commandId)}`,
-            {},
-            knowledgeOperationStatusSchema,
-          )
-            .then((result) => {
-              if (result.command.status === 'completed') {
-                const checked = schema.safeParse(result.command.response);
-                if (!checked.success)
-                  throw new Error(
-                    '原操作已完成，但当前页面无法解析旧回执；请刷新资料，不能视为未发生。',
-                  );
-                command.confirmRecoveredReceipt();
-                onRecovered(checked.data);
-              } else
-                setStatus(
-                  `原操作状态：${result.command.status}。尚不能确定结果，未重复提交。`,
-                );
-            })
-            .catch((error) =>
-              setStatus(
-                error instanceof ApiError && error.status === 404
-                  ? '暂未检索到已提交回执，不代表原操作未发生；请继续只读核对。'
-                  : describeError(error),
-              ),
+    <RecoveryBlock
+      variant="pending"
+      title="核对知识操作回执"
+      reference={command.commandId}
+      actions={
+        <Button
+          disabled={checking}
+          onClick={() => {
+            setChecking(true);
+            void api(
+              `${base(projectId)}/operation-status?operation=${encodeURIComponent(operation)}&key=${encodeURIComponent(command.commandId)}`,
+              {},
+              knowledgeOperationStatusSchema,
             )
-            .finally(() => setChecking(false));
-        }}
-      >
-        查询原操作回执
-      </Button>
-      {status && <p className="caption mt">{status}</p>}
-    </div>
+              .then((result) => {
+                if (result.command.status === 'completed') {
+                  const checked = schema.safeParse(result.command.response);
+                  if (!checked.success)
+                    throw new Error(
+                      '原操作已完成，但当前页面无法解析旧回执；请刷新资料，不能视为未发生。',
+                    );
+                  command.confirmRecoveredReceipt();
+                  onRecovered(checked.data);
+                } else
+                  setStatus(
+                    `原操作状态：${result.command.status}。尚不能确定结果，未重复提交。`,
+                  );
+              })
+              .catch((error) =>
+                setStatus(
+                  error instanceof ApiError && error.status === 404
+                    ? '暂未检索到已提交回执，不代表原操作未发生；请继续只读核对。'
+                    : describeError(error),
+                ),
+              )
+              .finally(() => setChecking(false));
+          }}
+        >
+          查询原回执
+        </Button>
+      }
+    >
+      {status && <p role="status">{status}</p>}
+    </RecoveryBlock>
   );
 }
 function DraftFields({
@@ -2040,15 +2047,19 @@ export function KnowledgePage({ project }: { project: Project | null }) {
             编辑子库
           </Button>
         )}
-        <Button
-          icon="refresh"
-          disabled={loading}
-          onClick={() => setRefresh((value) => value + 1)}
-        >
-          刷新
-        </Button>
       </div>
-      {error && <Notice error>{error}</Notice>}
+      {error && (
+        <Notice error>
+          {error}
+          <Button
+            kind="small"
+            disabled={loading}
+            onClick={() => setRefresh((value) => value + 1)}
+          >
+            重新读取知识索引
+          </Button>
+        </Notice>
+      )}
       {loading && !entries.length && (
         <div className="empty">
           <p>正在读取轻索引…</p>

@@ -15,12 +15,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import {
-  DeleteOutlined,
-  EditOutlined,
-  PlusOutlined,
-  ReloadOutlined,
-} from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
 import { z } from 'zod';
 import {
   membersListSchema,
@@ -348,34 +343,35 @@ export function ProjectSettings({
     <Card
       title="项目成员"
       extra={
-        <Space>
+        canManage && (
           <Button
-            icon={<ReloadOutlined />}
-            onClick={() => void load()}
-            loading={loading}
+            icon={<PlusOutlined />}
+            type="primary"
+            onClick={() => {
+              setEditing(null);
+              setEditorOpen(true);
+            }}
           >
-            刷新
+            添加成员
           </Button>
-          {canManage && (
-            <Button
-              icon={<PlusOutlined />}
-              type="primary"
-              onClick={() => {
-                setEditing(null);
-                setEditorOpen(true);
-              }}
-            >
-              添加成员
-            </Button>
-          )}
-        </Space>
+        )
       }
     >
       <Typography.Paragraph type="secondary">
         {project.name} · 管理身份与业务角色独立，变更按当前权限校验。
       </Typography.Paragraph>
       {error && (
-        <Alert type="error" title={error} showIcon className="section-alert" />
+        <Alert
+          type="error"
+          title={error}
+          showIcon
+          className="section-alert"
+          action={
+            <Button loading={loading} onClick={() => void load()}>
+              重新读取成员
+            </Button>
+          }
+        />
       )}
       {!error && (
         <Table<ProjectMember>
@@ -533,7 +529,7 @@ export function PlatformProjects({
             title={error}
             showIcon
             className="section-alert"
-            action={<Button onClick={() => void load()}>刷新</Button>}
+            action={<Button onClick={() => void load()}>重新读取项目</Button>}
           />
         )}
         <Table<Project>

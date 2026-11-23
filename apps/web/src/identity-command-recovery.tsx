@@ -6,6 +6,7 @@ import { sendReceiptSchema } from '../../../packages/contracts/src/conversations
 import type { TaskState } from '../../../packages/contracts/src/conversations';
 import { api, ApiError, describeError, isClosedOperationReceipt } from './api';
 import { identityContextEpoch } from './identity-context';
+import { RecoveryBlock } from './recovery-block';
 import {
   identityCommandsChanged,
   pendingIdentityCommands,
@@ -150,76 +151,83 @@ export function IdentityCommandRecovery({ userId }: { userId: string }) {
       </div>
     );
   return (
-    <section
-      className="notice amber identity-recovery-banner"
-      aria-label="原身份操作回执核对"
-    >
-      <div className="row wrap">
-        <b className="grow">待核对操作</b>
-        <Button
-          size="small"
-          aria-expanded={true}
-          onClick={() => {
-            setExpanded(false);
-            setNotice(undefined);
-          }}
-        >
-          收起
-        </Button>
-      </div>
-      {!!visible.length && (
-        <p>可查询原回执。查不到时，可结束本次核对，由服务端关闭原提交标识。</p>
-      )}
-      {!!visible.length && !identityCommandStorageReliable() && (
-        <p>浏览器当前无法持久保存恢复标识，请记录下面的原命令后再关闭本页。</p>
-      )}
-      {visible.map((record) => (
-        <div
-          className="row wrap mt"
-          key={`${record.operation}:${record.commandId}`}
-        >
-          <span className="grow caption">
-            {record.operation === 'requirements.collaboration'
-              ? '需求协作保存'
-              : '对话发送'}{' '}
-            · <span className="mono">{record.commandId}</span>
-          </span>
+    <div className="identity-recovery-banner">
+      <RecoveryBlock
+        title="待核对操作"
+        variant="pending"
+        description={
+          visible.length
+            ? '可查询原回执。结束本次核对会由服务端关闭原提交标识。'
+            : undefined
+        }
+        actions={
           <Button
             size="small"
-            disabled={!!checking}
-            loading={
-              checking?.commandId === record.commandId && !checking.close
-            }
-            onClick={() => void recover(record, false)}
-          >
-            查询原回执
-          </Button>
-          <Button
-            size="small"
-            disabled={!!checking}
-            loading={checking?.commandId === record.commandId && checking.close}
-            onClick={() => void recover(record, true)}
-          >
-            结束本次核对
-          </Button>
-          <Button
-            size="small"
+            aria-expanded={true}
             onClick={() => {
-              window.location.hash =
-                record.operation === 'requirements.collaboration'
-                  ? `requirements?projectId=${record.projectId}&requirementId=${record.targetId}`
-                  : `workspace?conversationId=${record.targetId}`;
+              setExpanded(false);
+              setNotice(undefined);
             }}
           >
-            打开原对象
+            收起
           </Button>
-        </div>
-      ))}
-      {notice && (
-        <p className="caption mt" role="status">
-          {notice}
-        </p>
-      )}
-    </section>
+        }
+      >
+        {!!visible.length && !identityCommandStorageReliable() && (
+          <p>
+            浏览器当前无法持久保存恢复标识，请记录下面的原命令后再关闭本页。
+          </p>
+        )}
+        {visible.map((record) => (
+          <div
+            className="row wrap mt"
+            key={`${record.operation}:${record.commandId}`}
+          >
+            <span className="grow caption">
+              {record.operation === 'requirements.collaboration'
+                ? '需求协作保存'
+                : '对话发送'}{' '}
+              · <span className="mono">{record.commandId}</span>
+            </span>
+            <Button
+              size="small"
+              disabled={!!checking}
+              loading={
+                checking?.commandId === record.commandId && !checking.close
+              }
+              onClick={() => void recover(record, false)}
+            >
+              查询原回执
+            </Button>
+            <Button
+              size="small"
+              disabled={!!checking}
+              loading={
+                checking?.commandId === record.commandId && checking.close
+              }
+              onClick={() => void recover(record, true)}
+            >
+              结束本次核对
+            </Button>
+            <Button
+              size="small"
+              onClick={() => {
+                window.location.hash =
+                  record.operation === 'requirements.collaboration'
+                    ? `requirements?projectId=${record.projectId}&requirementId=${record.targetId}`
+                    : `workspace?conversationId=${record.targetId}`;
+              }}
+            >
+              打开原对象
+            </Button>
+          </div>
+        ))}
+        {notice && (
+          <p className="caption mt" role="status">
+            {notice}
+          </p>
+        )}
+      </RecoveryBlock>
+    </div>
   );
 }

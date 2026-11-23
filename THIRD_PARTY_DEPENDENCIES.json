@@ -321,6 +321,16 @@
       "description": "An alias package for `crypto.randomBytes` in Node.js and/or browsers"
     },
     {
+      "name": "@mermaid-js/tiny",
+      "versions": [
+        "12.3.0"
+      ],
+      "license": "MIT",
+      "author": "Sidharth Vinod",
+      "homepage": "https://github.com/mermaid-js/mermaid",
+      "description": "Tiny version of mermaid"
+    },
+    {
       "name": "@napi-rs/canvas",
       "versions": [
         "1.1.1"

@@ -1,0 +1,107 @@
+.markdown-document-preview {
+  width: min(100%, 88ch);
+  margin-inline: auto;
+  padding: clamp(12px, 3vw, 32px);
+  line-height: 1.8;
+  font-size: 15px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.markdown-document-preview > :first-child {
+  margin-top: 0;
+}
+.markdown-document-preview :is(h1, h2, h3, h4, h5, h6) {
+  margin: 1.3em 0 0.55em;
+  line-height: 1.35;
+  font-weight: 650;
+}
+.markdown-document-preview h1 {
+  font-size: 1.8em;
+}
+.markdown-document-preview h2 {
+  font-size: 1.42em;
+}
+.markdown-document-preview h3 {
+  font-size: 1.18em;
+}
+.markdown-document-preview :is(h1, h2) {
+  padding-bottom: 0.35em;
+  border-bottom: 1px solid var(--line);
+}
+.markdown-document-preview :is(p, ul, ol, blockquote, pre) {
+  margin: 0 0 1em;
+}
+.markdown-document-preview :is(ul, ol) {
+  padding-inline-start: 1.65em;
+}
+.markdown-document-preview li > :is(ul, ol, p) {
+  margin-block: 0 0.2em;
+}
+.markdown-document-preview blockquote {
+  padding: 0.25em 0.9em;
+  border-inline-start: 3px solid var(--line);
+  color: var(--muted);
+}
+.markdown-document-preview blockquote > :last-child {
+  margin-bottom: 0;
+}
+.markdown-document-preview :is(pre, :not(pre) > code) {
+  background: var(--subtle);
+  border-radius: 5px;
+}
+.markdown-document-preview :not(pre) > code {
+  padding: 0.1em 0.3em;
+}
+.markdown-document-preview pre {
+  padding: 0.85em 1em;
+  line-height: 1.55;
+  overflow: auto;
+  white-space: pre;
+}
+.markdown-document-preview hr {
+  margin-block: 1.8em;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+.markdown-document-table {
+  overflow-x: auto;
+  margin-block-end: 1em;
+}
+.markdown-document-table table {
+  font-size: 0.93em;
+  border-collapse: collapse;
+}
+.markdown-document-table :is(th, td) {
+  border: 1px solid var(--line);
+  padding: 0.5em 0.75em;
+}
+.markdown-document-table th {
+  background: var(--subtle);
+  font-weight: 600;
+}
+.markdown-document-link {
+  color: var(--accent);
+}
+.markdown-rendered-diagram {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  margin: 1.2em auto;
+}
+.markdown-diagram-error {
+  margin-block: 1em;
+  color: var(--muted);
+}
+.markdown-diagram-error summary {
+  cursor: pointer;
+}
+.markdown-diagram-render-frame {
+  position: fixed;
+  inset-inline-start: -10000px;
+  width: 1000px;
+  height: 20px;
+  border: 0;
+  pointer-events: none;
+  visibility: hidden;
+}

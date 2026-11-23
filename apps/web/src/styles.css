@@ -243,23 +243,6 @@ a:focus-visible {
   text-align: left;
   white-space: normal;
 }
-.material-html-preview {
-  width: 100%;
-  min-height: 60vh;
-  border: 1px solid var(--border);
-  background: white;
-}
-.material-text-preview {
-  max-height: 65vh;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  background: var(--page-bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 20px;
-}
 .auth-screen {
   min-height: 100dvh;
   display: grid;

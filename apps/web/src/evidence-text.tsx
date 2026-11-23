@@ -1,6 +1,5 @@
 import { useMemo, useRef } from 'react';
 import { Alert, Button, Space, Tabs, Tag } from 'antd';
-import { parseDelimited } from './file-preview-data';
 
 const readJson = (text: string): unknown => {
   try {
@@ -329,83 +328,10 @@ export function EvidenceConversation({
   );
 }
 
-export function EvidenceDelimited({
-  text,
-  delimiter,
-}: {
-  text: string;
-  delimiter: ',' | '\t';
-}) {
-  const parsed = useMemo(() => {
-    try {
-      return parseDelimited(text, delimiter, 101, 40);
-    } catch {
-      return null;
-    }
-  }, [text, delimiter]);
-  if (!parsed?.rows.length) return <pre className="message-code">{text}</pre>;
-  const [header, ...data] = parsed.rows;
-  const width = parsed.rows.reduce((max, row) => Math.max(max, row.length), 0);
-  return (
-    <Tabs
-      items={[
-        {
-          key: 'table',
-          label: '表格预览',
-          children: (
-            <div className="result-evidence-csv">
-              {parsed.truncated && (
-                <Alert
-                  type="info"
-                  showIcon
-                  title="表格预览最多 100 行数据、40 列"
-                />
-              )}
-              <div className="result-evidence-table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      {Array.from({ length: width }, (_, index) => (
-                        <th key={index} scope="col">
-                          {header?.[index] || `列 ${index + 1}`}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.map((row, index) => (
-                      <tr key={index}>
-                        {Array.from({ length: width }, (_, column) => (
-                          <td key={column}>{row[column] ?? ''}</td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ),
-        },
-        {
-          key: 'raw',
-          label: '原文',
-          children: <pre className="message-code">{text}</pre>,
-        },
-      ]}
-    />
-  );
-}
-
-export function EvidenceJson({
-  text,
-  split,
-}: {
-  text: string;
-  split: boolean;
-}) {
+export function EvidenceRequestResponse({ text }: { text: string }) {
   const value = useMemo(() => readJson(text), [text]);
   const record = object(value);
-  if (split && record && ('request' in record || 'response' in record)) {
+  if (record && ('request' in record || 'response' in record)) {
     return (
       <Tabs
         items={[

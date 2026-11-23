@@ -636,7 +636,12 @@ export function Workspace({
         : true),
   );
   const contextCollapsible = Boolean(
-    activeId && (conversationLoading || active?.id !== activeId),
+    activeId &&
+    (conversationLoading ||
+      active?.id !== activeId ||
+      taskId ||
+      detail?.messages.length ||
+      (sendPreview?.conversationId === activeId && sendPreview.userMessageId)),
   );
   useEffect(() => {
     if (contextCollapsible) {

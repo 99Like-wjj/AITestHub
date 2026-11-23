@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { planningOperationStatusSchema } from '../../../packages/contracts/src/plans';
 import { api, ApiError, describeError } from './api';
 import { useBusinessCommand } from './business-command';
+import { RecoveryBlock } from './recovery-block';
 
 const storageKey = 'aitesthub:planning-unconfirmed:v2';
 export const PlanningActorContext = createContext<string | null>(null);
@@ -142,50 +143,55 @@ export function PlanningRecovery<T>({
   const userId = useContext(PlanningActorContext);
   if (!command.uncertain) return null;
   return (
-    <div className="notice amber mt" role="status">
-      <p>
-        未收到确定回执，已停止重发。原提交标识：
-        <span className="mono">{command.commandId}</span>
-      </p>
-      <button
-        className="btn small mt"
-        disabled={pending}
-        onClick={() => {
-          setPending(true);
-          const record = {
-            userId: userId ?? '',
-            projectId,
-            key: command.commandId,
-            operation,
-            targetId: null,
-            label: operation,
-          };
-          void original(record)
-            .then((result) => {
-              if (result.command.projectId !== projectId)
-                throw new Error('原回执项目不符。');
-              if (result.command.status === 'completed') {
-                const value = schema.parse(result.command.response);
-                remember(record, true);
-                command.confirmRecoveredReceipt();
-                onRecovered(value);
-              } else
-                setStatus(`原操作状态：${result.command.status}。未重复提交。`);
-            })
-            .catch((error) =>
-              setStatus(
-                error instanceof ApiError && error.status === 404
-                  ? '暂未检索到已提交回执，不代表原操作未发生，请继续只读核对。'
-                  : describeError(error),
-              ),
-            )
-            .finally(() => setPending(false));
-        }}
-      >
-        {pending ? '查询中…' : '查询原操作回执'}
-      </button>
-      {status && <p className="caption mt">{status}</p>}
-    </div>
+    <RecoveryBlock
+      title="核对计划操作"
+      variant="pending"
+      reference={command.commandId}
+      description="查询此提交的原回执。同一操作暂时停止重发。"
+      actions={
+        <button
+          className="btn small mt"
+          disabled={pending}
+          onClick={() => {
+            setPending(true);
+            const record = {
+              userId: userId ?? '',
+              projectId,
+              key: command.commandId,
+              operation,
+              targetId: null,
+              label: operation,
+            };
+            void original(record)
+              .then((result) => {
+                if (result.command.projectId !== projectId)
+                  throw new Error('原回执项目不符。');
+                if (result.command.status === 'completed') {
+                  const value = schema.parse(result.command.response);
+                  remember(record, true);
+                  command.confirmRecoveredReceipt();
+                  onRecovered(value);
+                } else
+                  setStatus(
+                    `原操作状态：${result.command.status}。未重复提交。`,
+                  );
+              })
+              .catch((error) =>
+                setStatus(
+                  error instanceof ApiError && error.status === 404
+                    ? '暂未检索到已提交回执，不代表原操作未发生，请继续只读核对。'
+                    : describeError(error),
+                ),
+              )
+              .finally(() => setPending(false));
+          }}
+        >
+          {pending ? '查询中…' : '查询原回执'}
+        </button>
+      }
+    >
+      {status && <p role="status">{status}</p>}
+    </RecoveryBlock>
   );
 }
 export function PlanningPendingBanner({
@@ -198,12 +204,18 @@ export function PlanningPendingBanner({
   const items = usePlanningPending(projectId),
     [checking, setChecking] = useState<string>(),
     [status, setStatus] = useState('');
-  if (!items.length && !status) return null;
+  if (!items.length)
+    return status ? (
+      <p className="caption" role="status">
+        {status}
+      </p>
+    ) : null;
   return (
-    <div className="notice amber mb" role="status">
-      {items.length > 0 && (
-        <p>以下操作尚待原回执核对。同一目标的写入已暂停，其他资料仍可浏览。</p>
-      )}
+    <RecoveryBlock
+      title="待核对的计划与调度操作"
+      variant="pending"
+      description="同一目标的写入已暂停，其他资料仍可浏览。"
+    >
       {items.map((item) => (
         <div className="row wrap mt" key={item.key}>
           <span className="grow small">
@@ -241,7 +253,7 @@ export function PlanningPendingBanner({
           </button>
         </div>
       ))}
-      {status && <p className="caption mt">{status}</p>}
-    </div>
+      {status && <p role="status">{status}</p>}
+    </RecoveryBlock>
   );
 }

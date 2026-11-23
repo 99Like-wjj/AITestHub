@@ -48,6 +48,11 @@ import {
   type IdentityCommandSettlement,
 } from './identity-commands';
 import { uiLayers } from './ui-layers';
+import {
+  PrivateFilePreviewContent,
+  PrivateFilePreviewDownload,
+  usePrivateFilePreview,
+} from './private-file-preview';
 import { PageHeading } from './page-heading';
 import { BeijingTime, formatBeijingTime } from './beijing-time';
 import { StatusTag } from './semantic-status';
@@ -57,11 +62,7 @@ import {
   ResultPagination,
 } from './result-list';
 import { CommandDialog, useBusinessCommand } from './business-command';
-import {
-  downloadPrivateFile,
-  fetchPrivateFile,
-  isolatedHtml,
-} from './file-channel';
+import { downloadPrivateFile } from './file-channel';
 import {
   purposeLabels,
   readabilityLabels,
@@ -103,71 +104,23 @@ function MaterialPreview({
   material: Material | null;
   onClose: () => void;
 }) {
-  const [content, setContent] = useState<string>();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string>();
-  const isHtml =
-    material?.originalName.toLowerCase().endsWith('.html') ||
-    material?.originalName.toLowerCase().endsWith('.htm');
-  useEffect(() => {
-    let cancelled = false;
-    setContent(undefined);
-    setError(undefined);
-    if (!material?.fileResourceId) return;
-    setLoading(true);
-    void fetchPrivateFile(material.fileResourceId)
-      .then(async (blob) => {
-        if (blob.size > 5 * 1024 * 1024)
-          throw new Error('此文件超过 5 MiB 预览范围，请下载完整原件查看。');
-        if (
-          !isHtml &&
-          !/\.(md|markdown|txt|csv|json|xml|yaml|yml)$/i.test(
-            material.originalName,
-          ) &&
-          !blob.type.startsWith('text/')
-        )
-          throw new Error('当前格式请下载原件查看；平台不伪造解析内容。');
-        const text = await blob.text();
-        if (!cancelled) setContent(isHtml ? isolatedHtml(text) : text);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(describeError(err));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [material, isHtml]);
+  const preview = usePrivateFilePreview(material?.fileResourceId ?? null);
   return (
     <Modal
       open={material !== null}
       zIndex={uiLayers.evidence}
       title={material ? `预览：${material.originalName}` : '材料预览'}
       onCancel={onClose}
-      footer={<Button onClick={onClose}>关闭预览</Button>}
+      footer={
+        <Space>
+          <Button onClick={onClose}>关闭预览</Button>
+          <PrivateFilePreviewDownload state={preview} />
+        </Space>
+      }
       width={1100}
       destroyOnHidden
     >
-      <Typography.Paragraph type="secondary">
-        读取当前有权访问的原件。HTML
-        使用无脚本沙箱和禁止外连的静态副本；原件下载仍保留原字节。
-      </Typography.Paragraph>
-      {loading && <Skeleton active />}
-      {error && <Alert type="warning" showIcon title={error} />}
-      {content !== undefined &&
-        (isHtml ? (
-          <iframe
-            className="material-html-preview"
-            title={material?.originalName ?? 'HTML 材料'}
-            sandbox=""
-            referrerPolicy="no-referrer"
-            srcDoc={content}
-          />
-        ) : (
-          <pre className="material-text-preview">{content}</pre>
-        ))}
+      <PrivateFilePreviewContent state={preview} />
     </Modal>
   );
 }

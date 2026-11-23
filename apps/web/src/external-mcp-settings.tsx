@@ -25,6 +25,7 @@ import { parseStrictJsonText } from '../../../packages/contracts/src/safe-json';
 import { api, ApiError, describeError } from './api';
 import { useBusinessCommand } from './business-command';
 import { uiLayers } from './ui-layers';
+import { RecoveryBlock } from './recovery-block';
 import { PageHeading } from './page-heading';
 import type { PreparedReference } from './workspace-references';
 import {
@@ -142,42 +143,44 @@ function Recovery<T>({
     [status, setStatus] = useState('');
   if (!command.uncertain) return null;
   return (
-    <Notice>
-      <p>
-        回执尚未确认，已停止重发。原标识{' '}
-        <span className="mono">{command.commandId}</span>
-      </p>
-      <button
-        className="btn small mt"
-        disabled={pending}
-        onClick={() => {
-          setPending(true);
-          void api(
-            `${base}/operation-status?operation=${encodeURIComponent(operation)}&key=${command.commandId}`,
-            {},
-            externalManagementStatusSchema,
-          )
-            .then((receipt) => {
-              if (receipt.command.status === 'completed') {
-                const value = schema.parse(receipt.command.response);
-                command.confirmRecoveredReceipt();
-                onRecovered(value);
-              } else setStatus(`原状态：${receipt.command.status}，未重发。`);
-            })
-            .catch((error) =>
-              setStatus(
-                error instanceof ApiError && error.status === 404
-                  ? '暂未取得原回执，不代表操作未发生；请继续只读核对。'
-                  : describeError(error),
-              ),
+    <RecoveryBlock
+      variant="pending"
+      title="核对外部工具配置"
+      reference={command.commandId}
+      actions={
+        <button
+          className="btn small mt"
+          disabled={pending}
+          onClick={() => {
+            setPending(true);
+            void api(
+              `${base}/operation-status?operation=${encodeURIComponent(operation)}&key=${command.commandId}`,
+              {},
+              externalManagementStatusSchema,
             )
-            .finally(() => setPending(false));
-        }}
-      >
-        查询原操作
-      </button>
-      {status && <p className="caption mt">{status}</p>}
-    </Notice>
+              .then((receipt) => {
+                if (receipt.command.status === 'completed') {
+                  const value = schema.parse(receipt.command.response);
+                  command.confirmRecoveredReceipt();
+                  onRecovered(value);
+                } else setStatus(`原状态：${receipt.command.status}，未重发。`);
+              })
+              .catch((error) =>
+                setStatus(
+                  error instanceof ApiError && error.status === 404
+                    ? '暂未取得原回执，不代表操作未发生；请继续只读核对。'
+                    : describeError(error),
+                ),
+              )
+              .finally(() => setPending(false));
+          }}
+        >
+          查询原回执
+        </button>
+      }
+    >
+      {status && <p role="status">{status}</p>}
+    </RecoveryBlock>
   );
 }
 function EditDialog({
@@ -566,23 +569,22 @@ export function ExternalMcpAdminSettings() {
     <div className="external-mcp-page">
       <div className="between mt">
         <h3>外部 MCP 服务</h3>
-        <div className="row">
+        <button className="btn small primary" onClick={() => setEditing(null)}>
+          添加服务
+        </button>
+      </div>
+      {error && (
+        <Notice error>
+          {error}
           <button
             className="btn small"
             disabled={loading}
             onClick={() => void load()}
           >
-            刷新
+            重新读取服务
           </button>
-          <button
-            className="btn small primary"
-            onClick={() => setEditing(null)}
-          >
-            添加服务
-          </button>
-        </div>
-      </div>
-      {error && <Notice error>{error}</Notice>}
+        </Notice>
+      )}
       {loading && !services.length && (
         <p className="caption mt">读取管理员服务配置…</p>
       )}
@@ -818,20 +820,22 @@ export function ExternalMcpPersonalKeys() {
   }
   return (
     <div className="external-mcp-page">
-      <div className="between">
-        <h3>个人外部 MCP Key</h3>
-        <button
-          className="btn small"
-          disabled={loading}
-          onClick={() => void load()}
-        >
-          刷新
-        </button>
-      </div>
+      <h3>个人外部 MCP Key</h3>
       <p className="caption mt">
         管理员登记服务，本人维护个人凭据。平台AI不读取或代填。检查连接只读取当前工具目录，不执行业务工具。
       </p>
-      {error && <Notice error>{error}</Notice>}
+      {error && (
+        <Notice error>
+          {error}
+          <button
+            className="btn small"
+            disabled={loading}
+            onClick={() => void load()}
+          >
+            重新读取连接
+          </button>
+        </Notice>
+      )}
       {!loading && !error && !services.length && (
         <p className="caption mt">暂无向本人开放的外部MCP服务。</p>
       )}
@@ -1944,39 +1948,42 @@ export function ExternalMcpDecisionsPage() {
       />
       {lookupError && <Notice error>{lookupError}</Notice>}
       {pending.map((item) => (
-        <div className="notice amber mb" key={item.commandId}>
-          <p>
-            原提交 {item.commandId} 的回执尚未核对。未保存原参数，不会据此重发。
-          </p>
-          <button
-            className="btn small mt"
-            onClick={() => {
-              void api(
-                `${base}/invocations/by-command/${item.commandId}`,
-                {},
-                externalInvocationReceiptSchema,
-              )
-                .then((receipt) => {
-                  if (me) {
-                    rememberCall(me.user.id, item, true);
-                    setPending(pendingCalls(me.user.id));
-                  }
-                  setId(receipt.invocation.id);
-                  window.location.hash = `external-mcp?invocationId=${receipt.invocation.id}`;
-                  setLookupError('');
-                })
-                .catch((error) =>
-                  setLookupError(
-                    error instanceof ApiError && error.status === 404
-                      ? '暂未取得原回执，不代表未受理；保留原标识继续只读核对。'
-                      : describeError(error),
-                  ),
-                );
-            }}
-          >
-            查询原调用
-          </button>
-        </div>
+        <RecoveryBlock
+          key={item.commandId}
+          variant="pending"
+          title="核对外部工具原调用"
+          reference={item.commandId}
+          actions={
+            <button
+              className="btn small mt"
+              onClick={() => {
+                void api(
+                  `${base}/invocations/by-command/${item.commandId}`,
+                  {},
+                  externalInvocationReceiptSchema,
+                )
+                  .then((receipt) => {
+                    if (me) {
+                      rememberCall(me.user.id, item, true);
+                      setPending(pendingCalls(me.user.id));
+                    }
+                    setId(receipt.invocation.id);
+                    window.location.hash = `external-mcp?invocationId=${receipt.invocation.id}`;
+                    setLookupError('');
+                  })
+                  .catch((error) =>
+                    setLookupError(
+                      error instanceof ApiError && error.status === 404
+                        ? '暂未取得原回执，不代表未受理；保留原标识继续只读核对。'
+                        : describeError(error),
+                    ),
+                  );
+              }}
+            >
+              查询原调用
+            </button>
+          }
+        />
       ))}
       <ExternalMcpInvocationsPanel {...(id ? { invocationId: id } : {})} />
       {manual && me && (

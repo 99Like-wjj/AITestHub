@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   Alert,
   Button,
-  Card,
   Collapse,
   Form,
   Input,
@@ -35,6 +34,7 @@ import type { Project } from './types';
 import { uiLayers } from './ui-layers';
 import { AppIcon } from './app-icon';
 import { ApiAttemptEvidence, type ResponseRule } from './api-attempt-evidence';
+import { RecoveryBlock, RecoveryQueryForm } from './recovery-block';
 
 type DebugReceipt = z.infer<typeof debugStartReceiptSchema>;
 type DebugTrace = z.infer<typeof debugTraceSchema>;
@@ -48,6 +48,10 @@ export interface DiagnosticDraft {
   stepId?: string;
 }
 export type DiagnosticRestoration = { kind: 'command' | 'run'; id: string };
+export const diagnosticLookupOptions = [
+  { value: 'run', label: '原诊断轮次 ID' },
+  { value: 'command', label: '原提交 ID' },
+];
 const attemptLabels: Record<string, string> = {
   intent: '已登记',
   completed: '已完成',
@@ -854,12 +858,12 @@ export function ApiDraftDebugger({
         <div className="api-proto-scroll api-proof-scroll">
           {!selecting && error && <Alert type="error" showIcon title={error} />}
           {uncertain && (
-            <Alert
-              type="warning"
-              showIcon
-              title="本次调试回执未知"
-              description={'请保留原提交标识 ' + commandId.current}
-              action={
+            <RecoveryBlock
+              variant="pending"
+              title="核对调试回执"
+              description="用本次提交标识查询是否已受理。"
+              reference={commandId.current}
+              actions={
                 <Button
                   size="small"
                   loading={loading}
@@ -876,13 +880,19 @@ export function ApiDraftDebugger({
             </p>
           )}
           {restoration?.kind === 'command' && !receipt && !uncertain && (
-            <Button
-              size="small"
-              loading={loading}
-              onClick={() => void recoverReceipt()}
-            >
-              只读查询原提交
-            </Button>
+            <RecoveryBlock
+              title="查询原调试提交"
+              reference={restoration.id}
+              actions={
+                <Button
+                  size="small"
+                  loading={loading}
+                  onClick={() => void recoverReceipt()}
+                >
+                  查询原回执
+                </Button>
+              }
+            />
           )}
           {attempt ? (
             <ApiAttemptEvidence
@@ -920,13 +930,20 @@ export function ApiDraftDebugger({
         </div>
         <div className="api-proto-pane-foot">
           {qualificationCommand ? (
-            <Button
-              block
-              loading={savingQualification}
-              onClick={() => void readQualificationReceipt()}
-            >
-              查询原资格保存回执
-            </Button>
+            <RecoveryBlock
+              variant="pending"
+              title="核对回归资格保存"
+              reference={qualificationCommand}
+              actions={
+                <Button
+                  size="small"
+                  loading={savingQualification}
+                  onClick={() => void readQualificationReceipt()}
+                >
+                  查询原回执
+                </Button>
+              }
+            />
           ) : (
             <Button
               block
@@ -990,10 +1007,10 @@ export function ApiDiagnosticPage({ project }: { project: Project | null }) {
   const contextMatches = !queryProject || queryProject === project?.id;
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
-      <Card title="接口回归工作台 · 原诊断找回">
-        <Typography.Paragraph>
-          正式接口计划在“测试计划”的接口分类维护。当前草稿诊断从用例编辑器发起，诊断记录独立于正式报告。本页只读找回原诊断，不启动或重发请求。
-        </Typography.Paragraph>
+      <RecoveryBlock
+        title="查询原接口诊断"
+        description="按原诊断轮次或提交标识查看当前项目的调试记录。"
+      >
         {!project && (
           <Alert
             type="info"
@@ -1010,9 +1027,8 @@ export function ApiDiagnosticPage({ project }: { project: Project | null }) {
           />
         )}
         {error && <Alert type="error" title={error} showIcon />}
-        <Form
+        <RecoveryQueryForm
           form={form}
-          layout="vertical"
           initialValues={{ kind: 'command' }}
           onFinish={(values) => {
             const parsed = idSchema.safeParse(values.id);
@@ -1025,27 +1041,25 @@ export function ApiDiagnosticPage({ project }: { project: Project | null }) {
               window.location.hash = `api-regression?projectId=${project.id}&${values.kind === 'run' ? 'debugRunId' : 'debugCommandId'}=${parsed.data}`;
           }}
         >
-          <Form.Item name="kind" label="原标识类型">
-            <Select
-              options={[
-                { value: 'command', label: '原开始提交 commandId' },
-                { value: 'run', label: '原诊断轮次 runId' },
-              ]}
-            />
+          <Form.Item name="kind" label="记录类型">
+            <Select options={diagnosticLookupOptions} />
           </Form.Item>
           <Form.Item name="id" label="原标识" rules={[{ required: true }]}>
-            <Input autoComplete="off" placeholder="只查询原 ID，不新建诊断" />
+            <Input autoComplete="off" placeholder="输入原记录标识" />
           </Form.Item>
-          <Button htmlType="submit" disabled={!project} type="primary">
-            只读找回原诊断
-          </Button>
-        </Form>
-      </Card>
+          <Form.Item className="recovery-query-submit">
+            <Button htmlType="submit" disabled={!project} type="primary">
+              查询原记录
+            </Button>
+          </Form.Item>
+        </RecoveryQueryForm>
+      </RecoveryBlock>
       {project && contextMatches && restoration && (
         <Modal
           open
           width={900}
           title="查看原接口调试证据"
+          zIndex={uiLayers.dialog}
           rootClassName="api-history-dialog"
           onCancel={() => setRestoration(null)}
           footer={<Button onClick={() => setRestoration(null)}>关闭</Button>}

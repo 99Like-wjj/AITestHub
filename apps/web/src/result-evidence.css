@@ -249,18 +249,7 @@
   background: var(--subtle);
   overflow-wrap: anywhere;
 }
-.result-evidence-original-image {
-  display: block;
-  max-width: 100%;
-  max-height: 65vh;
-  width: auto;
-  height: auto;
-  margin-inline: auto;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-.result-evidence-timeline,
-.result-evidence-csv {
+.result-evidence-timeline {
   display: grid;
   gap: 6px;
   min-width: 0;
@@ -283,23 +272,6 @@
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   font-size: 11px;
-}
-.result-evidence-table-scroll {
-  max-width: 100%;
-  overflow: auto;
-}
-.result-evidence-table-scroll table {
-  border-collapse: collapse;
-  width: 100%;
-}
-.result-evidence-table-scroll :is(th, td) {
-  padding: 6px 8px;
-  text-align: start;
-  border: 1px solid var(--border);
-  overflow-wrap: anywhere;
-}
-.result-evidence-table-scroll th {
-  background: var(--subtle);
 }
 .result-review-api-summary {
   display: flex;

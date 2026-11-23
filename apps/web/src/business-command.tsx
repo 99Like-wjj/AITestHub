@@ -4,6 +4,7 @@ import { Alert, Button, Modal, Space, Typography } from 'antd';
 import { z } from 'zod';
 import { ApiError, isUncertainMutationError, describeError } from './api';
 import { uiLayers } from './ui-layers';
+import { RecoveryBlock } from './recovery-block';
 
 export function useBusinessCommand(session: string | null) {
   // The displayed key and the dispatched key come from the same render intent.
@@ -183,12 +184,11 @@ export function CommandDialog({
         />
       )}
       {command.uncertain && (
-        <Alert
-          className="section-alert"
-          type="warning"
-          showIcon
-          title={`本次操作回执未知：${command.commandId}`}
-          description="已禁重发，请先只读核对原对象/回执。不要通过更换提交标识推断原操作未发生。"
+        <RecoveryBlock
+          variant="pending"
+          title="本次操作回执待确认"
+          reference={command.commandId}
+          description="请核对原记录，确认平台是否已收到这次操作。"
         />
       )}
       {children}

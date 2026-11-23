@@ -10,7 +10,6 @@ import {
   Tooltip,
   Typography,
 } from 'antd';
-import { ReloadOutlined } from '@ant-design/icons';
 import { z } from 'zod';
 import {
   personalUsageSchema,
@@ -246,18 +245,22 @@ export function PersonalUsagePanel() {
           }))}
           style={{ minWidth: 220 }}
         />
-        <Button
-          icon={<ReloadOutlined />}
-          loading={loading}
-          onClick={() => void load()}
-        >
-          刷新本人用量
-        </Button>
       </Space>
       <Typography.Paragraph type="secondary">
         最近365天，北京时间。仅展示实际已记录的Token；确认请求次数不代表业务执行成功。
       </Typography.Paragraph>
-      {error && <Alert type="error" showIcon title={error} />}
+      {error && (
+        <Alert
+          type="error"
+          showIcon
+          title={error}
+          action={
+            <Button loading={loading} onClick={() => void load()}>
+              重新读取用量
+            </Button>
+          }
+        />
+      )}
       {data && (
         <>
           <div className="usage-summary-grid">
@@ -432,18 +435,7 @@ export function PlatformUsagePanel() {
     data?.byModel.filter((entry) => entry.tokens !== null) ?? [];
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
-      <Card
-        title="平台 AI 使用监控"
-        extra={
-          <Button
-            icon={<ReloadOutlined />}
-            loading={loading}
-            onClick={() => void load()}
-          >
-            刷新统计
-          </Button>
-        }
-      >
+      <Card title="平台 AI 使用监控">
         <Select
           aria-label="平台用量执行来源"
           value={scope}
@@ -457,7 +449,18 @@ export function PlatformUsagePanel() {
         <Typography.Paragraph type="secondary" className="section-alert">
           最近365天，北京时间。按实际记录的Token展示模型、来源和用户用量。
         </Typography.Paragraph>
-        {error && <Alert type="error" showIcon title={error} />}
+        {error && (
+          <Alert
+            type="error"
+            showIcon
+            title={error}
+            action={
+              <Button loading={loading} onClick={() => void load()}>
+                重新读取统计
+              </Button>
+            }
+          />
+        )}
         {data && (
           <>
             <Space wrap>

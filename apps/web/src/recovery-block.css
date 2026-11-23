@@ -1,0 +1,75 @@
+.recovery-block {
+  margin-block: 8px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.recovery-block--pending {
+  background: var(--bg);
+}
+
+.recovery-block-header,
+.recovery-block-heading,
+.recovery-block-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.recovery-block-header {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.recovery-block-heading,
+.recovery-block-actions {
+  flex-wrap: wrap;
+}
+
+.recovery-block-heading h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.recovery-block-summary,
+.recovery-block-body {
+  min-width: 0;
+}
+
+.recovery-block-description,
+.recovery-block-reference {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.recovery-block-body {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.recovery-query-form {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.recovery-query-form > .ant-form-item {
+  flex: 1 1 11rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.recovery-query-form > .recovery-query-submit {
+  flex: 0 0 auto;
+}

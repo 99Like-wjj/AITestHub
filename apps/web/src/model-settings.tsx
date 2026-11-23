@@ -37,6 +37,7 @@ import {
 import { ExternalMcpAdminSettings } from './external-mcp-settings';
 import { PageHeading } from './page-heading';
 import { uiLayers } from './ui-layers';
+import { RecoveryBlock } from './recovery-block';
 import { registerNavigationBlocker } from './navigation-guard';
 import {
   dispatchModelCommand,
@@ -160,21 +161,26 @@ export function AvailableModelList() {
   }, []);
   return (
     <section className="model-settings-v2">
-      <div className="between">
-        <h2>可用模型</h2>
-        <button
-          className="btn small"
-          disabled={loading}
-          onClick={() => void load()}
-        >
-          <ReloadOutlined /> 刷新
-        </button>
-      </div>
+      <h2>可用模型</h2>
       <p className="caption mt">
         这里只读取向本人开放的模型配置，不发送模型请求。菜单显示名与实际模型标识分别展示。
       </p>
       {error && (
-        <Alert className="section-alert" type="error" showIcon title={error} />
+        <Alert
+          className="section-alert"
+          type="error"
+          showIcon
+          title={error}
+          action={
+            <button
+              className="btn small"
+              disabled={loading}
+              onClick={() => void load()}
+            >
+              重新读取模型
+            </button>
+          }
+        />
       )}
       {loading ? (
         <Spin />
@@ -1457,24 +1463,15 @@ export function PlatformModelSettings() {
         title="模型服务"
         description="连接协议、模型行与资料许可独立管理；所有账号仅能选择获授权的具体模型。"
         actions={
-          <>
-            <button
-              className="btn"
-              disabled={loading || commands.pending}
-              onClick={() => void load()}
-            >
-              <ReloadOutlined /> 刷新
-            </button>
-            <button
-              className="btn primary"
-              disabled={commands.blocked || loading}
-              onClick={() =>
-                setEditor({ key: crypto.randomUUID(), service: null })
-              }
-            >
-              <PlusOutlined /> 添加服务
-            </button>
-          </>
+          <button
+            className="btn primary"
+            disabled={commands.blocked || loading}
+            onClick={() =>
+              setEditor({ key: crypto.randomUUID(), service: null })
+            }
+          >
+            <PlusOutlined /> 添加服务
+          </button>
         }
       />
       {(error || commands.error || commands.storageError) && (
@@ -1483,14 +1480,25 @@ export function PlatformModelSettings() {
           type="error"
           showIcon
           title={error || commands.error || commands.storageError}
+          action={
+            error && (
+              <button
+                className="btn small"
+                disabled={loading || commands.pending}
+                onClick={() => void load()}
+              >
+                重新读取服务
+              </button>
+            )
+          }
         />
       )}
       {commands.records.length > 0 && (
-        <section className="notice mb">
-          <strong>配置命令结果待核对</strong>
-          <p>
-            仅查询原回执，不重发；查回后请重新打开当前配置确认，后续操作不会自动继续。
-          </p>
+        <RecoveryBlock
+          variant="pending"
+          title="核对模型配置操作"
+          description="取得原回执后，请重新打开当前配置核对实际状态。"
+        >
           {commands.records.map((record) => (
             <div className="between model-recovery-row" key={record.commandId}>
               <code>
@@ -1505,7 +1513,7 @@ export function PlatformModelSettings() {
               </button>
             </div>
           ))}
-        </section>
+        </RecoveryBlock>
       )}
       <Tabs
         items={[

@@ -691,7 +691,6 @@ export function IssuesPage({
             <Dropdown
               menu={{
                 items: [
-                  { key: 'refresh', label: '刷新列表' },
                   {
                     key: 'finding',
                     label: '上报其他待确认发现',
@@ -700,11 +699,7 @@ export function IssuesPage({
                   { key: 'retests', label: '固定复测范围与原回执' },
                 ],
                 onClick: ({ key }) => {
-                  if (key === 'refresh') {
-                    aggregate.refresh();
-                    void load();
-                  } else if (key === 'finding')
-                    setExtraFinding(crypto.randomUUID());
+                  if (key === 'finding') setExtraFinding(crypto.randomUUID());
                   else setHistoryOpen(true);
                 },
               }}

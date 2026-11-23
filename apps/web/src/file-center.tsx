@@ -44,6 +44,7 @@ import {
   type PreviewEntry,
 } from './file-preview';
 import { uiLayers } from './ui-layers';
+import { RecoveryBlock } from './recovery-block';
 import { uploadPersonalFile } from './file-channel';
 import {
   workspaceReceiptSchema,
@@ -788,9 +789,6 @@ export function FileCenter({
                   上传原始资料
                 </Button>
               </Upload>
-              <Button disabled={pending} onClick={() => void load()}>
-                刷新列表
-              </Button>
             </div>
             <ResultFilters
               search={{
@@ -866,10 +864,11 @@ export function FileCenter({
             </ResultFilters>
             {error ? <Alert type="error" showIcon title={error} /> : null}
             {pendingUpload ? (
-              <Alert
-                type="warning"
-                title="原上传关联待核对，不会自动重复导入"
-                action={
+              <RecoveryBlock
+                variant="pending"
+                title="核对原上传关联"
+                reference={pendingUpload.commandId}
+                actions={
                   <Button
                     onClick={() => {
                       void api(
@@ -889,7 +888,7 @@ export function FileCenter({
                         .catch((err) => setError(describeError(err)));
                     }}
                   >
-                    核对原回执
+                    查询原回执
                   </Button>
                 }
               />

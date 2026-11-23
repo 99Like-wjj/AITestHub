@@ -23,6 +23,7 @@ import {
 } from '../../../packages/contracts/src/ui-reviews';
 import { uiPlanEligibilitySchema } from '../../../packages/contracts/src/plans';
 import { api, describeError, isUncertainMutationError } from './api';
+import { RecoveryBlock } from './recovery-block';
 import { PageHeading } from './page-heading';
 import { UiCaseText } from './ui-case-reader';
 import {
@@ -642,33 +643,20 @@ export function UiReviewWorkspace({
         description={requirementTitle + ' · v' + versionNo}
         actions={controls}
       />
-      {error && (
-        <Alert
-          className="mb"
-          type="error"
-          showIcon
-          title={error}
-          action={
-            uncertain ? (
-              <Button onClick={() => void recover()} loading={submitting}>
-                查询原回执
-              </Button>
-            ) : undefined
-          }
-        />
-      )}
-      {uncertain && !error && (
-        <Alert
-          className="mb"
-          type="warning"
-          showIcon
-          title="有原评审操作待核对"
-          action={
+      {uncertain ? (
+        <RecoveryBlock
+          variant="pending"
+          title="核对团队评审回执"
+          reference={uncertain.commandId}
+          description={error}
+          actions={
             <Button onClick={() => void recover()} loading={submitting}>
               查询原回执
             </Button>
           }
         />
+      ) : (
+        error && <Alert className="mb" type="error" showIcon title={error} />
       )}
       {receiptNotice && (
         <Alert className="mb" type="success" showIcon title={receiptNotice} />

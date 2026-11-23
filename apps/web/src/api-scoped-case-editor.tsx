@@ -8,6 +8,7 @@ import {
 } from '../../../packages/contracts/src/assets';
 import { idSchema } from '../../../packages/contracts/src/base';
 import { api, describeError } from './api';
+import { RecoveryBlock } from './recovery-block';
 import { ApiCaseFields } from './api-case-fields';
 import { emptyApiDraft, serializeApiDraft, type ApiDraft } from './api-draft';
 import { useBusinessCommand } from './business-command';
@@ -273,12 +274,12 @@ export function ApiScopedCaseEditor({
   }, [staged]);
 
   const notice = recovery ? (
-    <Alert
-      type="warning"
-      showIcon
-      title={'待核对原保存 ' + recovery}
+    <RecoveryBlock
+      variant="pending"
+      title="核对接口用例保存回执"
+      reference={recovery}
       description={recoveryStatus}
-      action={
+      actions={
         <Button
           size="small"
           loading={recovering}

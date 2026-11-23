@@ -28,7 +28,7 @@ import ini from 'highlight.js/lib/languages/ini';
 import markdown from 'highlight.js/lib/languages/markdown';
 import { parseDocument } from 'yaml';
 import { parse as parseToml } from 'smol-toml';
-import { fileExtension, parseDelimited } from './file-preview-data';
+import { parseDelimited } from './file-preview-data';
 import 'highlight.js/styles/github.css';
 for (const [name, language] of Object.entries({
   python,
@@ -115,18 +115,19 @@ const rejectUnsafeNumbers = (value: unknown): void => {
 };
 export function FileTextPreview({
   text,
-  name,
+  extension,
+  preferStructure = false,
 }: {
   text: string;
-  name: string;
+  extension: string;
+  preferStructure?: boolean;
 }) {
-  const extension = fileExtension(name),
-    [query, setQuery] = useState(''),
+  const [query, setQuery] = useState(''),
     [active, setActive] = useState(0),
     [page, setPage] = useState(1),
     [copied, setCopied] = useState(false),
     [error, setError] = useState<string>(),
-    [mode, setMode] = useState('source');
+    [mode, setMode] = useState(preferStructure ? 'structure' : 'source');
   const structure = useMemo(() => {
     try {
       if (extension === 'json') {
@@ -386,7 +387,8 @@ export function FileTextPreview({
           </table>
         </div>
       )}
-      {lines.length > 500 && mode === 'source' ? (
+      {lines.length > 500 &&
+      (mode === 'source' || !structure || structure.error) ? (
         <Pagination
           current={page}
           pageSize={500}
@@ -398,12 +400,20 @@ export function FileTextPreview({
     </div>
   );
 }
+export interface TablePreviewOptions {
+  firstRowHeader?: boolean;
+  maxDataRows?: number;
+  maxColumns?: number;
+}
+
 export function DelimitedPreview({
   text,
-  name,
+  extension,
+  options,
 }: {
   text: string;
-  name: string;
+  extension: string;
+  options?: TablePreviewOptions | undefined;
 }) {
   const [selected, setSelected] = useState<{
       row: number;
@@ -411,10 +421,20 @@ export function DelimitedPreview({
       value: string;
     }>(),
     [page, setPage] = useState(1);
+  const {
+    firstRowHeader = false,
+    maxDataRows = 5000,
+    maxColumns = 256,
+  } = options ?? {};
   const parsed = useMemo(() => {
     try {
       return {
-        ...parseDelimited(text, fileExtension(name) === 'tsv' ? '\t' : ','),
+        ...parseDelimited(
+          text,
+          extension === 'tsv' ? '\t' : ',',
+          maxDataRows + Number(firstRowHeader),
+          maxColumns,
+        ),
         error: null,
       };
     } catch (err) {
@@ -424,15 +444,17 @@ export function DelimitedPreview({
         error: err instanceof Error ? err.message : '表格解析失败。',
       };
     }
-  }, [text, name]);
+  }, [text, extension, firstRowHeader, maxDataRows, maxColumns]);
   if (parsed.error)
     return (
       <>
         <Alert type="warning" title={parsed.error} />
-        <FileTextPreview text={text} name={name} />
+        <FileTextPreview text={text} extension={extension} />
       </>
     );
   const columns = Math.max(0, ...parsed.rows.map((row) => row.length));
+  const header = firstRowHeader ? parsed.rows[0] : undefined;
+  const rows = firstRowHeader ? parsed.rows.slice(1) : parsed.rows;
   return (
     <div className="file-sheet-preview">
       <Alert
@@ -442,7 +464,7 @@ export function DelimitedPreview({
       {parsed.truncated ? (
         <Alert
           type="warning"
-          title="表格仅预览前5000行/256列，剩余内容请下载原件查看。"
+          title={`表格仅预览前 ${maxDataRows} 行数据、${maxColumns} 列，剩余内容可下载原件查看。`}
         />
       ) : null}
       <div className="file-cell-detail">
@@ -456,46 +478,46 @@ export function DelimitedPreview({
             <tr>
               <th>行</th>
               {Array.from({ length: columns }, (_, index) => (
-                <th key={index}>{index + 1}</th>
+                <th key={index} scope="col">
+                  {header?.[index] || index + 1}
+                </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {parsed.rows
-              .slice((page - 1) * 200, page * 200)
-              .map((row, index) => (
-                <tr key={index}>
-                  <th>{(page - 1) * 200 + index + 1}</th>
-                  {Array.from({ length: columns }, (_, column) => (
-                    <td key={column}>
-                      <button
-                        type="button"
-                        className="file-cell"
-                        onClick={() =>
-                          setSelected({
-                            row: (page - 1) * 200 + index,
-                            column,
-                            value: row[column] ?? '',
-                          })
-                        }
-                      >
-                        {row[column] ?? ''}
-                      </button>
-                    </td>
-                  ))}
-                </tr>
-              ))}
+            {rows.slice((page - 1) * 200, page * 200).map((row, index) => (
+              <tr key={index}>
+                <th>{(page - 1) * 200 + index + 1}</th>
+                {Array.from({ length: columns }, (_, column) => (
+                  <td key={column}>
+                    <button
+                      type="button"
+                      className="file-cell"
+                      onClick={() =>
+                        setSelected({
+                          row: (page - 1) * 200 + index,
+                          column,
+                          value: row[column] ?? '',
+                        })
+                      }
+                    >
+                      {row[column] ?? ''}
+                    </button>
+                  </td>
+                ))}
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
       <Space>
         <Typography.Text>
-          {parsed.rows.length} 行 · {columns} 列
+          {rows.length} 行 · {columns} 列
         </Typography.Text>
         <Pagination
           current={page}
           pageSize={200}
-          total={parsed.rows.length}
+          total={rows.length}
           showSizeChanger={false}
           onChange={setPage}
         />

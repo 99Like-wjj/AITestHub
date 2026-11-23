@@ -7,6 +7,7 @@ import {
 } from '../../../packages/contracts/src/requirement-deletion';
 import { api, ApiError, describeError } from './api';
 import { uiLayers } from './ui-layers';
+import { RecoveryBlock } from './recovery-block';
 import {
   assertRequirementDeletePreview,
   browserDeletionStorage,
@@ -374,14 +375,12 @@ export function RequirementDeleteDialog({
         </p>
       )}
       {uncertain && (
-        <div className="notice amber mt">
-          <p>
-            原提交标识：<span className="mono">{command.current}</span>
-          </p>
-          <p>
-            原操作结果尚未确认，已禁止新删除提交。需求行或详情消失、返回404，都不能代替原删除回执。
-          </p>
-        </div>
+        <RecoveryBlock
+          variant="pending"
+          title="核对需求删除回执"
+          reference={command.current}
+          description="以原删除回执为准。同一需求的删除提交暂待核对。"
+        />
       )}
       {receipt && (
         <div className="notice mt" role="status">

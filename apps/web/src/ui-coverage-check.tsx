@@ -20,6 +20,7 @@ import {
 } from '../../../packages/contracts/src/coverage-checkpoints';
 import type { Asset } from '../../../packages/contracts/src/assets';
 import { api, describeError, isUncertainMutationError } from './api';
+import { RecoveryBlock } from './recovery-block';
 import { ReviewStateTag } from './semantic-status';
 import { currentIdentityOwner } from './identity-context';
 import type { CaseScope } from './requirements';
@@ -289,19 +290,20 @@ export function UiCoverageCheck({
             (scenarios.find((item) => item.id === scenarioId)?.title ??
               '所选场景')}
       </p>
-      {(error || uncertain) && (
-        <Alert
-          type="error"
-          showIcon
-          title={error ?? '有原检查点写入待核对。'}
-          action={
-            uncertain && (
-              <Button loading={submitting} onClick={() => void recover()}>
-                查询原回执
-              </Button>
-            )
+      {uncertain ? (
+        <RecoveryBlock
+          variant="pending"
+          title="核对检查点写入回执"
+          reference={uncertain}
+          description={error}
+          actions={
+            <Button loading={submitting} onClick={() => void recover()}>
+              查询原回执
+            </Button>
           }
         />
+      ) : (
+        error && <Alert type="error" showIcon title={error} />
       )}
       {edit ? (
         <Form

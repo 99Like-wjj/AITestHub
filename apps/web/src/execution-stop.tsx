@@ -8,6 +8,7 @@ import {
 } from '../../../packages/contracts/src/api-execution';
 import { api, describeError, isUncertainMutationError } from './api';
 import { uiLayers } from './ui-layers';
+import { RecoveryBlock } from './recovery-block';
 
 const recordSchema = z.strictObject({ runId: z.uuid(), commandId: z.uuid() });
 type StopRecord = z.infer<typeof recordSchema>;
@@ -210,14 +211,13 @@ export function ExecutionStopDialog({
         <Alert className="section-alert" type="error" showIcon title={error} />
       )}
       {uncertain && (
-        <Alert
-          className="section-alert"
-          type="warning"
-          showIcon
-          title={`原停止操作待核对：${command.current}`}
-          description={
-            <Space direction="vertical">
-              <span>已禁重发，只保留本人/项目/轮次和命令标识。</span>
+        <RecoveryBlock
+          variant="pending"
+          title="核对接口执行停止回执"
+          reference={command.current}
+          description="同一停止请求暂待原回执确认。"
+          actions={
+            <Space wrap>
               <Button loading={reading} onClick={() => void receipt()}>
                 查询原停止回执
               </Button>

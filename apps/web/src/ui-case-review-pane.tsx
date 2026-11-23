@@ -9,6 +9,7 @@ import {
   type UiReviewWorkItem,
 } from '../../../packages/contracts/src/ui-reviews';
 import { api, describeError, isUncertainMutationError } from './api';
+import { RecoveryBlock } from './recovery-block';
 import { formatBeijingTime } from './beijing-time';
 import { currentIdentityOwner } from './identity-context';
 import { readUiReviewReceipt, uiReviewPath } from './ui-review-transport';
@@ -469,9 +470,16 @@ export function UiCaseReviewPane({
         </p>
       )}
       {recovery && (
-        <Button size="small" onClick={() => void recover()} loading={busy}>
-          查询原回执
-        </Button>
+        <RecoveryBlock
+          title="核对用例评审回执"
+          variant="pending"
+          reference={recovery.commandId}
+          actions={
+            <Button size="small" onClick={() => void recover()} loading={busy}>
+              查询原回执
+            </Button>
+          }
+        />
       )}
       {loadError && (
         <Button size="small" onClick={reload}>

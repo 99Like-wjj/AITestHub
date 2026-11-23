@@ -33,6 +33,7 @@ import {
 } from './file-preview';
 import { humanFileSize } from './file-preview-data';
 import { uiLayers } from './ui-layers';
+import { RecoveryBlock } from './recovery-block';
 
 /** Current conversation shortcut over the same records used by the full file center. */
 export function AgentWorkspace({ conversationId }: { conversationId: string }) {
@@ -184,15 +185,17 @@ export function AgentWorkspace({ conversationId }: { conversationId: string }) {
               </Button>
             </Upload>
             <Button disabled={pending} onClick={() => void load()}>
-              刷新列表
+              读取最新会话文件
             </Button>
           </Space>
           {error ? <Alert type="error" showIcon title={error} /> : null}
           {pendingCommand ? (
-            <Alert
-              type="warning"
-              title="原文件提交待核对，暂不发送新变更"
-              action={
+            <RecoveryBlock
+              variant="pending"
+              title="核对原文件提交"
+              reference={pendingCommand}
+              description="同一文件的变更暂待原回执确认。"
+              actions={
                 <Button
                   onClick={() => {
                     void api(
@@ -210,7 +213,7 @@ export function AgentWorkspace({ conversationId }: { conversationId: string }) {
                       .catch((err) => setError(describeError(err)));
                   }}
                 >
-                  核对原回执
+                  查询原回执
                 </Button>
               }
             />

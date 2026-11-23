@@ -11,6 +11,7 @@ import {
 import { uiCaseContentSchema } from '../../../packages/contracts/src/domain';
 import type { CoverageCheckpoint } from '../../../packages/contracts/src/coverage-checkpoints';
 import { api, describeError, isUncertainMutationError } from './api';
+import { RecoveryBlock } from './recovery-block';
 import { currentIdentityOwner } from './identity-context';
 import { workspaceDrafts } from './workspace-drafts';
 import type { CaseScope } from './requirements';
@@ -483,19 +484,20 @@ export function UiCaseActionDialog({
           补充来源 · {source.title} · {source.caseId} · 修订 {source.revisionId}
         </p>
       )}
-      {(error || uncertain) && (
-        <Alert
-          type="error"
-          showIcon
-          title={error ?? '有原用例写入待核对。'}
-          action={
-            uncertain && (
-              <Button loading={submitting} onClick={() => void recover()}>
-                查询原回执
-              </Button>
-            )
+      {uncertain ? (
+        <RecoveryBlock
+          variant="pending"
+          title="核对用例写入回执"
+          reference={uncertain}
+          description={error}
+          actions={
+            <Button loading={submitting} onClick={() => void recover()}>
+              查询原回执
+            </Button>
           }
         />
+      ) : (
+        error && <Alert type="error" showIcon title={error} />
       )}
       {written.length > 0 && (
         <ul>

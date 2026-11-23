@@ -16,12 +16,7 @@ import {
   Typography,
 } from 'antd';
 import type { Key } from 'react';
-import {
-  EditOutlined,
-  EyeOutlined,
-  PlusOutlined,
-  ReloadOutlined,
-} from '@ant-design/icons';
+import { EditOutlined, EyeOutlined, PlusOutlined } from '@ant-design/icons';
 import { z } from 'zod';
 import { idSchema } from '../../../packages/contracts/src/base';
 import { apiRegressionQualificationListSchema } from '../../../packages/contracts/src/api-execution';
@@ -1164,23 +1159,14 @@ export function PlansPage({
         title="测试计划"
         description="UI 固定已审范围；接口每轮开始采用所引用用例的最新已审修订。"
         actions={
-          <>
-            <Button
-              icon={<ReloadOutlined />}
-              loading={loading}
-              onClick={() => void load()}
-            >
-              刷新
-            </Button>
-            <Button
-              type="primary"
-              icon={<PlusOutlined />}
-              disabled={!canCreate}
-              onClick={openNewPlan}
-            >
-              新建计划
-            </Button>
-          </>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            disabled={!canCreate}
+            onClick={openNewPlan}
+          >
+            新建计划
+          </Button>
         }
       />
       <div className="segmented mb" role="tablist" aria-label="计划类型">
@@ -1205,9 +1191,17 @@ export function PlansPage({
         onRecovered={() => void load()}
       />
       {scheduleError && (
-        <div className="notice amber mb" role="alert">
-          定时状态未能读取：{scheduleError}。请刷新，未将未知状态显示为未配置。
-        </div>
+        <Alert
+          className="section-alert"
+          type="warning"
+          showIcon
+          title={`定时状态未能读取：${scheduleError}`}
+          action={
+            <Button loading={loading} onClick={() => void load()}>
+              重新读取
+            </Button>
+          }
+        />
       )}
       {!plans.length && (
         <section className="card mb">

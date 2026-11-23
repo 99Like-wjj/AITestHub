@@ -423,7 +423,7 @@ export function NotificationPanel({
       setNotice(count ? `已标记 ${count} 条为已读` : '当前无可标记的通知');
       await load();
     } catch (failure) {
-      setError(`${describeError(failure)}。请刷新核对已读状态。`);
+      setError(`${describeError(failure)}。请重新读取通知核对已读状态。`);
     } finally {
       setPending(false);
     }
@@ -481,16 +481,24 @@ export function NotificationPanel({
             >
               仅未读
             </Checkbox>
-            <Button
-              loading={loading}
-              disabled={pending}
-              onClick={() => void load()}
-            >
-              刷新
-            </Button>
           </Space>
         </div>
-        {error && <Alert type="error" title={error} showIcon />}
+        {error && (
+          <Alert
+            type="error"
+            title={error}
+            showIcon
+            action={
+              <Button
+                loading={loading}
+                disabled={pending}
+                onClick={() => void load()}
+              >
+                重新读取通知
+              </Button>
+            }
+          />
+        )}
         {notice && (
           <span role="status" className="notification-muted">
             {notice}

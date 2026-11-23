@@ -20,6 +20,7 @@ import type {
   ProgressTarget,
 } from './execution-progress-close-state';
 import { uiLayers } from './ui-layers';
+import { RecoveryBlock } from './recovery-block';
 
 const changed = 'aitesthub:ui-progress-close-changed';
 const key = (userId: string, projectId: string) =>
@@ -277,12 +278,12 @@ export function ProgressCloseDialog({
         <Alert className="section-alert" type="error" showIcon title={error} />
       )}
       {uncertain && (
-        <div className="notice amber mt">
-          <p>
-            原提交待核对：<span className="mono">{command.current}</span>
-          </p>
-          <p className="caption">已禁重发，保留原轮次、版本及范围摘要。</p>
-        </div>
+        <RecoveryBlock
+          variant="pending"
+          title="核对批量进度关闭回执"
+          reference={command.current}
+          description="查询时沿用原轮次、版本和范围摘要。"
+        />
       )}
       {status && (
         <p className="caption mt" role="status">

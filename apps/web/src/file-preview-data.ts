@@ -19,6 +19,21 @@ export type FilePreviewKind =
   | 'audio'
   | 'zip'
   | 'unsupported';
+type TextPreviewFormat =
+  'markdown' | 'html' | 'svg' | 'code' | 'structured' | 'table';
+export type FilePreviewDocument =
+  | {
+      kind: 'text';
+      format: TextPreviewFormat;
+      name: string;
+      extension: string;
+      text: string;
+    }
+  | { kind: 'image'; name: string; blob: Blob }
+  | { kind: 'pdf'; blob: Blob }
+  | { kind: 'audio' | 'video'; url: string }
+  | { kind: 'audio' | 'video'; blob: Blob }
+  | { kind: 'zip'; bytes: ArrayBuffer };
 export const previewTextMaximumBytes = 2 * 1024 * 1024;
 export function fileExtension(name: string) {
   return name.split('/').at(-1)?.split('.').at(-1)?.toLowerCase() ?? '';
@@ -60,18 +75,97 @@ const groups: Readonly<
   audio: ['mp3', 'wav', 'ogg', 'm4a'],
   zip: ['zip'],
 };
-export function previewKind(name: string, mediaType = ''): FilePreviewKind {
+const mediaExtensions: Readonly<Record<string, string>> = {
+  'application/json': 'json',
+  'application/x-ndjson': 'jsonl',
+  'application/jsonl': 'jsonl',
+  'application/xml': 'xml',
+  'application/yaml': 'yaml',
+  'application/x-yaml': 'yaml',
+  'application/toml': 'toml',
+  'application/pdf': 'pdf',
+  'application/zip': 'zip',
+  'image/svg+xml': 'svg',
+  'text/html': 'html',
+  'text/markdown': 'md',
+  'text/csv': 'csv',
+  'text/tab-separated-values': 'tsv',
+  'text/xml': 'xml',
+  'text/yaml': 'yaml',
+};
+export function previewMediaType(mediaType: string) {
+  return mediaType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+}
+function previewExtension(name: string, mediaType: string) {
   const extension = fileExtension(name);
+  return Object.values(groups).some((extensions) =>
+    extensions.includes(extension),
+  )
+    ? extension
+    : (mediaExtensions[previewMediaType(mediaType)] ?? extension);
+}
+export function previewKind(name: string, mediaType = ''): FilePreviewKind {
+  const extension = previewExtension(name, mediaType);
   for (const [kind, extensions] of Object.entries(groups))
     if (extensions.includes(extension))
       return kind as Exclude<FilePreviewKind, 'unsupported'>;
-  if (mediaType === 'application/pdf') return 'pdf';
-  if (mediaType.startsWith('image/') && mediaType !== 'image/svg+xml')
-    return 'image';
-  if (mediaType.startsWith('video/')) return 'video';
-  if (mediaType.startsWith('audio/')) return 'audio';
-  if (mediaType.startsWith('text/')) return 'code';
+  const type = previewMediaType(mediaType);
+  if (type.startsWith('image/')) return 'image';
+  if (type.startsWith('video/')) return 'video';
+  if (type.startsWith('audio/')) return 'audio';
+  if (type.startsWith('text/')) return 'code';
   return 'unsupported';
+}
+export function canPreviewOriginalFile(name: string, mediaType: string) {
+  const kind = previewKind(name, mediaType);
+  return (
+    kind !== 'unsupported' &&
+    kind !== 'office' &&
+    (kind !== 'table' || isDelimitedFile(name, mediaType))
+  );
+}
+export function isDelimitedFile(name: string, mediaType: string) {
+  const extension = previewExtension(name, mediaType);
+  return extension === 'csv' || extension === 'tsv';
+}
+export async function prepareFilePreview(
+  name: string,
+  mediaType: string,
+  blob: Blob,
+  textMaximumBytes = previewTextMaximumBytes,
+): Promise<FilePreviewDocument | undefined> {
+  const format = previewKind(name, mediaType);
+  if (format === 'table' && !isDelimitedFile(name, mediaType)) return undefined;
+  switch (format) {
+    case 'pdf':
+      return { kind: 'pdf', blob };
+    case 'audio':
+    case 'video':
+      return { kind: format, blob };
+    case 'image':
+      return { kind: format, name, blob };
+    case 'zip':
+      return { kind: format, bytes: await blob.arrayBuffer() };
+    case 'table':
+    case 'markdown':
+    case 'html':
+    case 'svg':
+    case 'code':
+    case 'structured':
+      if (blob.size > textMaximumBytes)
+        throw new Error(
+          `文本超过 ${textMaximumBytes / 1024 / 1024} MiB 预览范围，请下载原件查看。`,
+        );
+      return {
+        kind: 'text',
+        format,
+        name,
+        extension: previewExtension(name, mediaType),
+        text: decodePreviewText(await blob.arrayBuffer(), textMaximumBytes),
+      };
+    default:
+      return undefined;
+  }
 }
 export function humanFileSize(value: string | number) {
   const size = typeof value === 'string' ? Number(value) : value;
@@ -80,9 +174,14 @@ export function humanFileSize(value: string | number) {
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
-export function decodePreviewText(bytes: ArrayBuffer) {
-  if (bytes.byteLength > previewTextMaximumBytes)
-    throw new Error('文本超过2MiB预览范围，请下载原件查看。');
+export function decodePreviewText(
+  bytes: ArrayBuffer,
+  maximumBytes = previewTextMaximumBytes,
+) {
+  if (bytes.byteLength > maximumBytes)
+    throw new Error(
+      `文本超过 ${maximumBytes / 1024 / 1024} MiB 预览范围，请下载原件查看。`,
+    );
   try {
     return new TextDecoder('utf-8', { fatal: true })
       .decode(bytes)

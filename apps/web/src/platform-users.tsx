@@ -18,7 +18,6 @@ import {
   CopyOutlined,
   EditOutlined,
   KeyOutlined,
-  ReloadOutlined,
   DeleteOutlined,
 } from '@ant-design/icons';
 import { z } from 'zod';
@@ -299,23 +298,22 @@ export function PlatformUsers({
     }
   }
   return (
-    <Card
-      title="平台账号管理"
-      extra={
-        <Button
-          icon={<ReloadOutlined />}
-          loading={loading}
-          onClick={() => void load()}
-        >
-          刷新
-        </Button>
-      }
-    >
+    <Card title="平台账号管理">
       <Typography.Paragraph type="secondary">
         管理账号有效性、平台管理身份与协助重置。移除账号保留关联数据和作者记录。全局停用或移除不受项目最后管理员限制，受影响项目需另行补充管理员。
       </Typography.Paragraph>
       {error && (
-        <Alert type="error" title={error} showIcon className="section-alert" />
+        <Alert
+          type="error"
+          title={error}
+          showIcon
+          className="section-alert"
+          action={
+            <Button loading={loading} onClick={() => void load()}>
+              重新读取账号
+            </Button>
+          }
+        />
       )}
       <Input
         className="list-search"

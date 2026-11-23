@@ -1,9 +1,10 @@
 import { useRef, useState } from 'react';
-import { Alert, Button } from 'antd';
+import { Button } from 'antd';
 import { z } from 'zod';
 import { idSchema } from '../../../packages/contracts/src/base';
 import { api, describeError, isUncertainMutationError } from './api';
 import { currentIdentityOwner, identityContextEpoch } from './identity-context';
+import { RecoveryBlock } from './recovery-block';
 
 const receiptSchema = z.object({
   command: z.object({
@@ -145,26 +146,25 @@ export function ReportReceiptControl({
   recovery: ReturnType<typeof useReportCommandRecovery>;
   onCheck: () => void;
 }) {
-  return (
-    <>
-      {recovery.commandId && (
-        <Alert
-          type="warning"
-          showIcon
-          title="请核对原操作回执"
-          description={<code>{recovery.commandId}</code>}
-          action={
-            <Button size="small" loading={recovery.checking} onClick={onCheck}>
-              查询原回执
-            </Button>
-          }
-        />
-      )}
-      {recovery.message && (
-        <p className="caption" role="status">
-          {recovery.message}
-        </p>
-      )}
-    </>
-  );
+  if (recovery.commandId) {
+    return (
+      <RecoveryBlock
+        variant="pending"
+        title="核对原操作回执"
+        reference={recovery.commandId}
+        actions={
+          <Button size="small" loading={recovery.checking} onClick={onCheck}>
+            查询原回执
+          </Button>
+        }
+      >
+        {recovery.message && <p role="status">{recovery.message}</p>}
+      </RecoveryBlock>
+    );
+  }
+  return recovery.message ? (
+    <p className="caption" role="status">
+      {recovery.message}
+    </p>
+  ) : null;
 }

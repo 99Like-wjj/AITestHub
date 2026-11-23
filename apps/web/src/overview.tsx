@@ -156,7 +156,7 @@ export function OverviewPage({ project }: { project: Project | null }) {
   const empty = loading ? (
     <Skeleton active paragraph={{ rows: 3 }} title={false} />
   ) : (
-    <p className="caption mt">未取得概览资料，请刷新后重试。</p>
+    <p className="caption mt">未取得概览资料。</p>
   );
   return (
     <>
@@ -168,7 +168,7 @@ export function OverviewPage({ project }: { project: Project | null }) {
           showIcon
           action={
             <Button onClick={() => setRefresh((value) => value + 1)}>
-              刷新
+              重新读取概览
             </Button>
           }
         />
@@ -393,18 +393,9 @@ export function OverviewPage({ project }: { project: Project | null }) {
         }
       />
       {data && (
-        <div className="between mt">
-          <span className="caption">
-            概览读取于 {new Date(data.capturedAt).toLocaleString('zh-CN')}
-          </span>
-          <Button
-            size="small"
-            loading={loading}
-            onClick={() => setRefresh((value) => value + 1)}
-          >
-            刷新概览
-          </Button>
-        </div>
+        <p className="caption mt">
+          概览读取于 {new Date(data.capturedAt).toLocaleString('zh-CN')}
+        </p>
       )}
     </>
   );

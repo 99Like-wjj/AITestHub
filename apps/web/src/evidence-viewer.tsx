@@ -1,29 +1,20 @@
-import { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Collapse, Descriptions, Space, Typography } from 'antd';
-import { fileReceiptSchema } from '../../../packages/contracts/src/files';
-import type { FileMetadata } from '../../../packages/contracts/src/files';
-import { api, describeError } from './api';
+import { Button, Collapse, Descriptions, Space } from 'antd';
 import { uiLayers } from './ui-layers';
-import {
-  downloadPrivateFile,
-  fetchPrivateFile,
-  isolatedHtml,
-} from './file-channel';
-import { subscribeIdentityChanges } from './identity-context';
-import { evidencePreviewBytes, isRasterEvidence } from './evidence-gallery';
 import type { EvidenceType } from './evidence-gallery';
 import { evidenceTypeLabels } from './evidence-gallery';
 import { DetailDrawer } from './detail-drawer';
+import {
+  PrivateFilePreviewContent,
+  PrivateFilePreviewDownload,
+  usePrivateFilePreview,
+} from './private-file-preview';
+import { previewMediaType } from './file-preview-data';
 import {
   EvidenceSourceTag,
   FileStatusTag,
   type EvidenceSource,
 } from './file-display-status';
-import {
-  EvidenceConversation,
-  EvidenceDelimited,
-  EvidenceJson,
-} from './evidence-text';
+import { EvidenceConversation, EvidenceRequestResponse } from './evidence-text';
 
 export function EvidenceViewer({
   fileId,
@@ -36,96 +27,22 @@ export function EvidenceViewer({
   source?: EvidenceSource | undefined;
   onClose: () => void;
 }) {
-  const [metadata, setMetadata] = useState<FileMetadata | null>(null);
-  const [error, setError] = useState<string>();
-  const [loading, setLoading] = useState(false);
-  const [text, setText] = useState<string>();
-  const [image, setImage] = useState<string>();
-  const generation = useRef(0);
-  const imageUrl = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    const epoch = ++generation.current;
-    const controller = new AbortController();
-    if (imageUrl.current) {
-      URL.revokeObjectURL(imageUrl.current);
-      imageUrl.current = undefined;
-    }
-    setText(undefined);
-    setImage(undefined);
-    setMetadata(null);
-    setError(undefined);
-    setLoading(false);
-    if (!fileId) return;
-    const unsubscribe = subscribeIdentityChanges(() => {
-      controller.abort();
-      setMetadata(null);
-      setText(undefined);
-      setImage(undefined);
-      setError(undefined);
-      setLoading(false);
-      if (imageUrl.current) {
-        URL.revokeObjectURL(imageUrl.current);
-        imageUrl.current = undefined;
-      }
-    });
-    setLoading(true);
-    void api(
-      `/files/${encodeURIComponent(fileId)}`,
-      { signal: controller.signal },
-      fileReceiptSchema,
-    )
-      .then(async ({ file: result }) => {
-        if (controller.signal.aborted || epoch !== generation.current) return;
-        setMetadata(result);
-        if (
-          result.status !== 'verified' ||
-          BigInt(result.bytes) > evidencePreviewBytes
+  const state = usePrivateFilePreview(fileId);
+  const metadata = state.file;
+  const mediaType = previewMediaType(metadata?.mediaType ?? '');
+  const renderText =
+    mediaType === 'text/event-stream' ||
+    (evidenceType === 'conversation' && mediaType === 'application/json')
+      ? (text: string) => (
+          <EvidenceConversation
+            key={fileId}
+            text={text}
+            mediaType={mediaType}
+          />
         )
-          return;
-        const supported =
-          isRasterEvidence(result.mediaType) ||
-          [
-            'text/html',
-            'text/markdown',
-            'text/plain',
-            'text/csv',
-            'application/json',
-            'text/event-stream',
-            'text/tab-separated-values',
-            'application/x-ndjson',
-          ].includes(result.mediaType);
-        if (!supported) return;
-        const blob = await fetchPrivateFile(fileId, controller.signal);
-        if (controller.signal.aborted || epoch !== generation.current) return;
-        if (isRasterEvidence(result.mediaType)) {
-          imageUrl.current = URL.createObjectURL(blob);
-          setImage(imageUrl.current);
-        } else {
-          const value = await blob.text();
-          if (!controller.signal.aborted && epoch === generation.current)
-            setText(value);
-        }
-      })
-      .catch((failure: unknown) => {
-        if (!controller.signal.aborted && epoch === generation.current)
-          setError(describeError(failure));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted && epoch === generation.current)
-          setLoading(false);
-      });
-    return () => {
-      controller.abort();
-      unsubscribe();
-    };
-  }, [fileId]);
-  useEffect(
-    () => () => {
-      if (imageUrl.current) URL.revokeObjectURL(imageUrl.current);
-    },
-    [],
-  );
-  const type = metadata?.mediaType;
+      : evidenceType === 'requestResponse' && mediaType === 'application/json'
+        ? (text: string) => <EvidenceRequestResponse text={text} />
+        : undefined;
   return (
     <DetailDrawer
       wide
@@ -137,7 +54,9 @@ export function EvidenceViewer({
           {evidenceType && <span>{evidenceTypeLabels[evidenceType]}</span>}
           {source && <EvidenceSourceTag source={source} />}
           <FileStatusTag
-            status={metadata?.status ?? (error ? 'unavailable' : undefined)}
+            status={
+              metadata?.status ?? (state.error ? 'unavailable' : undefined)
+            }
           />
         </Space>
       }
@@ -145,83 +64,20 @@ export function EvidenceViewer({
       footer={
         <Space>
           <Button onClick={onClose}>关闭</Button>
-          <Button
-            disabled={metadata?.status !== 'verified'}
-            onClick={() => {
-              if (metadata)
-                void downloadPrivateFile(
-                  metadata.id,
-                  metadata.originalName,
-                ).catch((failure: unknown) => setError(describeError(failure)));
-            }}
-          >
-            下载完整原件
-          </Button>
+          <PrivateFilePreviewDownload state={state} />
         </Space>
       }
     >
-      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        {error && <Alert type="error" showIcon title={error} />}
-        {loading && (
-          <Typography.Text role="status">读取授权证据…</Typography.Text>
-        )}
-        {metadata && BigInt(metadata.bytes) > evidencePreviewBytes && (
-          <Typography.Paragraph type="secondary">
-            文件超过当前5 MiB预览上限，请下载原件核对。
-          </Typography.Paragraph>
-        )}
-        {image && (
-          <img
-            src={image}
-            alt={`证据原件：${metadata?.originalName ?? ''}`}
-            className="result-evidence-original-image"
-          />
-        )}
-        {text !== undefined &&
-          (type === 'text/html' ? (
-            <iframe
-              title="证据HTML隔离静态预览"
-              sandbox=""
-              referrerPolicy="no-referrer"
-              srcDoc={isolatedHtml(text)}
-              style={{
-                width: '100%',
-                height: 480,
-                border: '1px solid var(--border)',
-              }}
-            />
-          ) : type === 'text/event-stream' ||
-            (evidenceType === 'conversation' && type === 'application/json') ? (
-            <EvidenceConversation
-              key={fileId}
-              text={text}
-              mediaType={type ?? ''}
-            />
-          ) : type === 'text/csv' || type === 'text/tab-separated-values' ? (
-            <EvidenceDelimited
-              key={fileId}
-              text={text}
-              delimiter={type === 'text/tab-separated-values' ? '\t' : ','}
-            />
-          ) : type === 'application/json' ? (
-            <EvidenceJson
-              text={text}
-              split={evidenceType === 'requestResponse'}
-            />
-          ) : (
-            <pre className="message-code">{text}</pre>
-          ))}
-        {metadata &&
-          !loading &&
-          !image &&
-          text === undefined &&
-          BigInt(metadata.bytes) <= evidencePreviewBytes && (
-            <Typography.Paragraph type="secondary">
-              {metadata.status === 'verified'
-                ? '可下载原件查看此文件格式。'
-                : '文件字节尚未验证，等待上传或核对上传状态。'}
-            </Typography.Paragraph>
-          )}
+      <div className="private-file-preview-layout">
+        <PrivateFilePreviewContent
+          state={state}
+          renderText={renderText}
+          tableOptions={{
+            firstRowHeader: true,
+            maxDataRows: 100,
+            maxColumns: 40,
+          }}
+        />
         {metadata && (
           <Collapse
             items={[
@@ -262,7 +118,7 @@ export function EvidenceViewer({
             ]}
           />
         )}
-      </Space>
+      </div>
     </DetailDrawer>
   );
 }

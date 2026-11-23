@@ -12,7 +12,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
+import { DeleteOutlined } from '@ant-design/icons';
 import { z } from 'zod';
 import {
   aiPreferencesSchema,
@@ -297,17 +297,19 @@ export function ArchivedConversationsPanel() {
   }
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-        <Typography.Text>仅本人归档会话</Typography.Text>
-        <Button
-          icon={<ReloadOutlined />}
-          loading={loading}
-          onClick={() => void load()}
-        >
-          刷新归档
-        </Button>
-      </Space>
-      {error && <Alert type="error" title={error} showIcon />}
+      <Typography.Text>仅本人归档会话</Typography.Text>
+      {error && (
+        <Alert
+          type="error"
+          title={error}
+          showIcon
+          action={
+            <Button loading={loading} onClick={() => void load()}>
+              重新读取归档
+            </Button>
+          }
+        />
+      )}
       <Typography.Text type="secondary">
         恢复单个会话会同时显示其需求分组；不会恢复其他手工归档的会话。
       </Typography.Text>
@@ -478,15 +480,19 @@ export function PersonalResourcesPanel({ projects }: { projects: Project[] }) {
             })),
           ]}
         />
-        <Button
-          icon={<ReloadOutlined />}
-          loading={loading}
-          onClick={() => void load()}
-        >
-          刷新资源
-        </Button>
       </Space>
-      {error && <Alert type="error" title={error} showIcon />}
+      {error && (
+        <Alert
+          type="error"
+          title={error}
+          showIcon
+          action={
+            <Button loading={loading} onClick={() => void load()}>
+              重新读取资源
+            </Button>
+          }
+        />
+      )}
       <Table
         rowKey="id"
         size="small"

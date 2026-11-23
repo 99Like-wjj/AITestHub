@@ -7,6 +7,7 @@ import {
   Collapse,
   Descriptions,
   Drawer,
+  Form,
   Input,
   Select,
   Space,
@@ -34,6 +35,7 @@ import type { IssueNavigation } from './issue-context';
 import { api, describeError } from './api';
 import { CommandDialog, useBusinessCommand } from './business-command';
 import { uiLayers } from './ui-layers';
+import { RecoveryBlock, RecoveryQueryForm } from './recovery-block';
 
 type Preparation = z.infer<typeof retestPreparationSchema>;
 type StartReceipt = z.infer<typeof apiRetestStartReceiptSchema>;
@@ -74,6 +76,7 @@ function RetestReceiptLookup({
     const epoch = ++generation.current;
     setLoading(true);
     setError(undefined);
+    setStatus(undefined);
     setReceipt(null);
     try {
       const result = await api(
@@ -96,36 +99,48 @@ function RetestReceiptLookup({
     }
   }
   return (
-    <Card size="small" title="原接口复测开始提交只读找回">
-      <Space direction="vertical" style={{ width: '100%' }}>
-        <Input
-          aria-label="原接口复测提交ID"
-          value={id}
-          onChange={(event) => setId(event.target.value)}
-          placeholder="原 commandId，不新建执行"
-        />
-        <Button onClick={() => void load()} loading={loading}>
-          只读查询原提交
-        </Button>
-        {error && <Alert type="warning" title={error} showIcon />}
-        {status && <Typography.Text>原操作账本状态：{status}</Typography.Text>}
-        {receipt && (
-          <Alert
-            type="info"
-            showIcon
-            title={`原轮次 ${receipt.runId} · 初始回执 prepared`}
-            description="仅表示已准备，执行状态及报告需按原轮次读取。"
-            action={
-              <a
-                href={`/#reports?projectId=${projectId}&runId=${receipt.runId}`}
-              >
-                查看原轮次状态
-              </a>
-            }
+    <RecoveryBlock
+      title="查询原接口复测提交"
+      description="用原开始提交标识核对服务端状态和对应的执行轮次。"
+    >
+      <RecoveryQueryForm onFinish={() => void load()}>
+        <Form.Item label="原提交 ID">
+          <Input
+            aria-label="原接口复测提交ID"
+            value={id}
+            disabled={loading}
+            onChange={(event) => {
+              setId(event.target.value);
+              setError(undefined);
+              setStatus(undefined);
+              setReceipt(null);
+            }}
+            autoComplete="off"
+            placeholder="输入原记录标识"
           />
-        )}
-      </Space>
-    </Card>
+        </Form.Item>
+        <Form.Item className="recovery-query-submit">
+          <Button type="primary" htmlType="submit" loading={loading}>
+            查询原记录
+          </Button>
+        </Form.Item>
+      </RecoveryQueryForm>
+      {error && <Alert type="warning" title={error} showIcon />}
+      {status && <Typography.Text>原操作账本状态：{status}</Typography.Text>}
+      {receipt && (
+        <Alert
+          type="info"
+          showIcon
+          title={`原轮次 ${receipt.runId} · 初始回执 prepared`}
+          description="仅表示已准备，执行状态及报告需按原轮次读取。"
+          action={
+            <a href={`/#reports?projectId=${projectId}&runId=${receipt.runId}`}>
+              查看原轮次状态
+            </a>
+          }
+        />
+      )}
+    </RecoveryBlock>
   );
 }
 
@@ -427,9 +442,20 @@ export function RetestScopeView({
               </>
             )}
             {command.uncertain && (
-              <Button loading={recovering} onClick={() => void recover()}>
-                只读找回同一次开始回执
-              </Button>
+              <RecoveryBlock
+                variant="pending"
+                title="核对复测开始回执"
+                reference={command.commandId}
+                actions={
+                  <Button
+                    size="small"
+                    loading={recovering}
+                    onClick={() => void recover()}
+                  >
+                    查询原回执
+                  </Button>
+                }
+              />
             )}
             {recoveryStatus && (
               <Typography.Text>
@@ -873,6 +899,7 @@ export function RetestHistory({
         </Button>
         {error && <Alert type="error" title={error} showIcon />}
         <RetestReceiptLookup
+          key={`${project.id}:${initialCommandId ?? ''}`}
           projectId={project.id}
           {...(initialCommandId ? { initialId: initialCommandId } : {})}
         />

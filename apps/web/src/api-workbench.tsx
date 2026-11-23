@@ -3,9 +3,9 @@ import {
   Alert,
   App,
   Button,
-  Collapse,
   Dropdown,
   Empty,
+  Form,
   Input,
   Modal,
   Select,
@@ -43,6 +43,7 @@ import type { ApiDraft } from './api-draft';
 import {
   ApiDiagnosticPage,
   ApiDraftDebugger,
+  diagnosticLookupOptions,
   readDiagnosticRestoration,
 } from './api-draft-debugger';
 import type {
@@ -54,6 +55,11 @@ import { AssetEditor } from './asset-editor';
 import type { AssetEditorTarget } from './asset-editor';
 import { useBusinessCommand } from './business-command';
 import { AppIcon } from './app-icon';
+import {
+  RecoveryBlock,
+  RecoveryDrawer,
+  RecoveryQueryForm,
+} from './recovery-block';
 import { formatBeijingTime } from './beijing-time';
 import { StandaloneWorkbenchHeader } from './standalone-workbench-header';
 import './api-workbench.css';
@@ -529,9 +535,7 @@ export function ApiWorkbenchPage({
         ...current.filter((item) => item.id !== asset.id),
         asset,
       ]);
-      setError(
-        '内容已保存，但目录未能更新。请刷新目录核对；无需再次创建或保存。',
-      );
+      setError('内容已保存。请重新读取目录核对最新记录。');
     }
     if (asset.targetType === 'case') {
       if (active?.id === asset.id) activate(asset);
@@ -942,7 +946,17 @@ export function ApiWorkbenchPage({
         </header>
       )}
       {error && (
-        <Alert type="error" title={error} showIcon className="section-alert" />
+        <Alert
+          type="error"
+          title={error}
+          showIcon
+          className="section-alert"
+          action={
+            <Button loading={loading} onClick={() => void load()}>
+              重新读取目录
+            </Button>
+          }
+        />
       )}
       {pendingReceipt && (
         <Alert
@@ -1085,7 +1099,7 @@ export function ApiWorkbenchPage({
                   className="section-alert"
                   type="warning"
                   title={`保存回执未知：${command.commandId}`}
-                  description="已禁重发。保留当前输入与原提交标识；刷新目录不能证明原操作未受理。"
+                  description="请保留当前输入与原提交标识，先核对原保存回执。"
                   showIcon
                 />
               )}
@@ -1393,17 +1407,16 @@ export function ApiWorkbenchPage({
                 </div>
               </Modal>
               <Modal
-                title="只读查询原诊断"
+                title="异常排查"
                 open={Boolean(diagnosticLookup)}
                 onCancel={() => setDiagnosticLookup(undefined)}
-                onOk={openOriginalDiagnostic}
-                okText="查询原诊断"
+                footer={null}
               >
                 {diagnosticLookup && (
-                  <div className="stack">
-                    <p className="caption">
-                      以原始标识读取当前项目同一用例的证据。
-                    </p>
+                  <RecoveryBlock
+                    title="查询本用例原诊断"
+                    description="选择历史轮次，或输入原标识查看该用例的调试证据。"
+                  >
                     <Select
                       aria-label="选择此用例已有调试轮次"
                       placeholder="选择此用例的历史调试轮次"
@@ -1440,29 +1453,40 @@ export function ApiWorkbenchPage({
                     {historyError && (
                       <Alert type="warning" showIcon title={historyError} />
                     )}
-                    <p className="caption">也可用原调试轮次或命令标识查询。</p>
-
-                    <Select
-                      aria-label="原诊断标识类型"
-                      value={diagnosticLookup.kind}
-                      options={[
-                        { value: 'run', label: '原调试轮次 ID' },
-                        { value: 'command', label: '原命令 ID' },
-                      ]}
-                      onChange={(kind: DiagnosticRestoration['kind']) =>
-                        setDiagnosticLookup({ kind, id: diagnosticLookup.id })
-                      }
-                    />
-                    <Input
-                      aria-label="原诊断标识"
-                      value={diagnosticLookup.id}
-                      onChange={(event) =>
-                        setDiagnosticLookup({
-                          kind: diagnosticLookup.kind,
-                          id: event.target.value,
-                        })
-                      }
-                    />
+                    <RecoveryQueryForm onFinish={openOriginalDiagnostic}>
+                      <Form.Item label="记录类型">
+                        <Select
+                          aria-label="原诊断标识类型"
+                          value={diagnosticLookup.kind}
+                          options={diagnosticLookupOptions}
+                          onChange={(kind: DiagnosticRestoration['kind']) =>
+                            setDiagnosticLookup({
+                              kind,
+                              id: diagnosticLookup.id,
+                            })
+                          }
+                        />
+                      </Form.Item>
+                      <Form.Item label="原标识">
+                        <Input
+                          aria-label="原诊断标识"
+                          autoComplete="off"
+                          placeholder="输入原记录标识"
+                          value={diagnosticLookup.id}
+                          onChange={(event) =>
+                            setDiagnosticLookup({
+                              kind: diagnosticLookup.kind,
+                              id: event.target.value,
+                            })
+                          }
+                        />
+                      </Form.Item>
+                      <Form.Item className="recovery-query-submit">
+                        <Button type="primary" htmlType="submit">
+                          查询原记录
+                        </Button>
+                      </Form.Item>
+                    </RecoveryQueryForm>
                     {diagnosticLookup.error && (
                       <Alert
                         type="error"
@@ -1470,7 +1494,7 @@ export function ApiWorkbenchPage({
                         title={diagnosticLookup.error}
                       />
                     )}
-                  </div>
+                  </RecoveryBlock>
                 )}
               </Modal>
             </div>
@@ -1653,7 +1677,6 @@ export function ApiWorkbenchPage({
                 trigger={['click']}
                 menu={{
                   items: [
-                    { key: 'refresh', label: '刷新目录' },
                     ...(tester
                       ? [
                           { key: 'generate', label: '生成选定范围' },
@@ -1667,11 +1690,10 @@ export function ApiWorkbenchPage({
                           },
                         ]
                       : []),
-                    { key: 'diagnostic', label: '原诊断找回' },
+                    { key: 'diagnostic', label: '查询原诊断' },
                   ],
                   onClick: ({ key }) => {
-                    if (key === 'refresh') void load();
-                    else if (key === 'generate')
+                    if (key === 'generate')
                       guard(() => {
                         window.location.hash = 'workspace';
                       });
@@ -1899,23 +1921,10 @@ export function ApiWorkbenchPage({
                 />
               )}
             </div>
-            {lookup && (
-              <Collapse
-                className="mt"
-                activeKey={lookup ? ['lookup'] : []}
-                onChange={(keys) =>
-                  setLookup(Array.isArray(keys) && keys.includes('lookup'))
-                }
-                items={[
-                  {
-                    key: 'lookup',
-                    label: '原诊断找回（只读，不重发）',
-                    children: caseWorkspace ? null : (
-                      <ApiDiagnosticPage project={project} />
-                    ),
-                  },
-                ]}
-              />
+            {lookup && !caseWorkspace && (
+              <RecoveryDrawer open onClose={() => setLookup(false)}>
+                <ApiDiagnosticPage project={project} />
+              </RecoveryDrawer>
             )}
           </section>
         </div>
