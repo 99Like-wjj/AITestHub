@@ -343,6 +343,12 @@ export function ReportResultReview({
   const latest = retests?.[0];
   const editing = editMode ?? Boolean(!readOnlyReason && retests && !latest);
   const reproduced = latest?.outcome === 'reproduced' ? latest : undefined;
+  const issueScope = { ...scope };
+  if (reproduced) {
+    delete issueScope.stepOrdinal;
+    if (reproduced.reportReview.stepOrdinal)
+      issueScope.stepOrdinal = reproduced.reportReview.stepOrdinal;
+  }
   const [base, setBase] = useState<string | null>(null);
   const command = useBusinessCommand(
     editing ? `${scope.resultRevisionId}:${base ?? ''}` : null,
@@ -721,18 +727,9 @@ export function ReportResultReview({
         <ReportIssueDialog
           projectId={projectId}
           mode={issueMode}
-          scope={
-            latest?.outcome === 'reproduced'
-              ? {
-                  ...scope,
-                  ...(latest.reportReview.stepOrdinal
-                    ? { stepOrdinal: latest.reportReview.stepOrdinal }
-                    : {}),
-                }
-              : scope
-          }
+          scope={issueScope}
           description={issueDescription}
-          retest={latest?.outcome === 'reproduced' ? latest : undefined}
+          retest={reproduced}
           onClose={() => setIssueMode(undefined)}
           onSaved={(issue) => {
             setIssueMode(undefined);

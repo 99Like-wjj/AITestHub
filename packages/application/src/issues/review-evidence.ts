@@ -310,7 +310,6 @@ export async function lockReportResult(
       content.stepObservations?.some(
         (step) => step.ordinal === scope.stepOrdinal,
       ) ||
-      Number(content.actualActions?.length ?? 0) >= scope.stepOrdinal ||
       (snapshot.success &&
         snapshot.data.content.steps.length >= scope.stepOrdinal);
     if (!knownStep)

@@ -164,6 +164,12 @@ export class IssueService {
             '复测记录不属于此报告结果修订。',
             404,
           );
+        if (retest && retest.reportReview.stepOrdinal !== scope.stepOrdinal)
+          throw new DomainError(
+            'BUSINESS_CONFLICT',
+            '所选人工复测与缺陷来源的步骤不一致。',
+            409,
+          );
         const observedFailure =
           source.content.originalOutcome === 'failed' &&
           Boolean(

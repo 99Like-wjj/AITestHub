@@ -300,6 +300,7 @@ export function UiCaseWorkbench({
     : cases[0];
   const activeId = active?.id;
   const activeRevision = active?.revisionId;
+  const activeRowVersion = active?.rowVersion;
   const displayedRows = cases.filter(
     (asset) =>
       (meetingId || filter === 'all' || caseStage(asset) === filter) &&
@@ -379,7 +380,12 @@ export function UiCaseWorkbench({
     if (meetingId || !activeId || !activeRevision || !available) return;
     const controller = new AbortController();
     setReadError(undefined);
-    setDetail(undefined);
+    setDetail((entry) =>
+      entry?.asset.id === activeId &&
+      entry.asset.rowVersion === activeRowVersion
+        ? entry
+        : undefined,
+    );
     void api(
       `/projects/${scope.projectId}/assets/${activeId}`,
       { signal: controller.signal },
@@ -405,6 +411,7 @@ export function UiCaseWorkbench({
     meetingId,
     activeId,
     activeRevision,
+    activeRowVersion,
     available,
     scope.projectId,
     scope.requirementVersionId,
@@ -438,6 +445,23 @@ export function UiCaseWorkbench({
   }, [scopePlan, scope.projectId, currentCases]);
 
   const focusedDetail = detail?.asset.id === activeId ? detail : undefined;
+  const currentAsset = focusedDetail?.asset;
+  const currentRowVersion = currentAsset?.rowVersion;
+  useEffect(() => {
+    if (
+      activeRowVersion === undefined ||
+      currentRowVersion === undefined ||
+      currentRowVersion <= activeRowVersion
+    )
+      return;
+    let activeRead = true;
+    void onChanged().catch((failure: unknown) => {
+      if (activeRead) setReadError(describeError(failure));
+    });
+    return () => {
+      activeRead = false;
+    };
+  }, [activeId, activeRowVersion, currentRowVersion]);
   const revisions =
     (meetingId ? snapshot?.revisions : focusedDetail?.revisions) ?? [];
   const latestRevision = meetingId
@@ -447,7 +471,7 @@ export function UiCaseWorkbench({
   const earlier = Boolean(
     latestRevision && revisionId && latestRevision !== revisionId,
   );
-  const writable = tester && !readonly && !earlier && !active?.removedAt;
+  const writable = tester && !readonly && !earlier && !currentAsset?.removedAt;
   const eligibility = new Map(planItems?.map((item) => [item.caseId, item]));
   const eligible = currentCases.flatMap((asset) => {
     const approvalSnapshotId = matchingApproval(
@@ -577,7 +601,8 @@ export function UiCaseWorkbench({
             description="返回 UI 用例管理，确认当前项目、版本和归档筛选。"
           />
         )}
-        {loading || (meetingId && available && !snapshot && !readError) ? (
+        {(loading && !cases.length) ||
+        (meetingId && available && !snapshot && !readError) ? (
           <Skeleton active />
         ) : (
           available && (
@@ -763,7 +788,9 @@ export function UiCaseWorkbench({
                               会话保存
                             </span>
                           ) : (
-                            <UiCaseStageBadge stage={caseStage(active)} />
+                            <UiCaseStageBadge
+                              stage={caseStage(currentAsset ?? active)}
+                            />
                           )}
                         </div>
                         <h2 className="ui-case-reading-title">
@@ -918,7 +945,9 @@ export function UiCaseWorkbench({
                             会话保存
                           </span>
                         ) : (
-                          <UiCaseStageBadge stage={caseStage(active)} />
+                          <UiCaseStageBadge
+                            stage={caseStage(currentAsset ?? active)}
+                          />
                         )}
                         <span className="ui-case-asset-code" title={active.id}>
                           {active.id} · r
@@ -944,12 +973,13 @@ export function UiCaseWorkbench({
                         )}
                       </>
                     ) : (
-                      active &&
-                      focusedDetail?.asset.revisionId === active.revisionId && (
+                      currentAsset && (
                         <>
                           <UiCaseReviewPane
-                            key={active.id + ':' + active.revisionId}
-                            asset={active}
+                            key={
+                              currentAsset.id + ':' + currentAsset.revisionId
+                            }
+                            asset={currentAsset}
                             userId={userId}
                             writable={writable}
                             drafts={reviewDrafts}
@@ -957,7 +987,7 @@ export function UiCaseWorkbench({
                             onBusy={setBusy}
                             onCompare={(from, to) =>
                               setComparison({
-                                assetId: active.id,
+                                assetId: currentAsset.id,
                                 from,
                                 to,
                                 key: crypto.randomUUID(),
@@ -966,9 +996,11 @@ export function UiCaseWorkbench({
                             onApprove={onApprove}
                             onChanged={onChanged}
                             onOpenTeam={onOpenTeam}
-                            onOpenHistory={(id) => onOpenHistory(id, active.id)}
+                            onOpenHistory={(id) =>
+                              onOpenHistory(id, currentAsset.id)
+                            }
                             onSupplement={(origin) =>
-                              onSupplement(active, origin)
+                              onSupplement(currentAsset, origin)
                             }
                           />
                           <Space wrap size={6}>
@@ -977,7 +1009,7 @@ export function UiCaseWorkbench({
                                 size="small"
                                 icon={<AppIcon name="spark" />}
                                 disabled={busy}
-                                onClick={() => onSupplement(active)}
+                                onClick={() => onSupplement(currentAsset)}
                               >
                                 请 AI 补充用例
                               </Button>
@@ -993,8 +1025,8 @@ export function UiCaseWorkbench({
                                 ],
                                 onClick: ({ key }) =>
                                   key === 'edit'
-                                    ? onEdit(active)
-                                    : onDetails(active),
+                                    ? onEdit(currentAsset)
+                                    : onDetails(currentAsset),
                               }}
                             >
                               <Button
