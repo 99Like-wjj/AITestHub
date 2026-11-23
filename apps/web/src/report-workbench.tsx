@@ -577,6 +577,24 @@ export function ReportWorkbench({
           runId={facts.runId}
           environment={facts.environmentName ?? facts.scope.environmentId}
           issues={issues}
+          summary={
+            <div className="report-review-status">
+              <div>
+                <span>执行原判</span>
+                <ResultOutcomeTag outcome={result.initialOutcome} />
+              </div>
+              <div>
+                <span>当前上报</span>
+                <ResultOutcomeTag outcome={result.reportedOutcome} />
+              </div>
+              <div>
+                <span>人工最终结论</span>
+                <ResultOutcomeTag
+                  outcome={result.finalOutcome ?? 'notAssessed'}
+                />
+              </div>
+            </div>
+          }
           readOnlyReason={reason}
           pendingFiles={reviewPendingFiles.current.get(draftKey)}
           onPendingFiles={(files) => {
@@ -589,32 +607,6 @@ export function ReportWorkbench({
             void onChanged();
           }}
         />
-        <div className="report-review-status">
-          <div>
-            <span>执行原判</span>
-            <ResultOutcomeTag outcome={result.initialOutcome} />
-          </div>
-          <div>
-            <span>当前上报</span>
-            <ResultOutcomeTag outcome={result.reportedOutcome} />
-          </div>
-          <div>
-            <span>人工最终结论</span>
-            <ResultOutcomeTag outcome={result.finalOutcome ?? 'notAssessed'} />
-          </div>
-          {issues.length > 0 && (
-            <div>
-              <span>正式缺陷</span>
-              <Space wrap>
-                {issues.map((issue) => (
-                  <a key={issue.id} href={issueLink(issue.id)}>
-                    {issue.number}
-                  </a>
-                ))}
-              </Space>
-            </div>
-          )}
-        </div>
         {receivedIssue &&
           issues.some((issue) => issue.id === receivedIssue.id) && (
             <Alert

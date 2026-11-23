@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   Alert,
   Button,
@@ -274,6 +275,7 @@ export function ReportResultReview({
   runId,
   environment,
   issues,
+  summary,
   readOnlyReason,
   pendingFiles,
   onPendingFiles,
@@ -287,6 +289,7 @@ export function ReportResultReview({
   runId: string;
   environment: string;
   issues: readonly Issue[];
+  summary: ReactNode;
   readOnlyReason?: string | undefined;
   pendingFiles?: readonly ReviewPendingFile[] | undefined;
   onPendingFiles: (files: ReviewPendingFile[]) => void;
@@ -332,12 +335,14 @@ export function ReportResultReview({
   const [retests, setRetests] = useState<Retest[]>();
   const [loadError, setLoadError] = useState<string>();
   const [reload, setReload] = useState(0);
-  const [editing, setEditing] = useState(false);
+  const [editMode, setEditing] = useState<boolean>();
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [issueMode, setIssueMode] = useState<IssueMode>();
   const [detail, setDetail] = useState(false);
   const latest = retests?.[0];
+  const editing = editMode ?? Boolean(!readOnlyReason && retests && !latest);
+  const reproduced = latest?.outcome === 'reproduced' ? latest : undefined;
   const [base, setBase] = useState<string | null>(null);
   const command = useBusinessCommand(
     editing ? `${scope.resultRevisionId}:${base ?? ''}` : null,
@@ -441,10 +446,10 @@ export function ReportResultReview({
   const evidenceNames = current.content.evidenceRefs.length;
   const issueDescription = [
     `环境与前提\n${environment}${'preconditions' in content ? '\n' + content.preconditions.join('\n') : ''}`,
-    `复现过程\n${latest?.reproduction || reference || '请补充复现过程'}`,
+    `复现过程\n${reproduced?.reproduction || reference || '请补充复现过程'}`,
     `预期结果\n${step?.expected || ('expected' in content ? content.expected : '') || '请补充预期结果'}`,
     `实际观察\n${
-      latest?.note ||
+      reproduced?.note ||
       current.content.observations?.map((entry) => entry.actual).join('\n') ||
       current.content.stepObservations?.find(
         (entry) => entry.ordinal === scope.stepOrdinal,
@@ -457,15 +462,11 @@ export function ReportResultReview({
     <div className="report-result-review">
       <div className="report-result-actions">
         <Button
-          icon={<PictureOutlined />}
-          disabled={Boolean(readOnlyReason || !retests || recovery.commandId)}
-          onClick={() => {
-            setBase(latest?.id ?? null);
-            setEditing(true);
-            setNotice('');
-          }}
+          icon={<LinkOutlined />}
+          disabled={!canFile || issues.length > 0}
+          onClick={() => setIssueMode('existing')}
         >
-          登记人工复测
+          关联已有
         </Button>
         {issues.length ? (
           <Button
@@ -485,14 +486,8 @@ export function ReportResultReview({
             提缺陷并指派
           </Button>
         )}
-        <Button
-          icon={<LinkOutlined />}
-          disabled={!canFile || issues.length > 0}
-          onClick={() => setIssueMode('existing')}
-        >
-          关联已有
-        </Button>
       </div>
+      {summary}
       {readOnlyReason && <p className="caption">{readOnlyReason}</p>}
       {!readOnlyReason && !canFile && !issues.length && (
         <p className="caption">登记已复现的观察后可提缺陷或关联已有缺陷。</p>
@@ -523,22 +518,22 @@ export function ReportResultReview({
           {notice}
         </p>
       )}
+      {!readOnlyReason && !editing && !!retests && (
+        <Button
+          icon={<PictureOutlined />}
+          disabled={Boolean(recovery.commandId)}
+          onClick={() => {
+            setBase(latest?.id ?? null);
+            setEditing(true);
+            setNotice('');
+          }}
+        >
+          登记人工复测
+        </Button>
+      )}
       {!readOnlyReason && editing && (
         <section className="report-retest-editor" aria-label="人工复测画布">
-          <h3>人工复测</h3>
-          <div className="report-retest-source">
-            {environment} · {content.title}
-          </div>
-          <label>
-            复现过程
-            <Input.TextArea
-              rows={2}
-              maxLength={10000}
-              value={draft.reproduction}
-              disabled={disabled}
-              onChange={(e) => change({ reproduction: e.target.value })}
-            />
-          </label>
+          <h3>登记人工复测</h3>
           <ReviewImageAttachments
             projectId={projectId}
             runId={runId}
@@ -574,6 +569,35 @@ export function ReportResultReview({
               />
             </label>
             <label>
+              复测结论
+              <Select
+                aria-label="复测结论"
+                value={draft.outcome}
+                options={Object.entries(retestOptions).map(
+                  ([value, label]) => ({ value, label }),
+                )}
+                disabled={disabled}
+                onChange={(outcome) => change({ outcome })}
+                placeholder="选择实际复测结论"
+              />
+            </label>
+          </div>
+          <details className="report-retest-context" open={!reference}>
+            <summary>环境、复现过程与复测时间</summary>
+            <p className="report-retest-source">
+              {environment} · {content.title}
+            </p>
+            <label>
+              复现过程
+              <Input.TextArea
+                rows={2}
+                maxLength={10000}
+                value={draft.reproduction}
+                disabled={disabled}
+                onChange={(e) => change({ reproduction: e.target.value })}
+              />
+            </label>
+            <label>
               复测时间
               <Input
                 type="datetime-local"
@@ -582,20 +606,7 @@ export function ReportResultReview({
                 onChange={(e) => change({ time: e.target.value })}
               />
             </label>
-          </div>
-          <label>
-            复测结论
-            <Select
-              value={draft.outcome}
-              options={Object.entries(retestOptions).map(([value, label]) => ({
-                value,
-                label,
-              }))}
-              disabled={disabled}
-              onChange={(outcome) => change({ outcome })}
-              placeholder="选择实际复测结论"
-            />
-          </label>
+          </details>
           {command.error && (
             <Alert
               type="error"

@@ -50,8 +50,8 @@
   display: grid;
   align-content: start;
   gap: 4px;
-  min-height: 74px;
-  padding: 9px 11px;
+  min-height: 55px;
+  padding: 6px 11px;
   color: var(--text);
   background: var(--surface);
   border: 1px solid var(--line);
@@ -91,10 +91,7 @@
   align-items: start;
   gap: 12px;
   min-width: 0;
-  grid-template-columns: minmax(190px, 0.86fr) minmax(0, 2.54fr) minmax(
-      286px,
-      1.06fr
-    );
+  grid-template-columns: clamp(190px, 17vw, 236px) minmax(0, 1fr) clamp(286px, 26vw, 358px);
 }
 
 .report-evidence-coverage {
@@ -199,15 +196,33 @@
 
 .report-review-status {
   display: grid;
-  font-size: 13px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-block-end: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 12px;
 }
 
 .report-review-status > div {
-  display: flex;
-  justify-content: space-between;
-  gap: 6px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--line);
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  padding: 6px;
+  min-width: 0;
+}
+
+.report-review-status > div + div {
+  border-inline-start: 1px solid var(--line);
+}
+
+.report-review-status > div > span:first-child {
+  color: var(--muted);
+}
+
+.report-review-status .ant-tag {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .report-review-candidate,
@@ -247,10 +262,6 @@
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 6px;
   padding-block: 6px 10px;
-}
-
-.report-result-actions > :last-child {
-  grid-column: 1 / -1;
 }
 
 .report-result-review .caption {
@@ -293,6 +304,15 @@
 
 .report-retest-field-row .ant-input-number {
   width: 100%;
+}
+
+.report-retest-context {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.report-retest-context summary {
+  cursor: pointer;
 }
 
 .report-retest-submit {
