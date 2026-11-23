@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { CheckOutlined } from '@ant-design/icons';
 import {
   Alert,
@@ -11,7 +12,6 @@ import {
   Pagination,
   Select,
   Space,
-  Tag,
   Typography,
 } from 'antd';
 import type { z } from 'zod';
@@ -252,6 +252,7 @@ export function ReportWorkbench({
   userId,
   report,
   facts,
+  toolbar,
   archived,
   handling,
   selection,
@@ -263,6 +264,7 @@ export function ReportWorkbench({
   userId: string;
   report: Report;
   facts: Facts;
+  toolbar: ReactNode;
   archived: boolean;
   handling: ReportHandling | null;
   selection: ReportSelection | null;
@@ -674,21 +676,17 @@ export function ReportWorkbench({
     <div className="report-workbench-content">
       <div className="report-workbench-heading">
         <div>
-          <Space wrap size={[6, 0]}>
-            <Tag color={facts.kind === 'UI' ? 'blue' : 'cyan'}>
-              {facts.kind}
-            </Tag>
-            <Tag>{sourceLabels[facts.scope.sourceType]}</Tag>
-            <Tag>{provenanceLabels[facts.executionProvenance]}</Tag>
-          </Space>
           <Typography.Title level={2}>
             {'title' in facts.scope
               ? facts.scope.title
-              : `${facts.kind === 'UI' ? 'UI' : '接口'}测试报告`}
+              : facts.kind === 'UI'
+                ? 'UI 测试报告'
+                : '接口测试报告'}
           </Typography.Title>
-          <Space wrap size={[8, 4]}>
+          <Space className="report-workbench-meta" wrap size={[8, 3]}>
             <Typography.Text type="secondary">
-              执行 {facts.runId}
+              {facts.environmentName ?? sourceLabels[facts.scope.sourceType]} ·{' '}
+              {provenanceLabels[facts.executionProvenance]}
             </Typography.Text>
             <DeliveryStatusTag status={facts.deliveryStatus} />
             <Typography.Text type="secondary">
@@ -696,6 +694,7 @@ export function ReportWorkbench({
             </Typography.Text>
           </Space>
         </div>
+        {toolbar}
       </div>
       {archived && (
         <Alert
@@ -724,6 +723,7 @@ export function ReportWorkbench({
         <button
           type="button"
           aria-pressed={filter === 'all'}
+          title={'已覆盖场景 ' + coverage + '/' + groups.size}
           onClick={() => {
             setFilter('all');
             resetSelection();
@@ -731,9 +731,6 @@ export function ReportWorkbench({
         >
           <span>执行范围</span>
           <strong>{facts.statistics.denominator}</strong>
-          <small>
-            已覆盖场景 {coverage}/{groups.size}
-          </small>
         </button>
         {statusKeys.map((key) => (
           <button
@@ -784,6 +781,146 @@ export function ReportWorkbench({
           </strong>
         </div>
       </div>
+      {batch && (
+        <ReportReviewBatch
+          key={batch.id}
+          project={project}
+          userId={userId}
+          rows={batch.items}
+          session={batch.id}
+          onClose={() => setBatch(null)}
+          onSaved={async () => {
+            setSelected(new Set());
+            await onChanged();
+          }}
+        />
+      )}
+      {!archived && !batch && (
+        <ReportBatchRecovery
+          projectId={project.id}
+          reportId={report.id}
+          onChanged={onChanged}
+        />
+      )}
+      <div className="report-desk-grid">
+        <section className="report-case-list" aria-label="场景与用例">
+          <h2>场景与用例</h2>
+          <ResultFilters
+            search={{
+              label: '搜索范围、用例或场景',
+              placeholder: '搜索用例或场景',
+              value: search,
+              onChange: (value) => {
+                setSearch(value);
+                resetSelection();
+              },
+            }}
+            onReset={() => {
+              setFilter('all');
+              setScenario(null);
+              setReviewFilter('all');
+              setSearch('');
+              resetSelection();
+            }}
+            summary={`${matched.length}/${facts.statistics.denominator} 项`}
+          >
+            <Select
+              aria-label="按场景筛选"
+              allowClear
+              placeholder="全部场景"
+              value={scenario}
+              options={[...groups].map(([id, group]) => ({
+                value: id,
+                label: group.label,
+              }))}
+              onChange={(value?: string) => {
+                setScenario(value ?? null);
+                resetSelection();
+              }}
+            />
+            <Select
+              aria-label="人工处理状态"
+              value={reviewFilter}
+              options={reviewFilters}
+              onChange={(value) => {
+                setReviewFilter(value);
+                resetSelection();
+              }}
+            />
+          </ResultFilters>
+          {writableDetail && (
+            <BulkActionBar
+              selected={selectedRows.length}
+              scope={`仅当前筛选页的可处理结果${eligible.size > 100 ? '，每批最多 100 项' : ''}`}
+              onClear={() => {
+                setSelected(new Set());
+                setBatch(null);
+              }}
+              selectionActions={
+                <Button
+                  size="small"
+                  icon={<CheckOutlined />}
+                  disabled={eligible.size === 0 || Boolean(batch)}
+                  onClick={() => {
+                    setSelected(new Set([...eligible.keys()].slice(0, 100)));
+                    setBatch(null);
+                  }}
+                >
+                  全选待确认的失败用例
+                </Button>
+              }
+            >
+              <Button
+                size="small"
+                type="primary"
+                onClick={() =>
+                  setBatch({ items: selectedRows, id: crypto.randomUUID() })
+                }
+              >
+                预览批量转换
+              </Button>
+            </BulkActionBar>
+          )}
+          {!scenePageGroups.length && (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="没有匹配结果"
+            />
+          )}
+          {scenePageGroups.map((group) => (
+            <section key={group.id}>
+              <div className="report-scene-label">
+                <span>{group.label}</span>
+                <small>{displayCoverage(group.total)}</small>
+              </div>
+              {group.visible.map(renderRow)}
+            </section>
+          ))}
+        </section>
+        <section className="report-result-pane" aria-label="执行结果">
+          {detail(focused)}
+        </section>
+        <aside className="report-review-rail" aria-label="人工复核与缺陷">
+          <h2>人工复核与缺陷</h2>
+          {review(focused)}
+        </aside>
+      </div>
+      {matched.length > pageSize && (
+        <ResultPagination summary={`共 ${matched.length} 项结果`}>
+          <Pagination
+            current={currentPage}
+            pageSize={pageSize}
+            total={matched.length}
+            showSizeChanger={false}
+            onChange={(value) => {
+              setPage(value);
+              setSelected(new Set());
+              setBatch(null);
+              clearFocusedResult();
+            }}
+          />
+        </ResultPagination>
+      )}
       <Collapse
         items={[
           {
@@ -848,146 +985,6 @@ export function ReportWorkbench({
           },
         ]}
       />
-      <ResultFilters
-        search={{
-          label: '搜索范围、用例或场景',
-          placeholder: '搜索用例或场景',
-          value: search,
-          onChange: (value) => {
-            setSearch(value);
-            resetSelection();
-          },
-        }}
-        onReset={() => {
-          setFilter('all');
-          setScenario(null);
-          setReviewFilter('all');
-          setSearch('');
-          resetSelection();
-        }}
-        summary={`${matched.length}/${facts.statistics.denominator} 项`}
-      >
-        <Select
-          aria-label="按场景筛选"
-          allowClear
-          placeholder="全部场景"
-          value={scenario}
-          options={[...groups].map(([id, group]) => ({
-            value: id,
-            label: group.label,
-          }))}
-          onChange={(value?: string) => {
-            setScenario(value ?? null);
-            resetSelection();
-          }}
-        />
-        <Select
-          aria-label="人工处理状态"
-          value={reviewFilter}
-          options={reviewFilters}
-          onChange={(value) => {
-            setReviewFilter(value);
-            resetSelection();
-          }}
-        />
-      </ResultFilters>
-      {writableDetail && (
-        <BulkActionBar
-          selected={selectedRows.length}
-          scope={`仅当前筛选页的可处理结果${eligible.size > 100 ? '，每批最多 100 项' : ''}`}
-          onClear={() => {
-            setSelected(new Set());
-            setBatch(null);
-          }}
-          selectionActions={
-            <Button
-              size="small"
-              icon={<CheckOutlined />}
-              disabled={eligible.size === 0 || Boolean(batch)}
-              onClick={() => {
-                setSelected(new Set([...eligible.keys()].slice(0, 100)));
-                setBatch(null);
-              }}
-            >
-              全选待确认的失败用例
-            </Button>
-          }
-        >
-          <Button
-            size="small"
-            type="primary"
-            onClick={() =>
-              setBatch({ items: selectedRows, id: crypto.randomUUID() })
-            }
-          >
-            预览批量转换
-          </Button>
-        </BulkActionBar>
-      )}
-      {batch && (
-        <ReportReviewBatch
-          key={batch.id}
-          project={project}
-          userId={userId}
-          rows={batch.items}
-          session={batch.id}
-          onClose={() => setBatch(null)}
-          onSaved={async () => {
-            setSelected(new Set());
-            await onChanged();
-          }}
-        />
-      )}
-      {!archived && !batch && (
-        <ReportBatchRecovery
-          projectId={project.id}
-          reportId={report.id}
-          onChanged={onChanged}
-        />
-      )}
-      <div className="report-desk-grid">
-        <section className="report-case-list" aria-label="场景与用例">
-          <h2>场景与用例</h2>
-          {!scenePageGroups.length && (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="没有匹配结果"
-            />
-          )}
-          {scenePageGroups.map((group) => (
-            <section key={group.id}>
-              <div className="report-scene-label">
-                <span>{group.label}</span>
-                <small>{displayCoverage(group.total)}</small>
-              </div>
-              {group.visible.map(renderRow)}
-            </section>
-          ))}
-        </section>
-        <section className="report-result-pane" aria-label="执行结果">
-          {detail(focused)}
-        </section>
-        <aside className="report-review-rail" aria-label="人工复核与缺陷">
-          <h2>人工复核与缺陷</h2>
-          {review(focused)}
-        </aside>
-      </div>
-      {matched.length > pageSize && (
-        <ResultPagination summary={`共 ${matched.length} 项结果`}>
-          <Pagination
-            current={currentPage}
-            pageSize={pageSize}
-            total={matched.length}
-            showSizeChanger={false}
-            onChange={(value) => {
-              setPage(value);
-              setSelected(new Set());
-              setBatch(null);
-              clearFocusedResult();
-            }}
-          />
-        </ResultPagination>
-      )}
       {facts.evidence.length > 0 && (
         <Collapse
           items={[

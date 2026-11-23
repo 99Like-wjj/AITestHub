@@ -489,6 +489,41 @@ export function ResultsPage({
       .then(() => setReportNotice('链接已复制，打开时按当前账号权限读取。'))
       .catch(() => setReportNotice('链接未能复制，请从地址栏复制当前链接。'));
   }
+  const reportControls = report ? (
+    <div className="report-workbench-controls">
+      <Select
+        aria-label="报告历史快照"
+        value={revisionId}
+        onChange={(id: string) => {
+          const query = new URLSearchParams(window.location.hash.split('?')[1]);
+          if (id !== 'current') query.set('revisionId', id);
+          else {
+            query.delete('revisionId');
+            query.delete('resultRevisionId');
+          }
+          window.location.hash = `reports?${query}`;
+        }}
+        options={[
+          { value: 'current', label: '当前汇总' },
+          ...report.history.map((row) => ({
+            value: row.id,
+            label: `历史 r${row.revisionNo} · ${formatBeijingTime(row.createdAt, true)} · ${reportReasons[row.reason] ?? '已保存快照'}`,
+          })),
+        ]}
+      />
+      <Button onClick={() => void loadReport()} loading={detailLoading}>
+        刷新报告
+      </Button>
+      <Button onClick={copyReportLink}>复制链接</Button>
+      <Button
+        loading={exporting}
+        disabled={revisionId !== 'current' && !historical}
+        onClick={() => void exportReport()}
+      >
+        {revisionId === 'current' ? '导出 HTML 快照' : '下载此历史修订'}
+      </Button>
+    </div>
+  ) : null;
   return (
     <>
       {standalone && (
@@ -508,48 +543,6 @@ export function ResultsPage({
               />
             ) : reportId ? (
               <>
-                {report && (
-                  <div className="report-workbench-controls">
-                    <Select
-                      aria-label="报告历史快照"
-                      value={revisionId}
-                      onChange={(id: string) => {
-                        const query = new URLSearchParams(
-                          window.location.hash.split('?')[1],
-                        );
-                        if (id !== 'current') query.set('revisionId', id);
-                        else {
-                          query.delete('revisionId');
-                          query.delete('resultRevisionId');
-                        }
-                        window.location.hash = `reports?${query}`;
-                      }}
-                      options={[
-                        { value: 'current', label: '当前汇总' },
-                        ...report.history.map((row) => ({
-                          value: row.id,
-                          label: `历史 r${row.revisionNo} · ${formatBeijingTime(row.createdAt, true)} · ${reportReasons[row.reason] ?? '已保存快照'}`,
-                        })),
-                      ]}
-                    />
-                    <Button
-                      onClick={() => void loadReport()}
-                      loading={detailLoading}
-                    >
-                      刷新报告
-                    </Button>
-                    <Button onClick={copyReportLink}>复制链接</Button>
-                    <Button
-                      loading={exporting}
-                      disabled={revisionId !== 'current' && !historical}
-                      onClick={() => void exportReport()}
-                    >
-                      {revisionId === 'current'
-                        ? '导出 HTML 快照'
-                        : '下载此历史修订'}
-                    </Button>
-                  </div>
-                )}
                 {reportNotice && (
                   <p className="caption mb" role="status">
                     {reportNotice}
@@ -575,6 +568,7 @@ export function ResultsPage({
                     userId={userId}
                     report={report}
                     facts={facts}
+                    toolbar={reportControls}
                     archived={revisionId !== 'current'}
                     viewedRevisionId={
                       revisionId === 'current' ? report.revisionId : revisionId

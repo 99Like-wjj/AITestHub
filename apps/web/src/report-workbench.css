@@ -19,16 +19,16 @@
 
 .report-workbench-controls {
   justify-content: flex-end;
-  margin-block-end: 14px;
+  gap: 6px;
 }
 
 .report-workbench-controls > .ant-select {
-  min-width: min(236px, 100%);
+  min-width: min(156px, 100%);
 }
 
 .report-workbench-content {
   display: grid;
-  gap: 13px;
+  gap: 11px;
 }
 
 .report-workbench-heading {
@@ -37,7 +37,11 @@
 }
 
 .report-workbench-heading h2 {
-  margin: 4px 0 1px;
+  margin: 0 0 3px;
+}
+
+.report-workbench-meta {
+  font-size: 12px;
 }
 
 .report-metrics {
@@ -47,10 +51,11 @@
 }
 
 .report-metrics button {
-  display: grid;
-  align-content: start;
-  gap: 4px;
-  min-height: 55px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  min-height: 45px;
   padding: 6px 11px;
   color: var(--text);
   background: var(--surface);
@@ -78,7 +83,6 @@
   font-size: 12px;
 }
 
-.report-workbench-content > .result-filters,
 .report-inline-command {
   padding: 10px 12px;
   background: var(--surface);
@@ -105,10 +109,12 @@
 }
 
 .report-evidence-coverage > div {
-  display: grid;
-  gap: 2px;
-  padding: 6px 10px;
-  background: var(--surface);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 8px;
+  padding: 8px 10px;
+  background: var(--accent-soft);
 }
 
 .report-evidence-coverage span {
@@ -143,6 +149,33 @@
 .report-inline-command h2 {
   margin: 0 0 9px;
   font-size: 17px;
+}
+
+.report-case-list .result-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 0 0 8px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+}
+
+.report-case-list .result-filter-search,
+.report-case-list .result-filters .ant-select {
+  min-width: 0;
+  max-width: none;
+  width: 100%;
+}
+
+.report-case-list .result-filters > .ant-btn {
+  justify-self: start;
+  height: auto;
+  font-size: 12px;
+}
+
+.report-case-list .bulk-action-bar {
+  margin-block: 6px 0;
 }
 
 .report-scene-label {
