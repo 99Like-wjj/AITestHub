@@ -175,12 +175,9 @@ export class ConversationsService {
             requirementId = preference.last_requirement_id;
           }
         }
-        let title = '新聊天';
         if (projectId && requirementId) {
           try {
-            title = (
-              await requirementTarget(tx, actor, projectId, requirementId)
-            ).title;
+            await requirementTarget(tx, actor, projectId, requirementId);
           } catch (error: unknown) {
             if (
               error instanceof DomainError &&
@@ -195,7 +192,7 @@ export class ConversationsService {
         const row = (
           await tx.query<ConversationRow>(
             'INSERT INTO app.ai_conversations(owner_id,project_id,requirement_id,default_title) VALUES($1,$2,$3,$4) RETURNING *',
-            [actor.userId, projectId, requirementId, title],
+            [actor.userId, projectId, requirementId, '新聊天'],
           )
         ).rows[0];
         if (!row) throw new Error('Conversation insert returned no row');

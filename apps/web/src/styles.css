@@ -105,13 +105,8 @@ a:focus-visible {
   width: 100%;
   min-width: 0;
 }
-.knowledge-filters > .row {
-  flex: 0 0 auto;
-  min-height: 36px;
-  white-space: nowrap;
-}
-.knowledge-filters > button {
-  flex-shrink: 0;
+.knowledge-filter-actions {
+  max-width: 100%;
 }
 .brand-slot {
   height: 80px;
@@ -1170,7 +1165,7 @@ body {
 .live-issue-layout .tree-node .caption {
   font-size: 10px;
 }
-.archived-requirements-toggle {
+.filter-toggle {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -1182,7 +1177,7 @@ body {
   cursor: pointer;
   white-space: nowrap;
 }
-.archived-requirements-toggle:has(button:disabled) {
+.filter-toggle:has(button:disabled) {
   cursor: default;
 }
 .live-issue-layout .issue-records {

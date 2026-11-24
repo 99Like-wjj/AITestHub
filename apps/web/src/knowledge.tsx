@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
-import { App, Modal } from 'antd';
+import { App, Modal, Tooltip } from 'antd';
 import { z } from 'zod';
 import {
   knowledgeSpacesResponseSchema,
@@ -23,6 +23,7 @@ import { idSchema } from '../../../packages/contracts/src/base';
 import { api, ApiError, describeError } from './api';
 import { useBusinessCommand } from './business-command';
 import { uiLayers } from './ui-layers';
+import { FilterToggle } from './filter-toggle';
 import { RecoveryBlock } from './recovery-block';
 import type { Project } from './types';
 import type { PreparedReference } from './workspace-references';
@@ -2016,37 +2017,42 @@ export function KnowledgePage({ project }: { project: Project | null }) {
             placeholder="输入关键词，列表仅返回轻索引"
           />
         </label>
-        <label className="row">
-          <input
-            type="checkbox"
-            checked={includeDeleted}
-            onChange={(event) => setIncludeDeleted(event.target.checked)}
-          />
-          查看已删除入口
-        </label>
-        <Button
-          kind="small"
-          onClick={() =>
-            setSpaceEditor({
-              target: { project, session: crypto.randomUUID() },
-            })
-          }
-        >
-          新增子库
-        </Button>
-        {selectedSpace && (
+        <div className="row wrap knowledge-filter-actions">
+          <Tooltip
+            title="开启后，列表一并显示已删除的知识条目。可查看它们的版本历史，也可选择历史正文恢复条目。"
+            trigger={['hover', 'focus']}
+          >
+            <span>
+              <FilterToggle
+                label="显示已删除条目"
+                checked={includeDeleted}
+                onChange={setIncludeDeleted}
+              />
+            </span>
+          </Tooltip>
           <Button
-            kind="small"
+            icon="plus"
             onClick={() =>
               setSpaceEditor({
                 target: { project, session: crypto.randomUUID() },
-                existing: selectedSpace,
               })
             }
           >
-            编辑子库
+            新增子库
           </Button>
-        )}
+          {selectedSpace && (
+            <Button
+              onClick={() =>
+                setSpaceEditor({
+                  target: { project, session: crypto.randomUUID() },
+                  existing: selectedSpace,
+                })
+              }
+            >
+              编辑子库
+            </Button>
+          )}
+        </div>
       </div>
       {error && (
         <Notice error>

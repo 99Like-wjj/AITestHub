@@ -1,20 +1,20 @@
 import { Switch } from 'antd';
 import { useId } from 'react';
 
-export function ArchivedRequirementsToggle({
+export function FilterToggle({
   checked,
   onChange,
   disabled = false,
-  label = '显示已归档需求',
+  label,
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
   disabled?: boolean;
-  label?: string;
+  label: string;
 }) {
   const id = useId();
   return (
-    <label className="archived-requirements-toggle" htmlFor={id}>
+    <label className="filter-toggle" htmlFor={id}>
       <Switch
         id={id}
         size="small"

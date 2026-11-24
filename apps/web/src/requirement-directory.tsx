@@ -1,6 +1,6 @@
 import { Input } from 'antd';
 import type { ReactNode } from 'react';
-import { ArchivedRequirementsToggle } from './archived-requirements-toggle';
+import { FilterToggle } from './filter-toggle';
 import './requirement-directory.css';
 
 export function RequirementDirectory({
@@ -25,7 +25,8 @@ export function RequirementDirectory({
       <div className="requirement-directory-header">
         <div className="requirement-directory-heading">
           <h2>需求目录</h2>
-          <ArchivedRequirementsToggle
+          <FilterToggle
+            label="显示已归档需求"
             checked={includeArchived}
             onChange={onIncludeArchivedChange}
             disabled={archiveDisabled ?? false}

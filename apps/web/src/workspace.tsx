@@ -635,13 +635,26 @@ export function Workspace({
         ? ['queued', 'streaming'].includes(messageForTask.status)
         : true),
   );
+  const currentSendPreview =
+    sendPreview?.conversationId === activeId ? sendPreview : null;
+  const isActiveSendUncertain = uncertain?.conversationId === activeId;
+  const preparingFirstMessage = !activeId && creating;
+  const showWelcome =
+    !conversationLoading &&
+    !conversationError &&
+    !preparingFirstMessage &&
+    !currentSendPreview &&
+    !isActiveSendUncertain &&
+    !taskId &&
+    (!activeId || (active?.id === activeId && detail?.messages.length === 0));
   const contextCollapsible = Boolean(
     activeId &&
     (conversationLoading ||
       active?.id !== activeId ||
       taskId ||
       detail?.messages.length ||
-      (sendPreview?.conversationId === activeId && sendPreview.userMessageId)),
+      currentSendPreview ||
+      isActiveSendUncertain),
   );
   useEffect(() => {
     if (contextCollapsible) {
@@ -2286,8 +2299,10 @@ export function Workspace({
           if (activeRef.current === active.id) {
             setDetail(response);
             setUncertain(null);
-            setSendPreview(null);
           }
+          setSendPreview((preview) =>
+            preview?.conversationId === active.id ? null : preview,
+          );
         } catch (error) {
           if (activeRef.current === active.id)
             setConversationError(
@@ -2299,7 +2314,11 @@ export function Workspace({
         if (isUncertainMutationError(error)) {
           uncertainSends.current.set(active.id, unresolved);
           if (activeRef.current === active.id) setUncertain(unresolved);
-        } else if (activeRef.current === active.id) setSendPreview(null);
+        } else {
+          setSendPreview((preview) =>
+            preview?.conversationId === active.id ? null : preview,
+          );
+        }
         throw error;
       }
     } catch (error) {
@@ -2714,65 +2733,68 @@ export function Workspace({
             {conversationError && (
               <Alert type="error" title={conversationError} showIcon />
             )}
-            {(!active || detail?.messages.length === 0) &&
-              !conversationLoading &&
-              !conversationError && (
-                <div className="welcome-content welcome">
-                  <img
-                    src="/brand-f-mono.png"
-                    className="welcome-brand brand-mono"
-                    alt="AITestHub F 标志"
-                  />
-                  <h1>
-                    {welcomeRequirement ? (
-                      <>
-                        你想让我们在{' '}
-                        <span className="welcome-requirement-name">
-                          {welcomeRequirement}
-                        </span>{' '}
-                        中构建什么？
-                      </>
-                    ) : (
-                      '我们要构建什么？'
-                    )}
-                  </h1>
-                  <p>从一个问题开始，让测试的下一步更清晰。</p>
-                  <div className="welcome-cards">
-                    <button
-                      type="button"
-                      className="welcome-card"
-                      aria-label="梳理测试场景，准备任务"
-                      onKeyDown={(event) => keyboardCard(event, prepareScenes)}
-                      onClick={prepareScenes}
-                    >
-                      <AppIcon name="check" />
-                      <span>梳理测试场景</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="welcome-card"
-                      aria-label="用Skill开始任务，查看候选"
-                      onKeyDown={(event) => keyboardCard(event, openSkills)}
-                      onClick={openSkills}
-                    >
-                      <AppIcon name="spark" />
-                      <span>用 Skill 开始任务</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="welcome-card"
-                      aria-label="引用已有知识，选择候选"
-                      onKeyDown={(event) =>
-                        keyboardCard(event, () => openReferences('knowledge'))
-                      }
-                      onClick={() => openReferences('knowledge')}
-                    >
-                      <AppIcon name="book" />
-                      <span>引用已有知识</span>
-                    </button>
-                  </div>
+            {preparingFirstMessage && (
+              <p className="caption" role="status">
+                正在准备对话…
+              </p>
+            )}
+            {showWelcome && (
+              <div className="welcome-content welcome">
+                <img
+                  src="/brand-f-mono.png"
+                  className="welcome-brand brand-mono"
+                  alt="AITestHub F 标志"
+                />
+                <h1>
+                  {welcomeRequirement ? (
+                    <>
+                      你想让我们在{' '}
+                      <span className="welcome-requirement-name">
+                        {welcomeRequirement}
+                      </span>{' '}
+                      中构建什么？
+                    </>
+                  ) : (
+                    '我们要构建什么？'
+                  )}
+                </h1>
+                <p>从一个问题开始，让测试的下一步更清晰。</p>
+                <div className="welcome-cards">
+                  <button
+                    type="button"
+                    className="welcome-card"
+                    aria-label="梳理测试场景，准备任务"
+                    onKeyDown={(event) => keyboardCard(event, prepareScenes)}
+                    onClick={prepareScenes}
+                  >
+                    <AppIcon name="check" />
+                    <span>梳理测试场景</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="welcome-card"
+                    aria-label="用Skill开始任务，查看候选"
+                    onKeyDown={(event) => keyboardCard(event, openSkills)}
+                    onClick={openSkills}
+                  >
+                    <AppIcon name="spark" />
+                    <span>用 Skill 开始任务</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="welcome-card"
+                    aria-label="引用已有知识，选择候选"
+                    onKeyDown={(event) =>
+                      keyboardCard(event, () => openReferences('knowledge'))
+                    }
+                    onClick={() => openReferences('knowledge')}
+                  >
+                    <AppIcon name="book" />
+                    <span>引用已有知识</span>
+                  </button>
                 </div>
-              )}
+              </div>
+            )}
             {detail?.nextMessageCursor && (
               <Button onClick={() => void loadOlder()}>
                 加载更早的本人消息
@@ -2891,39 +2913,41 @@ export function Workspace({
                 </article>
               );
             })}
-            {sendPreview &&
-              sendPreview.conversationId === activeId &&
+            {currentSendPreview &&
               !detail?.messages.some(
-                (entry) => entry.id === sendPreview.userMessageId,
+                (entry) => entry.id === currentSendPreview.userMessageId,
               ) && (
                 <article className="chat-message user pending-user-message">
                   <header className="workspace-message-sender">
                     <img src="/brand-f-color.png" alt="" />
                     <strong>{me.user.displayName}</strong>
-                    <time dateTime={sendPreview.createdAt}>
-                      {new Date(sendPreview.createdAt).toLocaleTimeString(
-                        'zh-CN',
-                        { hour: '2-digit', minute: '2-digit', hour12: false },
-                      )}
+                    <time dateTime={currentSendPreview.createdAt}>
+                      {new Date(
+                        currentSendPreview.createdAt,
+                      ).toLocaleTimeString('zh-CN', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: false,
+                      })}
                     </time>
                   </header>
                   <WorkspaceMessageReferences
-                    references={sendPreview.references.filter(
+                    references={currentSendPreview.references.filter(
                       (item) =>
                         !isInlineMessageReference(
-                          sendPreview.content,
+                          currentSendPreview.content,
                           item.reference,
                         ),
                     )}
                   />
                   <MessageText
-                    text={sendPreview.content}
-                    references={sendPreview.references}
+                    text={currentSendPreview.content}
+                    references={currentSendPreview.references}
                   />
                   <p className="caption" role="status">
-                    {sendPreview.userMessageId
+                    {currentSendPreview.userMessageId
                       ? '消息已受理，正在读取记录'
-                      : uncertain
+                      : isActiveSendUncertain
                         ? '发送回执待核对'
                         : '正在发送'}
                   </p>
