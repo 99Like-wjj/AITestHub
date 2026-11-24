@@ -22,10 +22,12 @@ import {
   memberCandidatesSchema,
   projectSchema,
   userSummarySchema,
+  type Project,
 } from '../../../packages/contracts/src/identity';
 import { api, describeError } from './api';
 import { roleLabels, roleOptions } from './types';
-import type { Project, ProjectMember, Role } from './types';
+import type { ProjectMember, Role } from './types';
+import { uiLayers } from './ui-layers';
 
 const userSearchSchema = z.object({ users: z.array(userSummarySchema) });
 const projectListSchema = z.object({ projects: z.array(projectSchema) });
@@ -179,6 +181,7 @@ function MemberEditor({
     isAdmin: boolean;
     roles: Role[];
   }) {
+    if (pending) return;
     setPending(true);
     setError(undefined);
     try {
@@ -213,11 +216,18 @@ function MemberEditor({
     <Modal
       title={member ? `编辑成员：${member.displayName}` : '添加项目成员'}
       open={open}
-      onCancel={onClose}
+      onCancel={() => {
+        if (!pending) onClose();
+      }}
       onOk={() => form.submit()}
       okText="保存成员"
       cancelText="取消"
       confirmLoading={pending}
+      closable={!pending}
+      keyboard={!pending}
+      maskClosable={!pending}
+      cancelButtonProps={{ disabled: pending }}
+      zIndex={uiLayers.nestedDialog}
       destroyOnHidden
     >
       {error && (
@@ -263,10 +273,12 @@ export function ProjectSettings({
   project,
   canManage,
   onMembershipChanged,
+  onCloseDialog,
 }: {
   project: Project | null;
   canManage: boolean;
   onMembershipChanged: () => Promise<void>;
+  onCloseDialog?: () => void;
 }) {
   const { modal } = App.useApp();
   const [members, setMembers] = useState<ProjectMember[]>([]);
@@ -274,6 +286,7 @@ export function ProjectSettings({
   const [error, setError] = useState<string>();
   const [editing, setEditing] = useState<ProjectMember | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [confirmingRemoval, setConfirmingRemoval] = useState(false);
 
   async function load(signal?: AbortSignal) {
     if (!project) {
@@ -316,12 +329,15 @@ export function ProjectSettings({
   function remove(member: ProjectMember) {
     if (!project) return;
     const projectId = project.id;
+    setConfirmingRemoval(true);
     modal.confirm({
       title: `移除「${member.displayName}（${member.account}）」？`,
-      content: `将撤销其对「${project.name}」的后续访问，历史记录仍保留。需求参与关系失效，负责缺陷不自动改派。`,
+      content: `将移除其在「${project.name}」的成员身份和本项目业务角色。平台管理员的继承权限按平台身份判定。历史记录保留，需求参与关系失效，已指派缺陷保留原负责人。`,
       okText: '移除成员',
       cancelText: '取消',
       okButtonProps: { danger: true },
+      zIndex: uiLayers.confirmation,
+      afterClose: () => setConfirmingRemoval(false),
       onOk: async () => {
         try {
           await api(
@@ -339,24 +355,20 @@ export function ProjectSettings({
 
   if (!project)
     return <Empty description="请先选择当前有效项目，再查看项目与设置。" />;
-  return (
-    <Card
-      title="项目成员"
-      extra={
-        canManage && (
-          <Button
-            icon={<PlusOutlined />}
-            type="primary"
-            onClick={() => {
-              setEditing(null);
-              setEditorOpen(true);
-            }}
-          >
-            添加成员
-          </Button>
-        )
-      }
+  const addMember = canManage && (
+    <Button
+      icon={<PlusOutlined />}
+      type="primary"
+      onClick={() => {
+        setEditing(null);
+        setEditorOpen(true);
+      }}
     >
+      添加成员
+    </Button>
+  );
+  const content = (
+    <>
       <Typography.Paragraph type="secondary">
         {project.name} · 管理身份与业务角色独立，变更按当前权限校验。
       </Typography.Paragraph>
@@ -450,6 +462,39 @@ export function ProjectSettings({
           onSaved={saved}
         />
       )}
+    </>
+  );
+
+  if (onCloseDialog) {
+    const hasNestedDialog = editorOpen || confirmingRemoval;
+    return (
+      <Modal
+        open
+        title={`项目成员 · ${project.name}`}
+        width={960}
+        zIndex={uiLayers.dialog}
+        styles={{ body: { maxHeight: '68dvh', overflowY: 'auto' } }}
+        closable={!hasNestedDialog}
+        keyboard={!hasNestedDialog}
+        maskClosable={!hasNestedDialog}
+        onCancel={() => {
+          if (!hasNestedDialog) onCloseDialog();
+        }}
+        footer={
+          <Button disabled={hasNestedDialog} onClick={onCloseDialog}>
+            关闭
+          </Button>
+        }
+      >
+        {addMember && <div className="section-alert">{addMember}</div>}
+        {content}
+      </Modal>
+    );
+  }
+
+  return (
+    <Card title="项目成员" extra={addMember}>
+      {content}
     </Card>
   );
 }
@@ -521,7 +566,7 @@ export function PlatformProjects({
         }
       >
         <Typography.Paragraph type="secondary">
-          平台管理员创建项目并指定一名或多名项目管理员。平台管理身份不授予项目测试审批权。
+          平台管理员可以管理所有启用项目。项目成员身份和测试审批权限按项目授予。
         </Typography.Paragraph>
         {error && (
           <Alert
@@ -563,6 +608,7 @@ export function PlatformProjects({
           project={selected}
           canManage
           onMembershipChanged={onRefresh}
+          onCloseDialog={() => setSelectedId(undefined)}
         />
       )}
       <Modal

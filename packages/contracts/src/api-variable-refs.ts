@@ -1,6 +1,6 @@
-import type { ApiCaseContent } from './domain.js';
+import type { ApiCaseContent, ApiFlowNode } from './domain.js';
 
-type VariableContent = Pick<ApiCaseContent, 'steps' | 'variables' | 'cleanup'>;
+type VariableContent = Pick<ApiCaseContent, 'steps' | 'flow' | 'variables' | 'cleanup'>;
 type Request = VariableContent['steps'][number];
 type Path = (string | number)[];
 export interface ApiVariableIssue {
@@ -85,16 +85,45 @@ export function apiRequestVariableReferences(
     : [];
 }
 
+function visibleFlowInputs(flow: readonly ApiFlowNode[]) {
+  const requests = new Map<string, { previous: ReadonlySet<string>; locals: ReadonlySet<string> }>();
+  function visit(nodes: readonly ApiFlowNode[], inputs: Set<string>, locals: ReadonlySet<string>) {
+    let previous = new Set(inputs);
+    for (const node of nodes) {
+      if (node.enabled === false) continue;
+      if (node.type === 'request') {
+        requests.set(node.stepId, { previous: new Set(previous), locals });
+        previous.add(node.stepId);
+      } else if (node.type === 'if') {
+        const whenTrue = visit(node.whenTrue, previous, locals);
+        const whenFalse = visit(node.whenFalse, previous, locals);
+        previous = new Set([...whenTrue].filter(step => whenFalse.has(step)));
+      } else if (node.type === 'group') {
+        previous = visit(node.children, previous, new Set([...locals, ...Object.keys(node.variables ?? {})]));
+      } else if (node.type === 'repeat') {
+        previous = visit(node.children, previous, new Set([...locals, node.indexVariable]));
+      } else if (node.type === 'forEach') {
+        visit(node.children, previous, new Set([...locals, node.indexVariable, node.itemVariable]));
+      } else if (node.type === 'databaseRead') {
+        locals = new Set([...locals, node.resultVariable]);
+      }
+    }
+    return previous;
+  }
+  return { requests, final: visit(flow, new Set<string>(), new Set<string>()) };
+}
+
 export function apiVariableIssues(
   content: VariableContent,
   environment?: Record<string, unknown>,
 ): ApiVariableIssue[] {
+  const visible = visibleFlowInputs(content.flow);
   const requests: { request: Request; position: number; path: Path }[] =
-    content.steps.map((request, position) => ({
-      request,
-      position,
-      path: ['steps', position],
-    }));
+    content.steps.flatMap((request, position) =>
+      visible.requests.has(request.stepId)
+        ? [{ request, position, path: ['steps', position] }]
+        : [],
+    );
   const cleanup = content.cleanup.mode === 'none' ? [] : content.cleanup.steps;
   cleanup.forEach((step, index) => {
     if (step.type === 'http')
@@ -128,6 +157,9 @@ export function apiVariableIssues(
   ) {
     const [scope, key] = reference.split(/[.\[]/, 2);
     const rest = scope ? reference.slice(scope.length + 1) : '';
+    const currentStep = content.steps[position]?.stepId;
+    const availability = currentStep ? visible.requests.get(currentStep) : undefined;
+    const availableOutputs = availability?.previous ?? visible.final;
     let message: string | undefined;
     let unresolvedPreparationVariable = false;
     if (!key) message = `变量 ${reference} 缺少字段路径。`;
@@ -136,7 +168,7 @@ export function apiVariableIssues(
         message = `所选环境没有定义 ${reference}。`;
     } else if (scope === 'case') {
       // Scripts can change values in a run, but the use case declares their names.
-      if (!Object.prototype.hasOwnProperty.call(content.variables, key)) {
+      if (!availability?.locals.has(key) && !Object.prototype.hasOwnProperty.call(content.variables, key)) {
         message = `用例没有定义 ${reference}，请先声明变量。`;
         unresolvedPreparationVariable = true;
       }
@@ -145,8 +177,15 @@ export function apiVariableIssues(
       if (producer === undefined) {
         message = `没有步骤提取 ${reference}。`;
         unresolvedPreparationVariable = true;
-      } else if (producer >= position)
+      } else if (
+        producer < content.steps.length
+          ? !availableOutputs.has(content.steps[producer]?.stepId ?? '')
+          : producer >= position
+      )
         message = `${reference} 尚未产生，请将提取放到前置步骤。`;
+    } else if (scope === 'steps') {
+      if (!availableOutputs.has(key) || !/^response\.(status|headers|body|elapsedMs)(\.|\[|$)/.test(rest.slice(key.length + 1)))
+        message = `${reference} 必须引用当前路径中已完成步骤的响应。`;
     } else if (!(scope === 'auth' && allowAuth))
       message = `此处不支持引用 ${reference}。`;
     if (message)
@@ -168,10 +207,10 @@ export function apiVariableIssues(
     request.assertions.forEach((assertion, index) => {
       if (assertion.source !== 'variable' || !assertion.path) return;
       const location = [...path, 'assertions', index, 'path'];
-      if (!/^(case|extract)\./.test(assertion.path))
+      if (!/^(case|extract|steps)\./.test(assertion.path))
         issues.push({
           path: location,
-          message: '变量断言路径须以 case 或 extract 开头。',
+          message: '变量断言路径须以 case、extract 或 steps 开头。',
         });
       else check(assertion.path, position, location, false);
     });
@@ -205,17 +244,27 @@ export function apiAuthoringVariableIssues(
   const steps = preparations
     ? [...preparations.steps, ...content.steps]
     : content.steps;
+  const flow: ApiFlowNode[] = [
+    ...(preparations?.steps.map((step) => ({
+      type: 'request' as const, nodeId: step.stepId, name: step.name, stepId: step.stepId,
+    })) ?? []),
+    ...content.flow,
+  ];
   const variants = content.dataRows?.length
-    ? content.dataRows.map((row, index) => ({
-        variables: { ...variables, ...row.values },
-        row: { index, name: row.name },
-      }))
+    ? content.dataRows.flatMap((row, index) =>
+        row.enabled === false
+          ? []
+          : [{
+              variables: { ...variables, ...row.values },
+              row: { index, name: row.name },
+            }],
+      )
     : [{ variables, row: undefined }];
   const unique = new Map<string, ApiVariableIssue>();
   const deferred = !preparations && Boolean(content.preparations?.length);
   for (const variant of variants)
     for (const issue of apiVariableIssues(
-      { ...content, steps, variables: variant.variables },
+      { ...content, steps, flow, variables: variant.variables },
       environment,
     )) {
       if (deferred && issue.unresolvedPreparationVariable) continue;

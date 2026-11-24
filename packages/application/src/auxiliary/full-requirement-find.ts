@@ -9,7 +9,11 @@ import {
 } from '../../../contracts/src/automatic-auxiliary.js';
 import { auxiliaryModelSnapshotSchema } from '../../../contracts/src/auxiliary.js';
 import { RequirementService } from '../requirements/service.js';
-import { requireProject, currentUser } from '../access/policy.js';
+import {
+  requireProject,
+  requireProjectDraftWrite,
+  currentUser,
+} from '../access/policy.js';
 import { DomainError } from '../errors.js';
 import { assertSafeModelInput } from '../security/model-input.js';
 import { captureTaskSources } from '../conversations/task-sources.js';
@@ -405,7 +409,12 @@ export class FullRequirementFindService {
       this.auxiliaryInput(input, intent),
     );
     const reserved = await this.db.transaction(async (tx) => {
-      await requireProject(tx, actor, input.projectId, 'requirements.write');
+      await requireProjectDraftWrite(
+        tx,
+        actor,
+        input.projectId,
+        'requirements.write',
+      );
       const row = (
         await tx.query<AutomaticIntentRow>(
           "UPDATE app.automatic_auxiliary_intents SET state='accepting',protected_history=true,consented_at=clock_timestamp(),data_scope=$3,updated_at=clock_timestamp() WHERE id=$1 AND owner_id=$2 AND state='pendingPermission' RETURNING *",

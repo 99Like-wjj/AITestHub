@@ -4,6 +4,10 @@ import { FilterToggle } from './filter-toggle';
 import './requirement-directory.css';
 
 export function RequirementDirectory({
+  title = '需求目录',
+  archiveLabel = '显示已归档需求',
+  action,
+  filters,
   includeArchived,
   onIncludeArchivedChange,
   archiveDisabled,
@@ -12,8 +16,12 @@ export function RequirementDirectory({
   searchPlaceholder,
   children,
 }: {
-  includeArchived: boolean;
-  onIncludeArchivedChange: (value: boolean) => void;
+  title?: string;
+  archiveLabel?: string;
+  action?: ReactNode;
+  filters?: ReactNode;
+  includeArchived?: boolean;
+  onIncludeArchivedChange?: (value: boolean) => void;
   archiveDisabled?: boolean;
   search: string;
   onSearchChange: (value: string) => void;
@@ -21,55 +29,34 @@ export function RequirementDirectory({
   children: ReactNode;
 }) {
   return (
-    <aside className="asset-tree requirement-directory" aria-label="需求目录">
+    <aside className="asset-tree requirement-directory" aria-label={title}>
       <div className="requirement-directory-header">
         <div className="requirement-directory-heading">
-          <h2>需求目录</h2>
-          <FilterToggle
-            label="显示已归档需求"
-            checked={includeArchived}
-            onChange={onIncludeArchivedChange}
-            disabled={archiveDisabled ?? false}
-          />
+          <h2>{title}</h2>
+          {action}
         </div>
         <Input
           allowClear
-          aria-label="搜索需求目录"
+          aria-label={`搜索${title}`}
           placeholder={searchPlaceholder}
           value={search}
           onChange={(event) => onSearchChange(event.target.value)}
         />
+        {(onIncludeArchivedChange || filters) && (
+          <div className="requirement-directory-filters">
+            {onIncludeArchivedChange && (
+              <FilterToggle
+                label={archiveLabel}
+                checked={includeArchived ?? false}
+                onChange={onIncludeArchivedChange}
+                disabled={archiveDisabled ?? false}
+              />
+            )}
+            {filters}
+          </div>
+        )}
       </div>
       <div className="requirement-directory-content">{children}</div>
     </aside>
-  );
-}
-
-export function RequirementDirectoryLabel({
-  title,
-  count,
-  archived,
-  detail,
-}: {
-  title: string;
-  count?: ReactNode;
-  archived?: boolean;
-  detail?: string;
-}) {
-  return (
-    <span className="requirement-directory-label">
-      <span className="requirement-directory-title">
-        {title}
-        {archived && (
-          <span className="requirement-directory-archived">已归档</span>
-        )}
-        {detail && (
-          <span className="requirement-directory-detail">{detail}</span>
-        )}
-      </span>
-      {count !== undefined && (
-        <span className="requirement-directory-count">{count}</span>
-      )}
-    </span>
   );
 }

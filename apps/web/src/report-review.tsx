@@ -86,7 +86,7 @@ function retestContext(
   })}`;
   const factsLines = [
     `复核用例：${item.scopeItem.content.title}`,
-    `场景：${item.scopeItem.scenario.title}`,
+    `场景：${item.scopeItem.scenario?.title ?? '独立单接口用例'}`,
     `冻结需求版本：${item.scopeItem.requirementVersionId ?? '未绑定'}`,
     `用例：${item.scopeItem.caseId ?? '未绑定正式用例'}`,
     `执行：${facts.runId} · 环境 ${facts.scope.environmentId} · 构建 ${facts.scope.productBuild ?? '未记录'}`,

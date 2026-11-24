@@ -161,6 +161,8 @@ export function redactResponse(
   values: readonly string[],
 ): SafeResponse {
   const headers: Record<string, string> = {};
+  const { rawBody, cookieSummary, ...base } = response;
+  const bodyProtection = redactWithPaths(response.body, values);
   const safeHeaders = redact(response.headers, values);
   if (
     safeHeaders !== null &&
@@ -170,12 +172,48 @@ export function redactResponse(
     for (const [name, value] of Object.entries(safeHeaders))
       headers[name] = String(value);
   return {
-    ...response,
+    ...base,
     headers,
-    body: redact(response.body, values),
+    body: bodyProtection.value,
+    ...(rawBody !== undefined &&
+    !bodyProtection.protectedPaths.length &&
+    mayRetainRawBody(rawBody, response.body, values)
+      ? { rawBody }
+      : {}),
+    ...(cookieSummary
+      ? {
+          cookieSummary: cookieSummary.filter(
+            (cookie) => redact(cookie.name, values) === cookie.name,
+          ),
+        }
+      : {}),
     errorCode:
       response.errorCode === null
         ? null
         : String(redact(response.errorCode, values)),
   };
+}
+
+function mayRetainRawBody(
+  raw: string,
+  body: unknown,
+  values: readonly string[],
+) {
+  if (redact(raw, values) !== raw) return false;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (JSON.stringify(parsed) !== JSON.stringify(body)) return false;
+    for (const token of raw.matchAll(/"(?:[^"\\]|\\.)*"/gs)) {
+      const value: unknown = JSON.parse(token[0]);
+      if (
+        typeof value !== 'string' ||
+        isSensitiveName(value) ||
+        redact(value, values) !== value
+      )
+        return false;
+    }
+    return true;
+  } catch {
+    return typeof body === 'string' && raw === body;
+  }
 }

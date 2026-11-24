@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Button,
+  Checkbox,
   Form,
   Input,
   Modal,
+  Select,
   Space,
-  Tag,
   Typography,
 } from 'antd';
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
@@ -15,17 +16,21 @@ import {
   assetReceiptSchema,
   assetOperationStatusSchema,
   assetReceiptOperationSchema,
-  createScenarioInputSchema,
+  createScopedCaseInputSchema,
+  createScopedSceneInputSchema,
   reviseAssetInputSchema,
+  uiSceneFieldsSchema,
 } from '../../../packages/contracts/src/assets';
-import type {
-  Asset,
-  AssetTargetType,
-} from '../../../packages/contracts/src/assets';
-import { basisRefSchema } from '../../../packages/contracts/src/domain';
+import type { Asset } from '../../../packages/contracts/src/assets';
+import {
+  basisRefSchema,
+  uiCaseContentSchema,
+} from '../../../packages/contracts/src/domain';
+import type { CoverageCheckpoint } from '../../../packages/contracts/src/coverage-checkpoints';
 import { api, isUncertainMutationError, describeError } from './api';
 import { idSchema } from '../../../packages/contracts/src/base';
 import { uiLayers } from './ui-layers';
+import { requirementMaterialsHref } from './requirement-basis';
 import {
   UiAssertionFields,
   uiAssertionContent,
@@ -33,16 +38,18 @@ import {
 } from './ui-assertion-fields';
 
 export type AssetEditorTarget = {
-  targetType: AssetTargetType;
+  targetType: 'scenario' | 'case';
+  requirementId: string;
   requirementVersionId: string;
-  setId: string | null;
-  scenarioId: string | null;
-} & (
-  | { kind: 'UI'; asset: Asset }
-  | { kind: 'API'; asset: null; targetType: 'scenario' }
-);
+  requirementTitle: string;
+  asset?: Asset;
+  scenarioId?: string;
+  scenarios?: Asset[];
+  checkpoint?: CoverageCheckpoint;
+};
 type Basis = z.infer<typeof basisRefSchema>;
 interface Fields {
+  scenarioId?: string;
   title: string;
   objective: string;
   preconditions: string;
@@ -63,6 +70,25 @@ const caseCommon = (values: Fields, basis: Basis[]) => ({
   expected: values.expected,
   basisRefs: basis,
 });
+const caseAuthoredFields = uiCaseContentSchema.omit({ scenarioId: true });
+const writeOperation = (target: AssetEditorTarget) =>
+  target.asset
+    ? 'assets.revise'
+    : target.targetType === 'scenario'
+      ? 'assets.create-scoped-scene'
+      : 'assets.create-scoped-case';
+const basisKinds: Record<Basis['kind'], string> = {
+  material: '资料',
+  knowledge: '知识',
+  rule: '规则',
+  explicitStatement: '人工说明',
+};
+const readabilityLabels: Record<Basis['readability'], string> = {
+  readable: '已读',
+  partial: '部分可读',
+  unreadable: '不可读',
+  notChecked: '待核对',
+};
 export const targetTypeLabels = {
   set: '测试集/生成批次',
   scenario: '场景',
@@ -84,6 +110,7 @@ export function AssetEditor({
 }) {
   const [form] = Form.useForm<Fields>();
   const [basis, setBasis] = useState<Basis[]>([]);
+  const [adoptCurrentBasis, setAdoptCurrentBasis] = useState(false);
   const [pending, setPending] = useState(false);
   const [uncertain, setUncertain] = useState(false);
   const [recovering, setRecovering] = useState(false);
@@ -102,9 +129,7 @@ export function AssetEditor({
     if (!target) return;
     generation.current += 1;
     commandId.current = crypto.randomUUID();
-    pendingOperation.current = target.asset
-      ? 'assets.revise'
-      : 'assets.create-scenario';
+    pendingOperation.current = writeOperation(target);
     busy.current = false;
     setUncertain(false);
     setRecovering(false);
@@ -137,7 +162,8 @@ export function AssetEditor({
     setDiscardOpen(false);
     const content = target.asset?.content;
     form.setFieldsValue({
-      title: content?.title ?? '',
+      ...(target.scenarioId && { scenarioId: target.scenarioId }),
+      title: content?.title ?? target.checkpoint?.title ?? '',
       objective: content && 'objective' in content ? content.objective : '',
       preconditions:
         content && 'sharedPreconditions' in content
@@ -146,7 +172,10 @@ export function AssetEditor({
             ? content.preconditions.join('\n')
             : '',
       expected: content && 'expected' in content ? content.expected : '',
-      testPoint: content && 'testPoint' in content ? content.testPoint : '',
+      testPoint:
+        content && 'testPoint' in content
+          ? content.testPoint
+          : (target.checkpoint?.title ?? ''),
       assertions:
         content && 'assertions' in content && content.kind === 'UI'
           ? (content.assertions ?? [])
@@ -159,7 +188,19 @@ export function AssetEditor({
           ? (content.steps ?? [{ action: '' }])
           : [{ action: '' }],
     });
-    setBasis(content?.basisRefs ?? []);
+    setBasis(
+      content?.basisRefs ??
+        (target.checkpoint
+          ? [
+              {
+                kind: 'explicitStatement',
+                description: target.checkpoint.source,
+                readability: 'notChecked',
+              },
+            ]
+          : []),
+    );
+    setAdoptCurrentBasis(false);
     return () => {
       generation.current += 1;
     };
@@ -169,6 +210,14 @@ export function AssetEditor({
     if (dirty || uncertain) setDiscardOpen(true);
     else onClose();
   }
+  function updateBasis(index: number, patch: Partial<Basis>) {
+    setDirty(true);
+    setBasis((current) =>
+      current.map((entry, offset) =>
+        offset === index ? { ...entry, ...patch } : entry,
+      ),
+    );
+  }
   async function save(values: Fields) {
     if (!target || busy.current || uncertain) return;
     busy.current = true;
@@ -176,47 +225,78 @@ export function AssetEditor({
     setPending(true);
     setError(undefined);
     try {
-      let content: unknown;
-      if (target.targetType === 'set')
-        content = { title: values.title, basisRefs: basis };
-      else if (target.targetType === 'scenario')
-        content = {
-          kind: target.kind,
-          requirementVersionId: target.requirementVersionId,
-          setId: target.setId,
-          title: values.title,
-          objective: values.objective,
-          sharedPreconditions: lines(values.preconditions),
-          basisRefs: basis,
-        };
-      else
-        content = {
-          kind: 'UI',
-          scenarioId: target.scenarioId,
-          ...caseCommon(values, basis),
-          ...uiAssertionContent(values.assertions),
-          steps: values.steps.map(({ action, expected }) => ({
-            action,
-            ...(expected?.trim() ? { expected } : {}),
-          })),
-        };
+      const sceneFields =
+        target.targetType === 'scenario'
+          ? uiSceneFieldsSchema.parse({
+              title: values.title,
+              objective: values.objective,
+              sharedPreconditions: lines(values.preconditions),
+              basisRefs: basis,
+            })
+          : undefined;
+      const caseFields =
+        target.targetType === 'case'
+          ? caseAuthoredFields.parse({
+              kind: 'UI',
+              ...caseCommon(values, basis),
+              ...uiAssertionContent(values.assertions),
+              steps: values.steps.map(({ action, expected }) => ({
+                action,
+                ...(expected?.trim() ? { expected } : {}),
+              })),
+            })
+          : undefined;
       let body: unknown;
       let path: string;
       if (target.asset) {
+        const content = sceneFields
+          ? {
+              ...sceneFields,
+              kind: 'UI',
+              requirementVersionId: target.asset.requirementVersionId,
+              setId: target.asset.setId,
+            }
+          : { ...caseFields, scenarioId: target.asset.parentId };
         body = reviseAssetInputSchema.parse({
           commandId: commandId.current,
           baseRevisionId: target.asset.revisionId,
           rowVersion: target.asset.rowVersion,
           content,
+          ...(adoptCurrentBasis && {
+            basisRequirementVersionId: target.requirementVersionId,
+          }),
         });
         path = `/${target.asset.id}`;
-      } else {
-        body = createScenarioInputSchema.parse({
+      } else if (sceneFields) {
+        body = createScopedSceneInputSchema.parse({
           commandId: commandId.current,
-          setId: target.setId,
-          content,
+          requirementId: target.requirementId,
+          requirementVersionId: target.requirementVersionId,
+          content: sceneFields,
         });
-        path = '/scenarios';
+        path = '/scoped-scenes';
+      } else {
+        const scenarioId = target.scenarioId ?? values.scenarioId;
+        if (
+          !scenarioId ||
+          !target.scenarios?.some((item) => item.id === scenarioId)
+        )
+          throw Error('请选择有效的目标场景。');
+        body = createScopedCaseInputSchema.parse({
+          commandId: commandId.current,
+          kind: 'UI',
+          requirementId: target.requirementId,
+          requirementVersionId: target.requirementVersionId,
+          scenario: { scenarioId },
+          content: caseFields,
+          ...(target.checkpoint && {
+            checkpoint: {
+              id: target.checkpoint.id,
+              rowVersion: target.checkpoint.rowVersion,
+            },
+          }),
+        });
+        path = '/scoped-cases';
       }
       const response = await api(
         `/projects/${projectId}/assets${path}`,
@@ -285,20 +365,22 @@ export function AssetEditor({
           /* The acknowledged ID remains visible in this modal. */
         }
         if (
-          receipt.response.asset.kind !== target?.kind ||
-          receipt.response.asset.requirementVersionId !==
-            target.requirementVersionId
+          !target ||
+          receipt.response.asset.kind !== 'UI' ||
+          receipt.response.asset.targetType !== target.targetType ||
+          (target.asset
+            ? receipt.response.asset.id !== target.asset.id
+            : receipt.response.asset.requirementBasis?.requirementId !==
+              target.requirementId)
         ) {
           setUncertain(false);
           setKnownFailed(false);
           setError(undefined);
           setReceiptStatus(
-            `原 ${receipt.response.asset.kind} 写入已完成：「${receipt.response.asset.title}」（${receipt.response.asset.id}），属于另一类型或需求版本；请到对应范围查看。本窗口内容尚未保存。`,
+            `原写入已完成：「${receipt.response.asset.title}」（${receipt.response.asset.id}），属于其他资产。请到对应范围查看，本窗口内容尚未保存。`,
           );
           commandId.current = crypto.randomUUID();
-          pendingOperation.current = target?.asset
-            ? 'assets.revise'
-            : 'assets.create-scenario';
+          if (target) pendingOperation.current = writeOperation(target);
           return;
         }
         setUncertain(false);
@@ -328,7 +410,7 @@ export function AssetEditor({
         zIndex={uiLayers.dialog}
         title={
           target
-            ? `${target.asset ? '保存新修订' : '新建'} · ${target.kind} ${targetTypeLabels[target.targetType]}`
+            ? `${target.asset ? '编辑' : '新增'}${targetTypeLabels[target.targetType]}`
             : '资产编辑'
         }
         width={850}
@@ -347,16 +429,20 @@ export function AssetEditor({
               disabled={uncertain}
               onClick={() => form.submit()}
             >
-              保存为待确认内容
+              {target?.targetType === 'scenario'
+                ? '保存场景'
+                : '保存待评审用例'}
             </Button>
           </Space>
         }
         destroyOnHidden
       >
         <Typography.Paragraph type="secondary">
-          保存时建立待确认内容，旧修订及已审快照继续可查。UI
-          用例步骤使用业务语言。
+          {target?.targetType === 'scenario'
+            ? '场景建立后可以继续新增、导入或生成用例。'
+            : '用例保存后进入待评审，步骤按实际业务操作填写。'}
         </Typography.Paragraph>
+        {target && <p className="caption">{target.requirementTitle}</p>}
         {target?.asset && (
           <Alert
             type="info"
@@ -380,9 +466,26 @@ export function AssetEditor({
           onValuesChange={() => setDirty(true)}
           onFinish={(values: Fields) => void save(values)}
         >
+          {target?.targetType === 'case' && !target.asset && (
+            <Form.Item
+              name="scenarioId"
+              label="所属场景"
+              rules={[{ required: true, message: '请选择目标场景' }]}
+            >
+              <Select
+                showSearch
+                optionFilterProp="label"
+                disabled={pending || uncertain || Boolean(target.scenarioId)}
+                options={(target.scenarios ?? []).map((scene) => ({
+                  value: scene.id,
+                  label: scene.title,
+                }))}
+              />
+            </Form.Item>
+          )}
           <Form.Item
             name="title"
-            label="标题"
+            label={target?.targetType === 'scenario' ? '场景名称' : '用例名称'}
             rules={[
               {
                 required: true,
@@ -435,7 +538,7 @@ export function AssetEditor({
               />
             </Form.Item>
           )}
-          {target?.targetType !== 'set' && (
+          {target && (
             <Form.Item
               name="preconditions"
               label={
@@ -447,7 +550,7 @@ export function AssetEditor({
               <Input.TextArea rows={3} disabled={pending || uncertain} />
             </Form.Item>
           )}
-          {target?.targetType === 'case' && target.kind === 'UI' && (
+          {target?.targetType === 'case' && (
             <Form.List
               name="steps"
               rules={[
@@ -555,40 +658,69 @@ export function AssetEditor({
             </Form.Item>
           )}
         </Form>
-        <Typography.Title level={5}>依据</Typography.Title>
+        <Typography.Title level={5}>资料依据</Typography.Title>
         <Space direction="vertical" style={{ width: '100%' }}>
           {basis.map((item, index) => (
-            <Space.Compact block key={index}>
-              <Tag>{item.kind}</Tag>
+            <div className="panel pad" key={index}>
+              <Space wrap className="mb">
+                <Select
+                  aria-label={`依据类型 ${index + 1}`}
+                  value={item.kind}
+                  disabled={pending || uncertain || Boolean(item.objectId)}
+                  options={Object.entries(basisKinds).map(([value, label]) => ({
+                    value,
+                    label,
+                  }))}
+                  onChange={(kind: Basis['kind']) =>
+                    updateBasis(index, { kind })
+                  }
+                />
+                <Select
+                  aria-label={`可读状态 ${index + 1}`}
+                  value={item.readability}
+                  disabled={pending || uncertain}
+                  options={Object.entries(readabilityLabels).map(
+                    ([value, label]) => ({ value, label }),
+                  )}
+                  onChange={(readability: Basis['readability']) =>
+                    updateBasis(index, { readability })
+                  }
+                />
+                <Button
+                  aria-label={`移除依据 ${index + 1}`}
+                  danger
+                  icon={<DeleteOutlined />}
+                  disabled={pending || uncertain}
+                  onClick={() => {
+                    setDirty(true);
+                    setBasis((current) =>
+                      current.filter((_, at) => at !== index),
+                    );
+                  }}
+                />
+              </Space>
               <Input
                 aria-label={`依据说明 ${index + 1}`}
-                placeholder="依据说明；不假称已读取资料"
+                placeholder="填写依据名称或具体说明"
                 value={item.description}
+                maxLength={4000}
                 disabled={pending || uncertain}
-                onChange={(event) => {
-                  setDirty(true);
-                  setBasis((current) =>
-                    current.map((entry, at) =>
-                      at === index
-                        ? { ...entry, description: event.target.value }
-                        : entry,
-                    ),
-                  );
-                }}
+                onChange={(event) =>
+                  updateBasis(index, { description: event.target.value })
+                }
               />
-              <Button
-                aria-label={`移除依据 ${index + 1}`}
-                danger
-                icon={<DeleteOutlined />}
+              <Input
+                className="mt"
+                aria-label={`依据定位 ${index + 1}`}
+                placeholder="章节、页码或其他定位（可选）"
+                value={item.locator ?? ''}
+                maxLength={2000}
                 disabled={pending || uncertain}
-                onClick={() => {
-                  setDirty(true);
-                  setBasis((current) =>
-                    current.filter((_, at) => at !== index),
-                  );
-                }}
+                onChange={(event) =>
+                  updateBasis(index, { locator: event.target.value })
+                }
               />
-            </Space.Compact>
+            </div>
           ))}
           <Button
             icon={<PlusOutlined />}
@@ -605,9 +737,29 @@ export function AssetEditor({
               ]);
             }}
           >
-            添加明确依据说明
+            添加资料依据
           </Button>
         </Space>
+        {target?.asset?.requirementBasis?.warning && (
+          <Space wrap className="mt">
+            <Checkbox
+              checked={adoptCurrentBasis}
+              disabled={pending || uncertain}
+              onChange={(event) => {
+                setDirty(true);
+                setAdoptCurrentBasis(event.target.checked);
+              }}
+            >
+              已阅读并按当前需求资料修订
+            </Checkbox>
+            <Button
+              size="small"
+              href={requirementMaterialsHref(projectId, target.requirementId)}
+            >
+              查看当前资料
+            </Button>
+          </Space>
+        )}
         {uncertain && (
           <Alert
             className="section-alert"
@@ -629,9 +781,8 @@ export function AssetEditor({
                         localStorage.removeItem(recoveryKey);
                       } catch {}
                       commandId.current = crypto.randomUUID();
-                      pendingOperation.current = target?.asset
-                        ? 'assets.revise'
-                        : 'assets.create-scenario';
+                      if (target)
+                        pendingOperation.current = writeOperation(target);
                       setUncertain(false);
                       setKnownFailed(false);
                       setError(undefined);

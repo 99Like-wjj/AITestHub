@@ -21,7 +21,7 @@ import type {
   Database,
   SqlExecutor,
 } from '../../../persistence/src/database.js';
-import { requireProject } from '../access/policy.js';
+import { requireProject, requireProjectDraftWrite } from '../access/policy.js';
 import { DomainError, stale } from '../errors.js';
 import { audit } from '../events.js';
 import { OperationService } from '../operations/service.js';
@@ -29,6 +29,7 @@ import { rejectMissingAcceptedReceipt } from '../recovery/receipts.js';
 import { RequirementDeletionService } from './deletion.js';
 import { prepareRequirementVersion } from './preparation.js';
 import { matchRequirementMaterials } from './material-matching.js';
+import { currentRequirementMaterialHead } from './material-lock.js';
 import { sanitizeSourceLinkFields } from '../../../contracts/src/source-links.js';
 import { assertSubmissionFileBudget } from '../files/submission-budget.js';
 import {
@@ -49,6 +50,11 @@ interface RequirementRow {
   archived_at: Date | null;
   business_updated_at: Date;
   row_version: number;
+  material_lock_version_id: string | null;
+  material_locked_at: Date | null;
+  material_locked_by: string | null;
+  predecessor_requirement_id: string | null;
+  predecessor_version_id: string | null;
 }
 interface VersionRow {
   id: string;
@@ -269,8 +275,54 @@ export class RequirementService {
          JOIN app.users u ON u.id=rp.user_id WHERE rp.requirement_id=$1 AND rp.active AND m.active AND u.active ORDER BY u.account`,
         [id],
       );
+      const current = versions.rows[0];
+      if (!current)
+        throw new DomainError('NOT_FOUND', '此需求没有可用资料。', 404);
+      const locked = versions.rows.find(
+        (version) => version.id === requirement.material_lock_version_id,
+      );
+      const lineage = await tx.query<{
+        requirementId: string;
+        title: string;
+        businessNumber: string | null;
+        prior: boolean;
+      }>(
+        `SELECT id "requirementId",title,business_number "businessNumber",
+           id IS NOT DISTINCT FROM $3::uuid prior
+         FROM app.requirements
+         WHERE project_id=$1 AND (id=$3 OR predecessor_requirement_id=$2)
+         ORDER BY created_at,id`,
+        [projectId, id, requirement.predecessor_requirement_id],
+      );
+      const predecessor = lineage.rows.find((entry) => entry.prior);
       return {
         requirement: requirementDto(requirement),
+        currentVersion: versionDto(current),
+        materialLock:
+          locked && requirement.material_locked_at
+            ? {
+                versionId: locked.id,
+                versionNo: locked.version_no,
+                lockedAt: requirement.material_locked_at.toISOString(),
+                lockedBy: requirement.material_locked_by,
+              }
+            : null,
+        predecessor:
+          predecessor && requirement.predecessor_version_id
+            ? {
+                requirementId: predecessor.requirementId,
+                title: predecessor.title,
+                businessNumber: predecessor.businessNumber,
+                versionId: requirement.predecessor_version_id,
+              }
+            : null,
+        successors: lineage.rows
+          .filter((entry) => !entry.prior)
+          .map(({ requirementId, title, businessNumber }) => ({
+            requirementId,
+            title,
+            businessNumber,
+          })),
         versions: versions.rows.map(versionDto),
         participants: participants.rows.map((u) => ({
           id: u.id,
@@ -278,6 +330,37 @@ export class RequirementService {
           displayName: u.display_name,
         })),
       };
+    });
+  }
+
+  async manifest(
+    actor: ActorContext,
+    projectId: string,
+    id: string,
+    versionId?: string,
+  ) {
+    const detail = await this.detail(actor, projectId, id);
+    const version = versionId
+      ? detail.versions.find((entry) => entry.id === versionId)
+      : detail.currentVersion;
+    if (!version)
+      throw new DomainError('NOT_FOUND', '此需求内没有该材料修订。', 404);
+    return {
+      versions: [version],
+      currentVersion: detail.currentVersion,
+      materialLock: detail.materialLock,
+    };
+  }
+
+  async history(actor: ActorContext, projectId: string, id: string) {
+    return this.db.transaction(async (tx) => {
+      await requireProject(tx, actor, projectId, 'project.read');
+      await this.get(tx, projectId, id);
+      const versions = await tx.query<VersionRow>(
+        'SELECT * FROM app.requirement_versions WHERE project_id=$1 AND requirement_id=$2 ORDER BY version_no DESC',
+        [projectId, id],
+      );
+      return { versions: versions.rows.map(versionDto) };
     });
   }
 
@@ -363,7 +446,12 @@ export class RequirementService {
       input.submissionId,
       input,
       async (tx) => {
-        await requireProject(tx, actor, input.projectId, 'requirements.write');
+        await requireProjectDraftWrite(
+          tx,
+          actor,
+          input.projectId,
+          'requirements.write',
+        );
       },
       async (tx) => {
         const policy = await this.policies.accept(tx, {
@@ -375,10 +463,31 @@ export class RequirementService {
           existing: false,
         });
         await this.numberAvailable(tx, input.projectId, input.businessNumber);
+        const predecessor = input.predecessorRequirementId
+          ? await this.get(tx, input.projectId, input.predecessorRequirementId)
+          : null;
+        const predecessorVersionId = predecessor
+          ? (predecessor.material_lock_version_id ??
+            (
+              await currentRequirementMaterialHead(
+                tx,
+                input.projectId,
+                predecessor.id,
+              )
+            ).id)
+          : null;
         const row = (
           await tx.query<RequirementRow>(
-            `INSERT INTO app.requirements(project_id,business_number,title,created_by) VALUES($1,$2,$3,$4) RETURNING *`,
-            [input.projectId, input.businessNumber, input.title, actor.userId],
+            `INSERT INTO app.requirements(project_id,business_number,title,created_by,predecessor_requirement_id,predecessor_version_id)
+             VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,
+            [
+              input.projectId,
+              input.businessNumber,
+              input.title,
+              actor.userId,
+              predecessor?.id ?? null,
+              predecessorVersionId,
+            ],
           )
         ).rows[0];
         if (!row) throw new Error('Requirement insert returned no row');
@@ -419,11 +528,41 @@ export class RequirementService {
       input.submissionId,
       { projectId, id, ...input },
       async (tx) => {
-        await requireProject(tx, actor, projectId, 'requirements.write');
+        await requireProjectDraftWrite(
+          tx,
+          actor,
+          projectId,
+          'requirements.write',
+        );
       },
       async (tx) => {
         const requirement = await this.get(tx, projectId, id, true);
-        if (requirement.row_version !== input.rowVersion) stale();
+        if (requirement.material_lock_version_id)
+          throw new DomainError(
+            'BUSINESS_CONFLICT',
+            '需求资料已锁定，请新建后续需求以维护新内容。',
+            409,
+            { lockedVersionId: requirement.material_lock_version_id },
+          );
+        if (requirement.archived_at)
+          throw new DomainError(
+            'PRECONDITIONS_MISSING',
+            '请先恢复已归档需求再编辑资料。',
+            422,
+          );
+        const latest = await currentRequirementMaterialHead(tx, projectId, id);
+        if (
+          input.baseVersionId !== undefined
+            ? input.baseVersionId !== latest.id
+            : requirement.row_version !== input.rowVersion
+        )
+          stale();
+        const businessNumber =
+          input.businessNumber === undefined
+            ? requirement.business_number
+            : input.businessNumber;
+        if (businessNumber !== requirement.business_number)
+          await this.numberAvailable(tx, projectId, businessNumber);
         const policy = await this.policies.accept(tx, {
           ownerId: actor.userId,
           projectId,
@@ -432,32 +571,29 @@ export class RequirementService {
           payloadDigest: fileIntentDigest({ projectId, id, ...input }),
           existing: false,
         });
-        const latest = (
-          await tx.query<{ no: number }>(
-            'SELECT max(version_no)::integer no FROM app.requirement_versions WHERE requirement_id=$1',
-            [id],
-          )
-        ).rows[0];
         const version = await this.insertVersion(
           tx,
           actor,
           requirement,
-          (latest?.no ?? 0) + 1,
+          latest.version_no + 1,
           input.summary,
           input.materials,
           policy,
         );
         const row = (
           await tx.query<RequirementRow>(
-            'UPDATE app.requirements SET row_version=row_version+1,business_updated_at=clock_timestamp() WHERE id=$1 RETURNING *',
-            [id],
+            'UPDATE app.requirements SET title=$2,business_number=$3,row_version=row_version+1,business_updated_at=clock_timestamp() WHERE id=$1 RETURNING *',
+            [id, input.title ?? requirement.title, businessNumber],
           )
         ).rows[0];
         if (!row) throw new Error('Requirement update returned no row');
         await audit(tx, actor, 'requirement.version-created', id, projectId, {
           versionId: version.id,
         });
-        return { requirement: requirementDto(row), version };
+        const changed = requirementDto(row);
+        if (row.title !== requirement.title)
+          await this.admitName?.(tx, actor, changed, version);
+        return { requirement: changed, version };
       },
       projectId,
     );

@@ -19,16 +19,17 @@ import {
   EyeOutlined,
   PlusOutlined,
   ReloadOutlined,
-  SearchOutlined,
 } from '@ant-design/icons';
 import { z } from 'zod';
 import { idSchema } from '../../../packages/contracts/src/base';
+import { assetNavigationSchema } from '../../../packages/contracts/src/assets';
 import {
   materialSchema,
   requirementLifecycleSchema,
 } from '../../../packages/contracts/src/domain';
 import {
   requirementDetailSchema,
+  requirementHistorySchema,
   requirementPageSchema,
   requirementPageQuerySchema,
   requirementMutationReceiptSchema,
@@ -56,6 +57,9 @@ import {
 import { PageHeading } from './page-heading';
 import { BeijingTime, formatBeijingTime } from './beijing-time';
 import { StatusTag } from './semantic-status';
+import { canEditProjectRequirements } from './project-access';
+import { RequirementDirectory } from './requirement-directory';
+import { ExplorerTree, type ExplorerNode } from './explorer-tree';
 import {
   ResultFilters,
   ResultListState,
@@ -86,6 +90,7 @@ export interface CaseScope {
   title: string;
   versionNo: number;
   kind: 'UI' | 'API';
+  historical?: boolean;
 }
 const statusLabel = (requirement: {
   lifecycle: Lifecycle;
@@ -136,6 +141,10 @@ export function RequirementsPage({
 }) {
   const { message } = App.useApp();
   const [requirements, setRequirements] = useState<RequirementListItem[]>([]);
+  const [directory, setDirectory] = useState<
+    z.infer<typeof assetNavigationSchema>['requirements']
+  >([]);
+  const [directoryError, setDirectoryError] = useState<string>();
   const [search, setSearch] = useState('');
   const [appliedSearch, setAppliedSearch] = useState('');
   const [participation, setParticipation] = useState<'all' | 'mine'>('all');
@@ -152,15 +161,16 @@ export function RequirementsPage({
   const [detail, setDetail] = useState<RequirementDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string>();
-  const [versionId, setVersionId] = useState<string>();
-  const requestedVersion = useRef<{
-    requirementId: string;
-    versionId: string;
-  } | null>(null);
+  const [historicalVersionId, setHistoricalVersionId] = useState<string>();
+  const [historicalMaterials, setHistoricalMaterials] =
+    useState<RequirementDetail['currentVersion']>();
   const [preview, setPreview] = useState<Material | null>(null);
   const [composerOpen, setComposerOpen] = useState(false);
-  const [composerRequirement, setComposerRequirement] =
-    useState<Requirement | null>(null);
+  const [composerRequirement, setComposerRequirement] = useState<{
+    requirement: Requirement;
+    currentVersion: RequirementDetail['currentVersion'];
+    mode: 'replace' | 'successor';
+  }>();
   const [members, setMembers] = useState<EligibleParticipant[]>([]);
   const [collaborationBase, setCollaborationBase] = useState<{
     id: string;
@@ -189,6 +199,7 @@ export function RequirementsPage({
   const listEpoch = useRef(0);
   const detailEpoch = useRef(0);
   const tester = project?.roles.includes('tester') ?? false;
+  const canEdit = canEditProjectRequirements(project);
   const pendingDeletions = usePendingRequirementDeletions(
     me.user.id,
     project?.id,
@@ -209,9 +220,9 @@ export function RequirementsPage({
     composerOpen ||
     Boolean(pendingDeletions.error);
   useEffect(() => setDeletionTarget(null), [me.user.id, project?.id, tester]);
-  const selectedVersion =
-    detail?.versions.find((version) => version.id === versionId) ??
-    detail?.versions[0];
+  const selectedVersion = historicalVersionId
+    ? historicalMaterials
+    : detail?.currentVersion;
 
   async function load(signal?: AbortSignal) {
     const epoch = ++listEpoch.current;
@@ -252,7 +263,7 @@ export function RequirementsPage({
   }
   async function loadDetail(
     id: string,
-    selectedVersionId?: string,
+    pinnedVersionId = historicalVersionId,
     signal?: AbortSignal,
   ) {
     const epoch = ++detailEpoch.current;
@@ -260,33 +271,41 @@ export function RequirementsPage({
     setDetailLoading(true);
     setDetailError(undefined);
     try {
-      const [response, eligible] = await Promise.all([
+      const [response, eligible, history] = await Promise.all([
         api(
           `/projects/${project.id}/requirements/${id}`,
           signal ? { signal } : {},
           requirementDetailSchema,
         ),
-        api(
-          `/projects/${project.id}/requirements/eligible-participants`,
-          signal ? { signal } : {},
-          requirementEligibleParticipantsSchema,
-        ),
+        pinnedVersionId
+          ? undefined
+          : api(
+              `/projects/${project.id}/requirements/eligible-participants`,
+              signal ? { signal } : {},
+              requirementEligibleParticipantsSchema,
+            ),
+        pinnedVersionId
+          ? api(
+              `/projects/${project.id}/requirements/${id}/history`,
+              signal ? { signal } : {},
+              requirementHistorySchema,
+            )
+          : undefined,
       ]);
       if (!signal?.aborted && epoch === detailEpoch.current) {
         setDetail(response);
-        setMembers(eligible.users);
+        setMembers(eligible?.users ?? []);
+        const pinned = history?.versions.find(
+          (version) => version.id === pinnedVersionId,
+        );
+        setHistoricalMaterials(pinned);
+        if (pinnedVersionId && !pinned)
+          setDetailError('未找到此链接指向的需求资料快照。');
         if (
           baseRef.current?.id !== id ||
           (!dirtyRef.current && !uncertainRef.current)
         )
           syncCollaboration(response);
-        setVersionId(
-          (current) =>
-            selectedVersionId ??
-            (response.versions.some((version) => version.id === current)
-              ? current
-              : response.versions[0]?.id),
-        );
       }
     } catch (err) {
       if (!signal?.aborted && epoch === detailEpoch.current) {
@@ -300,7 +319,8 @@ export function RequirementsPage({
   }
   useEffect(() => {
     setSelectedId(null);
-    requestedVersion.current = null;
+    setHistoricalVersionId(undefined);
+    setHistoricalMaterials(undefined);
     setDetail(null);
     setPreview(null);
     setComposerOpen(false);
@@ -311,6 +331,26 @@ export function RequirementsPage({
     setLoadedProjectId(null);
     setPage(1);
   }, [project?.id]);
+  useEffect(() => {
+    if (!project) return;
+    const controller = new AbortController();
+    setDirectory([]);
+    setDirectoryError(undefined);
+    void api(
+      `/projects/${project.id}/assets/navigation?kind=UI&includeArchivedRequirements=${archived}`,
+      { signal: controller.signal },
+      assetNavigationSchema,
+    ).then(
+      ({ requirements }) => {
+        if (!controller.signal.aborted) setDirectory(requirements);
+      },
+      (failure: unknown) => {
+        if (!controller.signal.aborted)
+          setDirectoryError(describeError(failure));
+      },
+    );
+    return () => controller.abort();
+  }, [project?.id, archived, requirements]);
   useEffect(() => {
     const timer = setTimeout(() => {
       setAppliedSearch(search.trim());
@@ -339,21 +379,23 @@ export function RequirementsPage({
     }
     const controller = new AbortController();
     setDetail(null);
-    const requested =
-      requestedVersion.current?.requirementId === selectedId
-        ? requestedVersion.current.versionId
-        : undefined;
-    requestedVersion.current = null;
-    setVersionId(requested);
-    void loadDetail(selectedId, requested, controller.signal);
+    setHistoricalMaterials(undefined);
+    void loadDetail(selectedId, historicalVersionId, controller.signal);
     return () => controller.abort();
-  }, [selectedId, project?.id]);
+  }, [selectedId, historicalVersionId, project?.id]);
   useEffect(() => {
     function followLink() {
-      const query = new URLSearchParams(window.location.hash.split('?')[1]);
+      const [page, search] = window.location.hash.split('?');
+      if (page !== '#requirements') return;
+      const query = new URLSearchParams(search);
       if (query.get('projectId') !== project?.id) return;
       const selected = idSchema.safeParse(query.get('requirementId'));
-      if (selected.success) setSelectedId(selected.data);
+      if (selected.success) {
+        setHistoricalVersionId(
+          idSchema.safeParse(query.get('requirementVersionId')).data,
+        );
+        setSelectedId(selected.data);
+      }
     }
     followLink();
     window.addEventListener('hashchange', followLink);
@@ -366,16 +408,21 @@ export function RequirementsPage({
     setStatus('all');
     setPage(1);
   }
-  async function saved(id: string, savedVersionId: string) {
+  function openCurrent(id: string) {
+    const url = new URLSearchParams(window.location.hash.split('?')[1]);
+    if (project && url.has('requirementVersionId')) {
+      url.delete('requirementVersionId');
+      url.set('projectId', project.id);
+      url.set('requirementId', id);
+      window.history.replaceState(null, '', `#requirements?${url}`);
+    }
+    setHistoricalVersionId(undefined);
+    setSelectedId(id);
+  }
+  async function saved(id: string) {
     await load();
-    if (selectedId !== id) {
-      requestedVersion.current = {
-        requirementId: id,
-        versionId: savedVersionId,
-      };
-      setSelectedId(id);
-      setVersionId(savedVersionId);
-    } else await loadDetail(id, savedVersionId);
+    if (selectedId !== id || historicalVersionId) openCurrent(id);
+    else await loadDetail(id);
   }
   async function refreshSelected() {
     await load();
@@ -527,6 +574,7 @@ export function RequirementsPage({
     requirement: Requirement,
     version: { id: string; versionNo: number },
     kind: 'UI' | 'API',
+    historical = false,
   ) {
     onOpenCases({
       projectId: requirement.projectId,
@@ -535,8 +583,20 @@ export function RequirementsPage({
       title: requirement.title,
       versionNo: version.versionNo,
       kind,
+      ...(historical && { historical: true }),
     });
   }
+
+  const requirementsDirectory: ExplorerNode[] = [
+    { id: 'all', title: '全部需求', kind: 'all' },
+    ...directory.map((requirement) => ({
+      id: `requirement:${requirement.id}`,
+      title: requirement.title,
+      kind: 'requirement' as const,
+      archived: requirement.archived,
+      count: `${requirement.caseCount} 条 UI 用例`,
+    })),
+  ];
 
   if (!project)
     return (
@@ -555,16 +615,15 @@ export function RequirementsPage({
       <section className="requirements-page">
         <PageHeading
           title="需求管理"
-          description="集中管理资料版本与协作范围，并进入对应需求的测试资产。"
+          description="维护需求资料与协作范围，并进入需求对应的用例和缺陷。"
           actions={
             <Button
               className="btn primary"
               type="primary"
               icon={<PlusOutlined />}
-              disabled={!tester}
-              title={!tester ? '测试角色可新增需求' : undefined}
+              disabled={!canEdit}
               onClick={() => {
-                setComposerRequirement(null);
+                setComposerRequirement(undefined);
                 setComposerOpen(true);
               }}
             >
@@ -609,228 +668,269 @@ export function RequirementsPage({
           </div>
         )}
 
-        <div className="requirement-filters">
-          <ResultFilters
-            search={{
-              label: '搜索需求名称或编号',
-              value: search,
-              onChange: setSearch,
-              prefix: <SearchOutlined aria-hidden />,
+        <div className="requirement-directory-layout">
+          <RequirementDirectory
+            archiveLabel="查看已归档需求"
+            includeArchived={archived}
+            onIncludeArchivedChange={(value) => {
+              setLoading(true);
+              setStatus(value ? 'archived' : 'all');
+              setPage(1);
             }}
-            onReset={clearResultFilters}
-            summary={
-              loading ? '正在读取' : error ? '读取失败' : `共 ${total} 个需求`
-            }
+            search={search}
+            onSearchChange={setSearch}
+            searchPlaceholder="搜索需求名称"
           >
-            <div className="segmented" role="group" aria-label="需求范围">
-              <button
-                type="button"
-                className={`tab ${participation === 'all' ? 'active' : ''}`}
-                aria-pressed={participation === 'all'}
-                onClick={() => {
-                  if (participation !== 'all' || page !== 1) {
-                    setLoading(true);
-                    setParticipation('all');
-                    setPage(1);
+            {directoryError ? (
+              <Alert type="warning" title={directoryError} showIcon />
+            ) : (
+              <ExplorerTree
+                label="需求目录"
+                nodes={requirementsDirectory}
+                search={search}
+                storageKey={`explorer:requirements:${me.user.id}:${project.id}`}
+                selected={selectedId ? `requirement:${selectedId}` : 'all'}
+                onSelect={(key) => {
+                  if (key === 'all') {
+                    setSelectedId(null);
+                    setHistoricalVersionId(undefined);
+                    return;
                   }
+                  if (key.startsWith('requirement:'))
+                    openCurrent(key.slice(12));
                 }}
+              />
+            )}
+          </RequirementDirectory>
+          <div className="explorer-workspace-main">
+            <div className="requirement-filters">
+              <ResultFilters
+                onReset={clearResultFilters}
+                summary={
+                  loading
+                    ? '正在读取'
+                    : error
+                      ? '读取失败'
+                      : `共 ${total} 个需求`
+                }
               >
-                全部需求
-              </button>
-              <button
-                type="button"
-                className={`tab ${participation === 'mine' ? 'active' : ''}`}
-                aria-pressed={participation === 'mine'}
-                onClick={() => {
-                  if (participation !== 'mine' || page !== 1) {
+                <div className="segmented" role="group" aria-label="需求范围">
+                  <button
+                    type="button"
+                    className={`tab ${participation === 'all' ? 'active' : ''}`}
+                    aria-pressed={participation === 'all'}
+                    onClick={() => {
+                      if (participation !== 'all' || page !== 1) {
+                        setLoading(true);
+                        setParticipation('all');
+                        setPage(1);
+                      }
+                    }}
+                  >
+                    全部需求
+                  </button>
+                  <button
+                    type="button"
+                    className={`tab ${participation === 'mine' ? 'active' : ''}`}
+                    aria-pressed={participation === 'mine'}
+                    onClick={() => {
+                      if (participation !== 'mine' || page !== 1) {
+                        setLoading(true);
+                        setParticipation('mine');
+                        setPage(1);
+                      }
+                    }}
+                  >
+                    我参与的
+                  </button>
+                </div>
+                <Select
+                  aria-label="需求状态"
+                  value={status}
+                  onChange={(value: typeof status) => {
+                    if (value === status) return;
                     setLoading(true);
-                    setParticipation('mine');
+                    setStatus(value);
                     setPage(1);
-                  }
-                }}
-              >
-                我参与的
-              </button>
+                  }}
+                  options={[
+                    { value: 'all', label: '当前需求' },
+                    { value: 'inProgress', label: '进行中' },
+                    { value: 'inactive', label: '长期未活跃' },
+                    { value: 'archived', label: '已归档' },
+                  ]}
+                />
+              </ResultFilters>
             </div>
-            <Select
-              aria-label="需求状态"
-              value={status}
-              onChange={(value: typeof status) => {
-                if (value === status) return;
-                setLoading(true);
-                setStatus(value);
-                setPage(1);
-              }}
-              options={[
-                { value: 'all', label: '当前需求' },
-                { value: 'inProgress', label: '进行中' },
-                { value: 'inactive', label: '长期未活跃' },
-                { value: 'archived', label: '已归档' },
-              ]}
-            />
-          </ResultFilters>
-        </div>
-        <div className="card tablewrap requirement-list-card">
-          <table aria-label="需求列表" aria-busy={loading}>
-            <thead>
-              <tr>
-                <th scope="col">需求 / 最新版本</th>
-                <th scope="col">状态</th>
-                <th scope="col">参与人</th>
-                <th scope="col">最近业务更新</th>
-                <th scope="col">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading || (!error && loadedProjectId !== project.id) ? (
-                <tr>
-                  <td colSpan={5}>
-                    <ResultListState state="loading" title="正在读取需求列表" />
-                  </td>
-                </tr>
-              ) : requirements.length ? (
-                requirements.map((item) => (
-                  <tr key={item.id}>
-                    <td className="table-title">
-                      <b>{item.title}</b>
-                      <div className="sub">
-                        {item.businessNumber ?? `ID ${item.id.slice(0, 8)}`} · V
-                        {item.latestVersionNo}
-                      </div>
-                    </td>
-                    <td>
-                      <StatusTag
-                        tone={
-                          item.lifecycle === 'archived'
-                            ? 'neutral'
-                            : item.inactive
-                              ? 'warning'
-                              : 'success'
-                        }
-                      >
-                        {statusLabel(item)}
-                      </StatusTag>
-                    </td>
-                    <td>
-                      <div className="avatars">
-                        {item.participantPreview.map((person) => (
-                          <span
-                            className="avatar"
-                            key={person.id}
-                            title={`${person.displayName}（${person.account}）`}
-                            aria-label={`${person.displayName}（${person.account}）`}
-                          >
-                            {person.displayName.slice(0, 2) ||
-                              person.account.slice(0, 2)}
-                          </span>
-                        ))}
-                      </div>
-                      <div className="sub">{item.participantCount} 人参与</div>
-                    </td>
-                    <td>
-                      <BeijingTime value={item.businessUpdatedAt} />
-                    </td>
-                    <td>
-                      <div className="row wrap">
-                        <Button
-                          className="btn small"
-                          size="small"
-                          onClick={() => setSelectedId(item.id)}
-                        >
-                          查看需求
-                        </Button>
-                        <Button
-                          className="btn small"
-                          size="small"
-                          onClick={() =>
-                            cases(
-                              item,
-                              {
-                                id: item.latestVersionId,
-                                versionNo: item.latestVersionNo,
-                              },
-                              'UI',
-                            )
-                          }
-                        >
-                          查看用例
-                        </Button>
-                      </div>
-                      <div className="sub">
-                        UI {item.uiCaseCount} · 接口 {item.apiCaseCount}
-                      </div>
-                    </td>
+            <div className="card tablewrap requirement-list-card">
+              <table aria-label="需求列表" aria-busy={loading}>
+                <thead>
+                  <tr>
+                    <th scope="col">需求 / 最新版本</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">参与人</th>
+                    <th scope="col">最近业务更新</th>
+                    <th scope="col">操作</th>
                   </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={5}>
-                    {error ? (
-                      <ResultListState
-                        state="error"
-                        title="需求列表读取失败"
-                        description={error}
-                        action={
-                          <Button onClick={() => void load()}>重新读取</Button>
-                        }
-                      />
-                    ) : appliedSearch || status !== 'all' ? (
-                      <ResultListState
-                        state="no-match"
-                        title={
-                          archived
-                            ? '没有匹配的已归档需求'
-                            : '没有符合条件的需求'
-                        }
-                        description="可调整搜索和状态，或清空结果筛选。"
-                        action={
-                          <Button onClick={clearResultFilters}>
-                            清空结果筛选
-                          </Button>
-                        }
-                      />
-                    ) : (
-                      <ResultListState
-                        state="empty"
-                        title={
-                          participation === 'mine'
-                            ? '暂无我参与的需求'
-                            : '此项目暂无当前需求'
-                        }
-                        description={
-                          participation === 'mine'
-                            ? '可切换需求范围查看其他有权限的需求。'
-                            : '新增需求后可维护版本和设计用例。已归档需求可通过状态筛选查看。'
-                        }
-                      />
-                    )}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+                </thead>
+                <tbody>
+                  {loading || (!error && loadedProjectId !== project.id) ? (
+                    <tr>
+                      <td colSpan={5}>
+                        <ResultListState
+                          state="loading"
+                          title="正在读取需求列表"
+                        />
+                      </td>
+                    </tr>
+                  ) : requirements.length ? (
+                    requirements.map((item) => (
+                      <tr key={item.id}>
+                        <td className="table-title">
+                          <b>{item.title}</b>
+                          <div className="sub">
+                            {item.businessNumber ?? `ID ${item.id.slice(0, 8)}`}
+                          </div>
+                        </td>
+                        <td>
+                          <StatusTag
+                            tone={
+                              item.lifecycle === 'archived'
+                                ? 'neutral'
+                                : item.inactive
+                                  ? 'warning'
+                                  : 'success'
+                            }
+                          >
+                            {statusLabel(item)}
+                          </StatusTag>
+                        </td>
+                        <td>
+                          <div className="avatars">
+                            {item.participantPreview.map((person) => (
+                              <span
+                                className="avatar"
+                                key={person.id}
+                                title={`${person.displayName}（${person.account}）`}
+                                aria-label={`${person.displayName}（${person.account}）`}
+                              >
+                                {person.displayName.slice(0, 2) ||
+                                  person.account.slice(0, 2)}
+                              </span>
+                            ))}
+                          </div>
+                          <div className="sub">
+                            {item.participantCount} 人参与
+                          </div>
+                        </td>
+                        <td>
+                          <BeijingTime value={item.businessUpdatedAt} />
+                        </td>
+                        <td>
+                          <div className="row wrap">
+                            <Button
+                              className="btn small"
+                              size="small"
+                              onClick={() => openCurrent(item.id)}
+                            >
+                              查看需求
+                            </Button>
+                            <Button
+                              className="btn small"
+                              size="small"
+                              onClick={() =>
+                                cases(
+                                  item,
+                                  {
+                                    id: item.latestVersionId,
+                                    versionNo: item.latestVersionNo,
+                                  },
+                                  'UI',
+                                )
+                              }
+                            >
+                              查看用例
+                            </Button>
+                          </div>
+                          <div className="sub">
+                            UI {item.uiCaseCount} · 接口 {item.apiCaseCount}
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={5}>
+                        {error ? (
+                          <ResultListState
+                            state="error"
+                            title="需求列表读取失败"
+                            description={error}
+                            action={
+                              <Button onClick={() => void load()}>
+                                重新读取
+                              </Button>
+                            }
+                          />
+                        ) : appliedSearch || status !== 'all' ? (
+                          <ResultListState
+                            state="no-match"
+                            title={
+                              archived
+                                ? '没有匹配的已归档需求'
+                                : '没有符合条件的需求'
+                            }
+                            description="可调整搜索和状态，或清空结果筛选。"
+                            action={
+                              <Button onClick={clearResultFilters}>
+                                清空结果筛选
+                              </Button>
+                            }
+                          />
+                        ) : (
+                          <ResultListState
+                            state="empty"
+                            title={
+                              participation === 'mine'
+                                ? '暂无我参与的需求'
+                                : '此项目暂无当前需求'
+                            }
+                            description={
+                              participation === 'mine'
+                                ? '可切换需求范围查看其他有权限的需求。'
+                                : '新增需求后可上传资料并设计用例。已归档需求可通过状态筛选查看。'
+                            }
+                          />
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            {!error && total > 0 && (
+              <ResultPagination
+                summary={`第 ${page}／${Math.ceil(total / pageSize)} 页 · 共 ${total} 个需求`}
+              >
+                <Pagination
+                  current={page}
+                  pageSize={pageSize}
+                  total={total}
+                  showSizeChanger
+                  pageSizeOptions={[10, 20, 50, 100]}
+                  onChange={(next, size) => {
+                    setLoading(true);
+                    setPage(next);
+                    setPageSize(size);
+                  }}
+                />
+              </ResultPagination>
+            )}
+            <p className="caption mt">
+              长期未活跃仅是静默标记。例行接口回归、查看和参与名单变更不刷新业务活跃时间。
+            </p>
+          </div>
         </div>
-        {!error && total > 0 && (
-          <ResultPagination
-            summary={`第 ${page}／${Math.ceil(total / pageSize)} 页 · 共 ${total} 个需求`}
-          >
-            <Pagination
-              current={page}
-              pageSize={pageSize}
-              total={total}
-              showSizeChanger
-              pageSizeOptions={[10, 20, 50, 100]}
-              onChange={(next, size) => {
-                setLoading(true);
-                setPage(next);
-                setPageSize(size);
-              }}
-            />
-          </ResultPagination>
-        )}
-        <p className="caption mt">
-          长期未活跃仅是静默标记。例行接口回归、查看和参与名单变更不刷新业务活跃时间。
-        </p>
       </section>
       <CommandDialog
         title={
@@ -841,6 +941,7 @@ export function RequirementsPage({
         open={selectedId !== null}
         onClose={() => {
           setSelectedId(null);
+          setHistoricalVersionId(undefined);
           setDetail(null);
           setCollaborationBase(null);
         }}
@@ -854,6 +955,7 @@ export function RequirementsPage({
         allowSave={Boolean(
           detail &&
           detail.requirement.projectId === project.id &&
+          !historicalVersionId &&
           !deletionPendingForSelected &&
           collaborationDirty,
         )}
@@ -869,139 +971,146 @@ export function RequirementsPage({
         )}
         {detail && detail.requirement.projectId === project.id && (
           <>
-            {collaboration.uncertain && (
-              <Button
-                className="btn"
-                onClick={() => void recoverCollaboration()}
-              >
-                核对原保存回执
-              </Button>
+            {!historicalVersionId && (
+              <>
+                {collaboration.uncertain && (
+                  <Button
+                    className="btn"
+                    onClick={() => void recoverCollaboration()}
+                  >
+                    核对原保存回执
+                  </Button>
+                )}
+                {collaborationBase &&
+                  detail.requirement.rowVersion !==
+                    collaborationBase.rowVersion && (
+                    <Alert
+                      type="warning"
+                      className="section-alert"
+                      title="服务器资料已有更新，本地修改已保留"
+                      description={
+                        <>
+                          <p>
+                            服务器：{statusLabel(detail.requirement)}
+                            ；参与人：
+                            {detail.participants
+                              .map((person) => person.displayName)
+                              .join('、') || '无'}
+                            。
+                          </p>
+                          <Space wrap>
+                            <Button
+                              disabled={
+                                collaboration.pending || collaboration.uncertain
+                              }
+                              onClick={() => syncCollaboration(detail)}
+                            >
+                              载入服务器内容
+                            </Button>
+                            <Button
+                              disabled={
+                                collaboration.pending || collaboration.uncertain
+                              }
+                              onClick={() =>
+                                setCollaborationBase({
+                                  id: detail.requirement.id,
+                                  rowVersion: detail.requirement.rowVersion,
+                                  userIds: detail.participants.map(
+                                    (person) => person.id,
+                                  ),
+                                  lifecycle: detail.requirement.lifecycle,
+                                })
+                              }
+                            >
+                              采用当前基准，保留我的修改
+                            </Button>
+                          </Space>
+                        </>
+                      }
+                    />
+                  )}
+                <div className="row wrap mb">
+                  <span
+                    className={`badge ${detail.requirement.lifecycle === 'archived' ? '' : detail.requirement.inactive ? 'amber' : 'green'}`}
+                  >
+                    {statusLabel(detail.requirement)}
+                  </span>
+                  <span className="badge">
+                    {detail.requirement.businessNumber ??
+                      `ID ${detail.requirement.id.slice(0, 8)}`}
+                  </span>
+                  {collaborationDirty && (
+                    <span className="caption">有未保存修改</span>
+                  )}
+                  <span className="grow" />
+                  <Button
+                    className="btn small"
+                    size="small"
+                    icon={<ReloadOutlined />}
+                    disabled={collaboration.pending || mutating}
+                    loading={detailLoading}
+                    onClick={() => {
+                      if (selectedId) void loadDetail(selectedId);
+                    }}
+                  >
+                    刷新详情
+                  </Button>
+                </div>
+                <h3>需求参与人</h3>
+                <p className="caption">
+                  所有项目成员可维护参与名单，不改变项目角色或缺陷分配。
+                </p>
+                <div className="row wrap mt requirement-members">
+                  {members.map((person) => (
+                    <label
+                      className="chip"
+                      key={person.id}
+                      title={person.account}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={draftParticipants.includes(person.id)}
+                        disabled={
+                          collaboration.pending ||
+                          collaboration.uncertain ||
+                          deletionPendingForSelected
+                        }
+                        onChange={(e) =>
+                          setDraftParticipants((current) =>
+                            e.target.checked
+                              ? [...current, person.id]
+                              : current.filter((id) => id !== person.id),
+                          )
+                        }
+                      />
+                      {person.displayName}
+                    </label>
+                  ))}
+                </div>
+              </>
             )}
-            {collaborationBase &&
-              detail.requirement.rowVersion !==
-                collaborationBase.rowVersion && (
-                <Alert
-                  type="warning"
-                  className="section-alert"
-                  title="服务器资料已有更新，本地修改已保留"
-                  description={
-                    <>
-                      <p>
-                        服务器：{statusLabel(detail.requirement)}
-                        ；参与人：
-                        {detail.participants
-                          .map((person) => person.displayName)
-                          .join('、') || '无'}
-                        。
-                      </p>
-                      <Space wrap>
-                        <Button
-                          disabled={
-                            collaboration.pending || collaboration.uncertain
-                          }
-                          onClick={() => syncCollaboration(detail)}
-                        >
-                          载入服务器内容
-                        </Button>
-                        <Button
-                          disabled={
-                            collaboration.pending || collaboration.uncertain
-                          }
-                          onClick={() =>
-                            setCollaborationBase({
-                              id: detail.requirement.id,
-                              rowVersion: detail.requirement.rowVersion,
-                              userIds: detail.participants.map(
-                                (person) => person.id,
-                              ),
-                              lifecycle: detail.requirement.lifecycle,
-                            })
-                          }
-                        >
-                          采用当前基准，保留我的修改
-                        </Button>
-                      </Space>
-                    </>
-                  }
-                />
-              )}
-            <div className="row wrap mb">
-              <span
-                className={`badge ${detail.requirement.lifecycle === 'archived' ? '' : detail.requirement.inactive ? 'amber' : 'green'}`}
-              >
-                {statusLabel(detail.requirement)}
-              </span>
-              <span className="badge">
-                {detail.requirement.businessNumber ??
-                  `ID ${detail.requirement.id.slice(0, 8)}`}
-              </span>
-              {collaborationDirty && (
-                <span className="caption">有未保存修改</span>
-              )}
-              <span className="grow" />
-              <Button
-                className="btn small"
-                size="small"
-                icon={<ReloadOutlined />}
-                disabled={collaboration.pending || mutating}
-                loading={detailLoading}
-                onClick={() => {
-                  if (selectedId) void loadDetail(selectedId);
-                }}
-              >
-                刷新详情
-              </Button>
-            </div>
-            <h3>需求参与人</h3>
-            <p className="caption">
-              所有项目成员可维护参与名单，不改变项目角色或缺陷分配。
-            </p>
-            <div className="row wrap mt requirement-members">
-              {members.map((person) => (
-                <label className="chip" key={person.id} title={person.account}>
-                  <input
-                    type="checkbox"
-                    checked={draftParticipants.includes(person.id)}
-                    disabled={
-                      collaboration.pending ||
-                      collaboration.uncertain ||
-                      deletionPendingForSelected
-                    }
-                    onChange={(e) =>
-                      setDraftParticipants((current) =>
-                        e.target.checked
-                          ? [...current, person.id]
-                          : current.filter((id) => id !== person.id),
-                      )
-                    }
-                  />
-                  {person.displayName}
-                </label>
-              ))}
-            </div>
             <div className="divider" />
             <div className="requirement-version-toolbar">
               <Space wrap>
-                <h3>资料与版本</h3>
-                <Select
-                  aria-label="需求版本"
-                  value={selectedVersion?.id ?? null}
-                  onChange={setVersionId}
-                  options={detail.versions.map((version) => ({
-                    value: version.id,
-                    label: `v${version.versionNo} · ${formatBeijingTime(version.createdAt, true)}`,
-                  }))}
-                  style={{ minWidth: 280 }}
-                />
+                <h3>{historicalVersionId ? '资料快照' : '需求资料'}</h3>
+                {historicalVersionId ? (
+                  <Button onClick={() => openCurrent(detail.requirement.id)}>
+                    查看当前资料
+                  </Button>
+                ) : (
+                  <StatusTag tone={detail.materialLock ? 'success' : 'neutral'}>
+                    {detail.materialLock ? '资料已固定' : '资料可更新'}
+                  </StatusTag>
+                )}
                 {selectedVersion && (
                   <Button
-                    href={`#issues?projectId=${project.id}&requirementId=${detail.requirement.id}&requirementVersion=${selectedVersion.id}`}
+                    href={`#issues?projectId=${project.id}&requirementId=${detail.requirement.id}${historicalVersionId ? '&requirementVersion=' + selectedVersion.id : ''}`}
                   >
-                    查看此版缺陷
+                    查看缺陷
                   </Button>
                 )}
               </Space>
-              {tester && (
+              {canEdit && !historicalVersionId && (
                 <Button
                   type="primary"
                   disabled={
@@ -1009,18 +1118,48 @@ export function RequirementsPage({
                     collaboration.pending ||
                     collaboration.uncertain ||
                     mutating ||
-                    deletionPendingForSelected
+                    deletionPendingForSelected ||
+                    (!detail.materialLock &&
+                      detail.requirement.lifecycle === 'archived')
                   }
                   onClick={() => {
-                    setComposerRequirement(detail.requirement);
+                    setComposerRequirement({
+                      requirement: detail.requirement,
+                      currentVersion: detail.currentVersion,
+                      mode: detail.materialLock ? 'successor' : 'replace',
+                    });
                     setComposerOpen(true);
                   }}
                 >
-                  上传新版本
+                  {detail.materialLock ? '新建后续需求' : '更新需求资料'}
                 </Button>
               )}
             </div>
-            {tester && (
+            {!historicalVersionId &&
+              (detail.predecessor || detail.successors.length > 0) && (
+                <div className="row wrap mt">
+                  {detail.predecessor && (
+                    <Button
+                      size="small"
+                      onClick={() =>
+                        openCurrent(detail.predecessor!.requirementId)
+                      }
+                    >
+                      前序需求 · {detail.predecessor.title}
+                    </Button>
+                  )}
+                  {detail.successors.map((next) => (
+                    <Button
+                      key={next.requirementId}
+                      size="small"
+                      onClick={() => openCurrent(next.requirementId)}
+                    >
+                      后续需求 · {next.title}
+                    </Button>
+                  ))}
+                </div>
+              )}
+            {tester && !historicalVersionId && (
               <div className="row mt">
                 <Button
                   className="btn small"
@@ -1061,6 +1200,12 @@ export function RequirementsPage({
             )}
             {selectedVersion && (
               <>
+                {historicalVersionId && (
+                  <p className="caption">
+                    资料快照 v{selectedVersion.versionNo} ·{' '}
+                    {formatBeijingTime(selectedVersion.createdAt, true)}
+                  </p>
+                )}
                 {selectedVersion.summary && (
                   <Typography.Paragraph className="section-alert">
                     {selectedVersion.summary}
@@ -1158,10 +1303,15 @@ export function RequirementsPage({
                       mutating
                     }
                     onClick={() =>
-                      cases(detail.requirement, selectedVersion, 'UI')
+                      cases(
+                        detail.requirement,
+                        selectedVersion,
+                        'UI',
+                        Boolean(historicalVersionId),
+                      )
                     }
                   >
-                    查看 v{selectedVersion.versionNo} UI 用例
+                    查看 UI 用例
                   </Button>
                   <Button
                     disabled={
@@ -1171,10 +1321,15 @@ export function RequirementsPage({
                       mutating
                     }
                     onClick={() =>
-                      cases(detail.requirement, selectedVersion, 'API')
+                      cases(
+                        detail.requirement,
+                        selectedVersion,
+                        'API',
+                        Boolean(historicalVersionId),
+                      )
                     }
                   >
-                    查看 v{selectedVersion.versionNo} 接口用例
+                    查看接口用例
                   </Button>
                 </Space>
               </>
@@ -1184,7 +1339,7 @@ export function RequirementsPage({
       </CommandDialog>
       <RequirementComposer
         projectId={project.id}
-        requirement={composerRequirement}
+        target={composerRequirement}
         open={composerOpen}
         onClose={() => setComposerOpen(false)}
         onSaved={saved}

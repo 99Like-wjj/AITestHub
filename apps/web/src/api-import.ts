@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  apiDataRowSchema,
   httpMethodSchema,
   variableNameSchema,
 } from '../../../packages/contracts/src/domain';
@@ -335,14 +336,21 @@ function scanCsv(text: string) {
 }
 
 const importRowSchema = z.strictObject({
+  id: apiDataRowSchema.shape.id.optional(),
   name: z.string().trim().min(1).max(120),
+  enabled: z.boolean().optional(),
   values: z.record(variableNameSchema, z.json()),
 });
+type ApiImportRow = z.output<typeof importRowSchema>;
+type AuthoredApiRow = z.output<typeof apiDataRowSchema>;
+export type ApiImportChoice = {
+  action: 'keep' | 'replace' | 'add';
+  existingId?: string | undefined;
+  name: string;
+};
+export type ApiImportMapping = Record<string, string>;
 
-export function parseApiDataImport(
-  text: string,
-  existing: readonly { name: string }[],
-) {
+export function parseApiDataImport(text: string) {
   const input = text.replace(/^\uFEFF/u, '').trim();
   if (!input || input.length > 30000)
     throw Error('请输入不超过 30000 字符的 CSV 或 JSON。');
@@ -357,20 +365,31 @@ export function parseApiDataImport(
   } else {
     const rows = scanCsv(input);
     const columns = rows.shift()?.map((name) => name.trim()) ?? [];
-    const variables = columns.slice(1);
-    if (
-      columns[0] !== 'name' ||
-      !variables.length ||
-      new Set(columns).size !== columns.length
-    )
-      throw Error('CSV 首列须为 name，其余列填写不同的变量名。');
+    const enabledAt = columns.indexOf('@enabled');
+    const idAt = columns.indexOf('@id');
+    const variables = columns.flatMap((name, at) =>
+      at !== 0 && at !== enabledAt && at !== idAt ? [{ name, at }] : [],
+    );
+    if (columns[0] !== 'name' || new Set(columns).size !== columns.length)
+      throw Error(
+        'CSV 首列须为 name，可选 @id 和 @enabled，其余列填写不同的变量名。',
+      );
     raw = rows.map((values, index) => {
       if (values.length !== columns.length)
         throw Error('CSV 第 ' + (index + 2) + ' 行的列数和表头不符。');
+      const enabled =
+        enabledAt < 0 ? undefined : values[enabledAt]?.trim().toLowerCase();
+      const id = idAt < 0 ? undefined : values[idAt]?.trim();
+      if (enabled !== undefined && enabled !== 'true' && enabled !== 'false')
+        throw Error(
+          'CSV 第 ' + (index + 2) + ' 行 @enabled 须为 true 或 false。',
+        );
       return {
         name: values[0],
+        ...(id && { id }),
+        ...(enabled !== undefined && { enabled: enabled === 'true' }),
         values: Object.fromEntries(
-          variables.map((key, at) => [key, values[at + 1]]),
+          variables.map(({ name, at }) => [name, values[at]]),
         ),
       };
     });
@@ -378,16 +397,159 @@ export function parseApiDataImport(
   const parsed = z.array(importRowSchema).min(1).max(100).safeParse(raw);
   if (!parsed.success)
     throw Error(
-      '数据需为非空行数组，每行包含有效 name 和 variables 对象中的变量名。',
+      '数据需为非空行数组，每行包含 name、values，可选 enabled 布尔值。',
     );
-  if (existing.length + parsed.data.length > 100)
-    throw Error('导入后最多保留 100 个数据行。');
-  const names = new Set(existing.map((row) => row.name));
+  const seen = new Set<string>();
   for (const row of parsed.data) {
-    if (names.has(row.name)) throw Error('存在重名数据行，请更名后再导入。');
-    names.add(row.name);
+    const key = row.id ? 'id:' + row.id : 'name:' + row.name;
+    if (seen.has(key))
+      throw Error('导入文件内有重复的行标识，请修改后再预览。');
+    seen.add(key);
     if (secretValue.test(row.name)) throw Error('数据行名称含疑似认证信息。');
     assertSafeJson(row.values);
   }
-  return { format: json ? 'JSON' : 'CSV', rows: parsed.data };
+  return {
+    format: json ? 'JSON' : 'CSV',
+    rows: parsed.data,
+    sourceKeys: [
+      ...new Set(parsed.data.flatMap((row) => Object.keys(row.values))),
+    ],
+  };
+}
+
+export function apiImportMatches(
+  row: ApiImportRow,
+  existing: readonly AuthoredApiRow[],
+) {
+  const byId = row.id && existing.find((item) => item.id === row.id);
+  return byId ? [byId] : existing.filter((item) => item.name === row.name);
+}
+
+export function defaultApiImportChoices(
+  incoming: readonly ApiImportRow[],
+  existing: readonly AuthoredApiRow[],
+): ApiImportChoice[] {
+  const names = new Set(existing.map((row) => row.name));
+  return incoming.map((row) => {
+    const candidates = apiImportMatches(row, existing);
+    let name = row.name;
+    if (names.has(name)) {
+      const base = name.slice(0, 100);
+      name = base + '（导入副本）';
+      for (let suffix = 2; names.has(name); suffix++)
+        name = base + '（导入副本 ' + suffix + '）';
+    }
+    names.add(name);
+    return {
+      action: candidates.length ? 'keep' : 'add',
+      ...(candidates.length === 1 && { existingId: candidates[0]?.id }),
+      name,
+    };
+  });
+}
+
+export function applyApiDataImport(
+  existing: readonly AuthoredApiRow[],
+  incoming: readonly ApiImportRow[],
+  mapping: ApiImportMapping,
+  choices: readonly ApiImportChoice[],
+): AuthoredApiRow[] {
+  if (incoming.length !== choices.length) throw Error('导入选择与预览不一致。');
+  const result = [...existing];
+  const names = new Set(existing.map((row) => row.name));
+  const overwritten = new Set<string>();
+  const fields = new Map<string, string>();
+  const targets = new Set<string>();
+  for (const [source, field] of Object.entries(mapping)) {
+    const target = field.trim();
+    if (!target) continue;
+    if (
+      !variableNameSchema.safeParse(target).success ||
+      restrictedField(target)
+    )
+      throw Error('无效的目标变量名：' + target);
+    if (targets.has(target))
+      throw Error('多个源变量不能映射到同一目标：' + target);
+    targets.add(target);
+    fields.set(source, target);
+  }
+  for (const [index, row] of incoming.entries()) {
+    const choice = choices[index];
+    if (!choice || choice.action === 'keep') continue;
+    const values = Object.fromEntries(
+      Object.entries(row.values).flatMap(([field, value]) => {
+        const target = fields.get(field);
+        return target ? [[target, value]] : [];
+      }),
+    );
+    if (choice.action === 'replace') {
+      const prior = apiImportMatches(row, existing).find(
+        (candidate) => candidate.id === choice.existingId,
+      );
+      if (!prior)
+        throw Error('第 ' + (index + 1) + ' 行的目标数据行已变化或尚未选择。');
+      if (overwritten.has(prior.id))
+        throw Error('多个导入项不能替换同一个现有数据行。');
+      overwritten.add(prior.id);
+      const replacement = apiDataRowSchema.parse({
+        ...prior,
+        ...(row.enabled !== undefined && { enabled: row.enabled }),
+        values: { ...prior.values, ...values },
+      });
+      const targetIndex = result.findIndex((item) => item.id === prior.id);
+      if (targetIndex < 0) throw Error('找不到所选原数据行。');
+      result[targetIndex] = replacement;
+    } else {
+      const name = choice.name.trim();
+      if (names.has(name)) throw Error('新增数据行名称重复：' + name);
+      names.add(name);
+      result.push(
+        apiDataRowSchema.parse({
+          id: crypto.randomUUID(),
+          name,
+          ...(row.enabled !== undefined && { enabled: row.enabled }),
+          values,
+        }),
+      );
+    }
+  }
+  if (result.length > 100) throw Error('导入后最多保留 100 个数据行。');
+  return result;
+}
+
+export function exportApiDataRows(
+  rows: readonly z.output<typeof importRowSchema>[],
+  format: 'JSON' | 'CSV',
+) {
+  if (format === 'JSON')
+    return JSON.stringify(
+      rows.map(({ id, name, enabled, values }) => ({
+        ...(id && { id }),
+        name,
+        enabled: enabled !== false,
+        values,
+      })),
+      null,
+      2,
+    );
+  const names = [...new Set(rows.flatMap((row) => Object.keys(row.values)))];
+  const escape = (value: string) => '"' + value.replaceAll('"', '""') + '"';
+  return [
+    ['name', '@id', '@enabled', ...names],
+    ...rows.map((row) => [
+      row.name,
+      row.id ?? '',
+      row.enabled === false ? 'false' : 'true',
+      ...names.map((name) => {
+        const value = row.values[name];
+        return typeof value === 'string'
+          ? value
+          : value === undefined
+            ? ''
+            : JSON.stringify(value);
+      }),
+    ]),
+  ]
+    .map((cells) => cells.map(escape).join(','))
+    .join('\r\n');
 }

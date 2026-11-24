@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { bindDiagnosticStep } from '../../../contracts/src/api-diagnostic-inputs.js';
 import { z } from 'zod';
 import {
   startDebugInputSchema,
@@ -8,15 +9,21 @@ import {
   debugReceiptLookupSchema,
   debugHistorySchema,
 } from '../../../contracts/src/api-execution.js';
+import { apiFlowTraceSchema } from '../../../contracts/src/api-flow-instance.js';
 import {
   apiCaseContentSchema,
-  scenarioContentSchema,
+  apiFlowNodes,
 } from '../../../contracts/src/domain.js';
 import { apiVariableIssues } from '../../../contracts/src/api-variable-refs.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import type { Database } from '../../../persistence/src/database.js';
 import { requireProject } from '../access/policy.js';
-import { getAsset, assetDto } from '../assets/repository.js';
+import {
+  assertAuthoredApiCase,
+  getApiFlowReadConnectionIds,
+  getApiProjectAsset,
+  getApiProjectCase,
+} from '../assets/api-automation.js';
 import { latestApiRegressionInTransaction } from '../assets/api-regression.js';
 import { DomainError } from '../errors.js';
 import { audit } from '../events.js';
@@ -35,6 +42,10 @@ function executable(content: z.infer<typeof apiCaseContentSchema>) {
   return {
     variables: content.variables,
     steps: content.steps,
+    flow: content.flow,
+    ...(content.stageSettings && { stageSettings: content.stageSettings }),
+    ...(content.dataRows && { dataRows: content.dataRows }),
+    ...(content.preparations && { preparations: content.preparations }),
     cleanup: content.cleanup,
   };
 }
@@ -68,6 +79,7 @@ export class ApiDebugService {
   }
   async start(actor: ActorContext, projectId: string, raw: unknown) {
     const input = startDebugInputSchema.parse(raw);
+    assertAuthoredApiCase(input.content);
     const stepId = input.stepId;
     const selectedStep = input.content.steps.find(
       (step) => step.stepId === stepId,
@@ -78,14 +90,47 @@ export class ApiDebugService {
         '此草稿没有所选诊断步骤。',
         422,
       );
-    const diagnosticContent = selectedStep
-      ? apiCaseContentSchema.parse({
-          ...input.content,
-          steps: [selectedStep],
-          cleanup: { mode: 'none' },
-          preparations: undefined,
-        })
-      : input.content;
+    const enabledRows =
+      input.content.dataRows?.filter((row) => row.enabled !== false) ?? [];
+    const selectedRowId = input.dataRowIds?.[0] ?? input.dataRowId;
+    const selectedRow = selectedRowId
+      ? enabledRows.find((row) => row.id === selectedRowId)
+      : enabledRows[0];
+    const binding = (() => {
+      if (!selectedStep) return undefined;
+      try {
+        return bindDiagnosticStep(
+          selectedStep,
+          input.content.variables,
+          selectedRow,
+          input.diagnosticBindings ?? [],
+        );
+      } catch (error) {
+        throw new DomainError(
+          'PRECONDITIONS_MISSING',
+          error instanceof Error ? error.message : '所选单步诊断变量无法解析。',
+          422,
+        );
+      }
+    })();
+    const diagnosticContent =
+      selectedStep && binding
+        ? apiCaseContentSchema.parse({
+            ...input.content,
+            steps: [binding.step],
+            variables: binding.variables,
+            flow: [
+              {
+                type: 'request',
+                nodeId: selectedStep.stepId,
+                stepId: selectedStep.stepId,
+                name: selectedStep.name,
+              },
+            ],
+            cleanup: { mode: 'none' },
+            preparations: undefined,
+          })
+        : input.content;
     try {
       assertSafeModelInput(input.content);
     } catch {
@@ -104,57 +149,48 @@ export class ApiDebugService {
         await requireProject(transaction, actor, projectId, 'runs.organize');
       },
       async (transaction) => {
-        const scenario = await getAsset(
-          transaction,
-          projectId,
-          input.content.scenarioId,
-        );
-        if (scenario.kind !== 'API' || scenario.target_type !== 'scenario')
-          throw new DomainError('NOT_FOUND', '此项目没有该接口场景。', 404);
-        const set = await getAsset(transaction, projectId, scenario.set_id);
-        const selectedScenarioRevision =
-          input.scenarioRevisionId ?? scenario.current_revision_id;
-        const selected = (
-          await transaction.query<{ content: unknown }>(
-            'SELECT content FROM app.asset_revisions WHERE id=$1 AND asset_id=$2 AND project_id=$3',
-            [selectedScenarioRevision, scenario.id, projectId],
-          )
-        ).rows[0];
-        if (!selected)
-          throw new DomainError('NOT_FOUND', '没有该场景上下文修订。', 404);
-        const scenarioContent = scenarioContentSchema.parse(selected.content);
+        const scenario = input.content.scenarioId
+          ? await getApiProjectAsset(
+              transaction,
+              projectId,
+              input.content.scenarioId,
+              { revisionId: input.scenarioRevisionId },
+            )
+          : null;
+        if (
+          (!scenario && input.scenarioRevisionId) ||
+          (scenario && scenario.targetType !== 'scenario')
+        )
+          throw new DomainError(
+            'NOT_FOUND',
+            '此项目没有该接口场景或上下文修订。',
+            404,
+          );
+        const selectedScenarioRevision = scenario?.revisionId ?? null;
+        const scenarioContent = scenario?.content ?? null;
         let sourceRevisionId: string | null = null;
         let sourceChanged = false;
         let cleanupApprovalId: string | null = null;
         if (input.sourceCaseId) {
-          const source = await getAsset(
+          const source = await getApiProjectCase(
             transaction,
             projectId,
             input.sourceCaseId,
           );
-          if (
-            source.kind !== 'API' ||
-            source.target_type !== 'case' ||
-            source.parent_id !== scenario.id
-          )
+          if (source.parentId !== (scenario?.id ?? null))
             throw new DomainError(
               'NOT_FOUND',
               '调试来源不属于此接口场景。',
               404,
             );
-          sourceRevisionId =
-            input.sourceCaseRevisionId ?? source.current_revision_id;
-          if (
-            !(
-              await transaction.query(
-                'SELECT 1 FROM app.asset_revisions WHERE asset_id=$1 AND id=$2',
-                [source.id, sourceRevisionId],
-              )
-            ).rowCount
-          )
-            throw new DomainError('NOT_FOUND', '没有该来源用例修订。', 404);
-          sourceChanged = source.current_revision_id !== sourceRevisionId;
-          if (stepId === undefined) {
+          sourceRevisionId = input.sourceCaseRevisionId ?? source.revisionId;
+          if (sourceRevisionId !== source.revisionId) {
+            await getApiProjectCase(transaction, projectId, source.id, {
+              revisionId: sourceRevisionId,
+            });
+            sourceChanged = true;
+          }
+          if (stepId === undefined && input.content.cleanup.mode !== 'none') {
             try {
               const approved = await latestApiRegressionInTransaction(
                 transaction,
@@ -181,20 +217,51 @@ export class ApiDebugService {
         }
         const composition = await freezeApiCaseComposition(
           transaction,
+          actor,
           projectId,
           diagnosticContent,
+          input.sourceCaseId ?? undefined,
+          { stepOnly: stepId !== undefined },
         );
         const variants = materializedApiRows(composition);
-        const chosen = input.dataRowId
-          ? variants.find((row) => row.dataRow?.id === input.dataRowId)
-          : variants[0];
-        if (!chosen)
+        if (!variants.length)
+          throw new DomainError(
+            'PRECONDITIONS_MISSING',
+            '此用例没有启用的运行数据行。',
+            422,
+          );
+        const requestedRows =
+          input.dataRowIds ?? (input.dataRowId ? [input.dataRowId] : null);
+        const chosen = requestedRows
+          ? variants.filter(
+              (row) => row.dataRow && requestedRows.includes(row.dataRow.id),
+            )
+          : stepId === undefined
+            ? variants
+            : variants.slice(0, 1);
+        if (
+          !chosen.length ||
+          (requestedRows && chosen.length !== requestedRows.length)
+        )
           throw new DomainError(
             'PRECONDITIONS_MISSING',
             '调试所选数据行不存在。',
             422,
           );
-        const effective = chosen.content;
+        const repeatCount = input.repeatCount ?? 1;
+        if (chosen.length * repeatCount > 100)
+          throw new DomainError(
+            'PRECONDITIONS_MISSING',
+            '所选数据行与执行次数的乘积不能超过 100。',
+            422,
+          );
+        const executions = chosen.flatMap((variant) =>
+          Array.from({ length: repeatCount }, (_, index) => ({
+            variant,
+            repetition: index + 1,
+          })),
+        );
+        const effective = composition.content;
         const requests = [
           ...effective.steps,
           ...(effective.cleanup.mode === 'none'
@@ -215,6 +282,11 @@ export class ApiDebugService {
             '调试SQL清理须属于所选环境。',
             422,
           );
+        const readConnectionIds = await getApiFlowReadConnectionIds(
+          transaction,
+          projectId,
+          apiFlowNodes(effective.flow),
+        );
         const configuration =
           await this.plans.configurations.executionSnapshotInTransaction(
             transaction,
@@ -224,29 +296,32 @@ export class ApiDebugService {
             requests.flatMap((step) =>
               step.purposeRef ? [step.purposeRef] : [],
             ),
-            effective.cleanup.mode === 'none'
-              ? []
-              : effective.cleanup.steps.flatMap((step) =>
-                  step.type === 'sql' ? [step.connectionId] : [],
-                ),
+            [
+              ...readConnectionIds,
+              ...(effective.cleanup.mode === 'none'
+                ? []
+                : effective.cleanup.steps.flatMap((step) =>
+                    step.type === 'sql' ? [step.connectionId] : [],
+                  )),
+            ],
             requests.flatMap((step) =>
               step.authProfileRef ? [step.authProfileRef] : [],
             ),
           );
-        const invalid = apiVariableIssues(
-          effective,
-          publicEnvironment(configuration),
-        )[0];
-        if (invalid)
-          throw new DomainError(
-            'PRECONDITIONS_MISSING',
-            `${invalid.path.join('/')}：${invalid.message}`,
-            422,
-          );
+        const publicValues = publicEnvironment(configuration);
+        for (const row of chosen) {
+          const invalid = apiVariableIssues(row.content, publicValues)[0];
+          if (invalid)
+            throw new DomainError(
+              'PRECONDITIONS_MISSING',
+              `${row.dataRow?.name ? `数据行 ${row.dataRow.name} · ` : ''}${invalid.path.join('/')}：${invalid.message}`,
+              422,
+            );
+        }
         for (const step of requests) profileFor(configuration, step);
         if (
           containsBoundSecret(
-            effective,
+            chosen.map(({ content }) => content),
             await this.gateway.protectedValues(configuration, transaction),
           )
         )
@@ -256,8 +331,7 @@ export class ApiDebugService {
             400,
           );
         const draftId = randomUUID(),
-          runId = randomUUID(),
-          runItemId = randomUUID();
+          runId = randomUUID();
         const draftHash = digest({
           sourceCaseId: input.sourceCaseId,
           sourceCaseRevisionId: sourceRevisionId,
@@ -266,7 +340,13 @@ export class ApiDebugService {
           productBuild: input.productBuild,
           content: input.content,
           ...(stepId !== undefined ? { diagnosticStepId: stepId } : {}),
-          ...(chosen.dataRow ? { dataRowId: chosen.dataRow.id } : {}),
+          ...(input.diagnosticBindings
+            ? { diagnosticBindings: input.diagnosticBindings }
+            : {}),
+          ...(repeatCount > 1 ? { repeatCount } : {}),
+          dataRowIds: chosen.flatMap(({ dataRow }) =>
+            dataRow ? [dataRow.id] : [],
+          ),
         });
         const base = {
           schemaVersion: 'ath.debug-execution-scope.v1',
@@ -280,25 +360,29 @@ export class ApiDebugService {
           productBuild: input.productBuild,
           draftHash,
           ...(stepId !== undefined ? { diagnosticStepId: stepId } : {}),
+          ...(input.diagnosticBindings
+            ? { diagnosticBindings: input.diagnosticBindings }
+            : {}),
+          ...(repeatCount > 1 ? { repeatCount } : {}),
           cleanupApprovalSnapshotId: cleanupApprovalId,
-          items: [
-            {
-              runItemId,
-              caseId: input.sourceCaseId,
-              approvalSnapshotId: null,
-              requirementVersionId: scenario.requirement_version_id,
-              setId: scenario.set_id,
-              scenarioId: scenario.id,
-              scenario: scenarioContent,
-              content: effective,
-              ...(chosen.dataRow ? { dataRow: chosen.dataRow } : {}),
-              ...(composition.preparationSources.length
-                ? { preparationSources: composition.preparationSources }
-                : {}),
-              ordinal: 0,
-              issueIds: [],
-            },
-          ],
+          items: executions.map(({ variant, repetition }, ordinal) => ({
+            runItemId: randomUUID(),
+            caseId: input.sourceCaseId,
+            ...(sourceRevisionId ? { caseRevisionId: sourceRevisionId } : {}),
+            approvalSnapshotId: null,
+            requirementVersionId: scenario?.requirementVersionId ?? null,
+            setId: null,
+            scenarioId: scenario?.id ?? null,
+            scenario: scenarioContent,
+            content: variant.content,
+            ...(variant.dataRow ? { dataRow: variant.dataRow } : {}),
+            ...(repeatCount > 1 ? { repetition } : {}),
+            ...(composition.preparationSources.length
+              ? { preparationSources: composition.preparationSources }
+              : {}),
+            ordinal,
+            issueIds: [],
+          })),
           missingRequirements: [],
         };
         const scope = debugExecutionScopeSchema.parse({
@@ -325,17 +409,19 @@ export class ApiDebugService {
             actor.keyId ?? null,
           ],
         );
-        await transaction.query(
-          'INSERT INTO app.run_items(id,project_id,run_id,ordinal,case_id,approval_snapshot_id,snapshot,cleanup_state) VALUES($1,$2,$3,0,$4,NULL,$5,$6)',
-          [
-            runItemId,
-            projectId,
-            runId,
-            input.sourceCaseId,
-            JSON.stringify(scope.items[0]),
-            effective.cleanup.mode === 'none' ? 'notConfigured' : 'pending',
-          ],
-        );
+        for (const item of scope.items)
+          await transaction.query(
+            'INSERT INTO app.run_items(id,project_id,run_id,ordinal,case_id,approval_snapshot_id,snapshot,cleanup_state) VALUES($1,$2,$3,$4,$5,NULL,$6,$7)',
+            [
+              item.runItemId,
+              projectId,
+              runId,
+              item.ordinal,
+              input.sourceCaseId,
+              JSON.stringify(item),
+              effective.cleanup.mode === 'none' ? 'notConfigured' : 'pending',
+            ],
+          );
         await transaction.query(
           `INSERT INTO app.api_debug_drafts(id,project_id,run_id,source_case_id,source_case_revision_id,scenario_revision_id,draft_hash,content,cleanup_approval_snapshot_id,created_by,expires_at)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,clock_timestamp()+$11::int*interval '1 day')`,
@@ -350,7 +436,6 @@ export class ApiDebugService {
             JSON.stringify({
               content: input.content,
               scenario: scenarioContent,
-              set: assetDto(set),
             }),
             cleanupApprovalId,
             actor.userId,
@@ -402,6 +487,7 @@ export class ApiDebugService {
         draft_hash: string;
       }>(`SELECT d.run_id,d.project_id,d.draft_hash FROM app.api_debug_drafts d JOIN app.runs r ON r.id=d.run_id
         WHERE d.expires_at<=clock_timestamp() AND r.source='debug' AND r.scope_snapshot->>'schemaVersion'='ath.debug-execution-scope.v1'
+        AND d.content->'content'->>'dslVersion'='ath.api-case.v2'
         AND NOT EXISTS(SELECT 1 FROM app.api_regression_qualifications q WHERE q.debug_run_id=d.run_id)
         AND NOT EXISTS(SELECT 1 FROM app.api_worker_grants g WHERE g.run_id=r.id AND g.revoked_at IS NULL AND g.expires_at>clock_timestamp())
         ORDER BY d.expires_at LIMIT 100 FOR UPDATE OF d,r SKIP LOCKED`);
@@ -496,9 +582,9 @@ export class ApiDebugService {
   async history(actor: ActorContext, projectId: string, caseId: string) {
     return this.db.transaction(async (transaction) => {
       await requireProject(transaction, actor, projectId, 'project.read');
-      const asset = await getAsset(transaction, projectId, caseId, true);
-      if (asset.kind !== 'API' || asset.target_type !== 'case')
-        throw new DomainError('NOT_FOUND', '此项目没有该接口用例。', 404);
+      await getApiProjectCase(transaction, projectId, caseId, {
+        includeArchived: true,
+      });
       const rows = await transaction.query<{
         run_id: string;
         environment_id: string;
@@ -557,7 +643,8 @@ export class ApiDebugService {
             AND c.id=r.environment_id AND c.current_revision_id=r.environment_revision_id AND c.active
             AND c.content @> '{"allowApiRegressionQualification":true}') qualification_environment
           FROM app.runs r
-        JOIN app.api_debug_drafts d ON d.run_id=r.id WHERE r.id=$1 AND r.project_id=$2`,
+        JOIN app.api_debug_drafts d ON d.run_id=r.id WHERE r.id=$1 AND r.project_id=$2
+          AND d.content->'content'->>'dslVersion'='ath.api-case.v2'`,
           [runId, projectId],
         )
       ).rows[0];
@@ -580,24 +667,39 @@ export class ApiDebugService {
         [runId],
       );
       const attempts = await transaction.query(
-        'SELECT id,phase,step_id,state,outcome,reason,side_effect_certainty FROM app.api_step_attempts WHERE run_id=$1 ORDER BY created_at,id LIMIT 500',
+        'SELECT id,run_item_id,phase,step_id,state,outcome,reason,side_effect_certainty FROM app.api_step_attempts WHERE run_id=$1 ORDER BY created_at,id LIMIT 500',
         [runId],
       );
-      const fact = facts.rows[0];
+      const visits = await transaction.query<{
+        item_id: string;
+        flow_trace: unknown;
+      }>(
+        "SELECT payload->>'runItemId' item_id,payload->'flowTrace' flow_trace FROM app.api_run_events WHERE run_id=$1 AND event_type='case.completed' AND payload ? 'flowTrace' ORDER BY sequence",
+        [runId],
+      );
+      const byItem = new Map(
+        visits.rows.map((entry) => [
+          entry.item_id,
+          apiFlowTraceSchema.parse(entry.flow_trace),
+        ]),
+      );
+      const scope = debugExecutionScopeSchema.parse(row.scope_snapshot);
+      const factRows = facts.rows;
       return debugTraceSchema.parse({
         runId,
         state: row.state,
         formal: false,
         approvalSnapshotId: null,
         draftHash: row.draft_hash,
-        scope: debugExecutionScopeSchema.parse(row.scope_snapshot),
-        evaluationStatus: !fact
+        scope,
+        evaluationStatus: !factRows.length
           ? 'notStarted'
-          : fact.original_outcome === 'notExecuted'
-            ? 'notExecuted'
-            : !fact.ended_at
-              ? 'inProgress'
-              : fact.original_outcome === null
+          : factRows.length < scope.items.length ||
+              factRows.some((fact) => !fact.ended_at)
+            ? 'inProgress'
+            : factRows.every((fact) => fact.original_outcome === 'notExecuted')
+              ? 'notExecuted'
+              : factRows.every((fact) => fact.original_outcome === null)
                 ? 'notConfigured'
                 : 'evaluated',
         facts: facts.rows.map((entry) => ({
@@ -608,9 +710,13 @@ export class ApiDebugService {
           reason: entry.reason,
           startedAt: entry.started_at.toISOString(),
           endedAt: entry.ended_at?.toISOString() ?? null,
+          ...(byItem.has(entry.run_item_id)
+            ? { flowTrace: byItem.get(entry.run_item_id) }
+            : {}),
         })),
         steps: attempts.rows.map((entry) => ({
           id: entry.id,
+          runItemId: entry.run_item_id,
           phase: entry.phase,
           stepId: entry.step_id,
           state: entry.state,

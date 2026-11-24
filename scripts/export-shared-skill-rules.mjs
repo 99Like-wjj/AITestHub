@@ -3,7 +3,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readSkillRuleSources } from './skill-rule-sources.mjs';
 const exec = promisify(execFile),
@@ -69,7 +69,7 @@ for (const source of sources) {
         });
       archives.push({
         kind: archive.kind,
-        fileName: archive.path.split('/').at(-1),
+        fileName: basename(archive.path),
         sha256: archive.sha256,
         bytes: bytes.length,
       });

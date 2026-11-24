@@ -68,7 +68,7 @@ function indexItem({ scopeItem, result }: Item) {
     runItemId: scopeItem.runItemId,
     caseId: scopeItem.caseId,
     title: scopeItem.content.title,
-    scenario: scopeItem.scenario.title,
+    scenario: scopeItem.scenario?.title ?? '单接口用例',
     requirementVersionId: scopeItem.requirementVersionId,
     resultId: result?.id ?? null,
     initialOutcome: result?.initialOutcome ?? null,
@@ -309,7 +309,7 @@ export function registerModelReportReads(
             (!query ||
               [
                 scopeItem.content.title,
-                scopeItem.scenario.title,
+                scopeItem.scenario?.title ?? '单接口用例',
                 result?.content.actualObservations,
               ].some((value) => value?.toLocaleLowerCase().includes(query))),
         );

@@ -30,12 +30,15 @@ import {
 import { z } from 'zod';
 import { requirementSchema } from '../../../packages/contracts/src/domain';
 import {
-  addRequirementVersionResourceInputSchema as addRequirementVersionInputSchema,
+  addRequirementVersionResourceInputSchema,
   createRequirementResourceInputSchema as createRequirementInputSchema,
   requirementCandidatesSchema,
   requirementVersionCreatedSchema,
 } from '../../../packages/contracts/src/requirements';
-import type { RequirementMaterialInput } from '../../../packages/contracts/src/requirements';
+import type {
+  RequirementDetail,
+  RequirementMaterialInput,
+} from '../../../packages/contracts/src/requirements';
 import { api, describeError } from './api';
 import { uiLayers } from './ui-layers';
 import { safeSourceLinkSchema } from '../../../packages/contracts/src/source-links';
@@ -67,6 +70,7 @@ type DraftMaterial = {
   readability: RequirementMaterialInput['readability'];
   state: 'local' | 'uploading' | 'verified' | 'failed';
   error?: string;
+  sourceUnavailable?: boolean;
 };
 export const purposeLabels = {
   requirement: '主需求',
@@ -82,16 +86,22 @@ export const readabilityLabels = {
 
 export function RequirementComposer({
   projectId,
-  requirement,
+  target,
   open,
   onClose,
   onSaved,
 }: {
   projectId: string;
-  requirement: Requirement | null;
+  target:
+    | {
+        requirement: Requirement;
+        currentVersion: RequirementDetail['currentVersion'];
+        mode: 'replace' | 'successor';
+      }
+    | undefined;
   open: boolean;
   onClose: () => void;
-  onSaved: (id: string, versionId: string) => Promise<void>;
+  onSaved: (id: string) => Promise<void>;
 }) {
   const [form] = Form.useForm<{
     title: string;
@@ -103,7 +113,9 @@ export function RequirementComposer({
     items: DraftMaterial[];
   }>({ key: null, items: [] });
   const [readyScope, setReadyScope] = useState<object | null>(null);
-  const [target, setTarget] = useState<Requirement | null>(requirement);
+  const requirement = target?.requirement;
+  const currentVersion = target?.currentVersion;
+  const replacing = target?.mode === 'replace';
   const [pending, setPending] = useState(false);
   const [lookupPending, setLookupPending] = useState(false);
   const [adoptingVersion, setAdoptingVersion] = useState<string>();
@@ -138,7 +150,8 @@ export function RequirementComposer({
       actor,
       open,
       requirement?.id,
-      requirement?.rowVersion,
+      currentVersion?.id,
+      target?.mode,
     ],
   );
   const activeScope = useRef(scope);
@@ -185,6 +198,7 @@ export function RequirementComposer({
     ]),
   );
   const currentMaterialSignature = useRef(materialSignature);
+  const initialMaterials = useRef<DraftMaterial[]>([]);
   currentMaterialSignature.current = materialSignature;
   useEffect(() => setCandidates(undefined), [materialSignature]);
   function setMaterials(change: SetStateAction<DraftMaterial[]>) {
@@ -226,18 +240,39 @@ export function RequirementComposer({
         scope.actor === null ||
         scope.identity !== identityContextEpoch() ||
         scope.actor !== currentIdentityOwner() ||
-        (requirement !== null && requirement.projectId !== projectId)
+        (requirement && requirement.projectId !== projectId)
       )
         return;
       form.resetFields();
       form.setFieldsValue({
-        title: requirement?.title ?? '',
-        businessNumber: requirement?.businessNumber ?? '',
-        summary: '',
+        title: replacing ? (requirement?.title ?? '') : '',
+        businessNumber: replacing ? (requirement?.businessNumber ?? '') : '',
+        summary: replacing ? (currentVersion?.summary ?? '') : '',
       });
       scope.ready = true;
-      setMaterials([]);
-      setTarget(requirement);
+      const savedMaterials: DraftMaterial[] =
+        replacing && currentVersion
+          ? currentVersion.materials.map((material) => ({
+              id: material.id,
+              localFileId: material.id,
+              originalName: material.originalName,
+              purpose: material.purpose,
+              readability: material.readability,
+              state: material.sourceLinkUnavailableReason
+                ? 'failed'
+                : 'verified',
+              ...(material.fileResourceId && {
+                fileResourceId: material.fileResourceId,
+              }),
+              ...(material.sourceLink && { sourceLink: material.sourceLink }),
+              ...(material.sourceLinkUnavailableReason && {
+                sourceUnavailable: true,
+                error: '原来源地址不可用，请移除该行并添加可用链接。',
+              }),
+            }))
+          : [];
+      initialMaterials.current = savedMaterials;
+      setMaterials(savedMaterials);
       setError(undefined);
       setCandidates(undefined);
       setLink('');
@@ -274,11 +309,11 @@ export function RequirementComposer({
     }
     if (!current() || pending) return;
     if (
-      materials.length ||
+      (materialRecord.key === scope &&
+        materials !== initialMaterials.current) ||
       form.isFieldsTouched() ||
       link.trim() ||
-      linkName.trim() ||
-      target?.id !== requirement?.id
+      linkName.trim()
     )
       setDiscardOpen(true);
     else onClose();
@@ -290,7 +325,7 @@ export function RequirementComposer({
     }
     if (materials.length + selectedFiles.length > limits.maxFilesPerBatch) {
       setError(
-        `本次选择将超过当前每版本 ${limits.maxFilesPerBatch} 份材料限额，请减少选择后重新添加。`,
+        `材料最多可添加 ${limits.maxFilesPerBatch} 份，请减少选择后重新添加。`,
       );
       return false;
     }
@@ -339,7 +374,7 @@ export function RequirementComposer({
         throw new Error('来源链接须为无内嵌账号密码的 HTTP(S) 地址。');
       if (!linkName.trim()) throw new Error('请填写来源名称。');
       if (materials.length >= limits.maxFilesPerBatch)
-        throw new Error(`当前每版本最多 ${limits.maxFilesPerBatch} 份材料。`);
+        throw new Error(`最多可添加 ${limits.maxFilesPerBatch} 份材料。`);
       const id = crypto.randomUUID();
       setMaterials((previous) =>
         current()
@@ -430,12 +465,12 @@ export function RequirementComposer({
         setLookupPending(false);
     }
   }
-  async function adoptVersion(candidate: Requirement, versionId: string) {
+  async function openExisting(candidate: Requirement) {
     if (!current() || scope.busy) return;
     scope.busy = true;
-    setAdoptingVersion(versionId);
+    setAdoptingVersion(candidate.id);
     try {
-      await onSaved(candidate.id, versionId);
+      await onSaved(candidate.id);
       if (current()) onClose();
     } catch (failure) {
       if (current()) setError(describeError(failure));
@@ -491,13 +526,15 @@ export function RequirementComposer({
   }) {
     if (!current() || scope.busy) return;
     if (!limits) {
-      setError(
-        '真实限额尚未核对，未开始新版本提交；已登记文件可在行内完整重传。',
-      );
+      setError('尚未读取项目材料限额。已登记文件可在行内完整重传。');
       return;
     }
     if (!materials.length) {
       setError('请至少选择一份文件或来源链接，并说明用途。');
+      return;
+    }
+    if (materials.some((material) => material.sourceUnavailable)) {
+      setError('请先替换或移除无法读取的来源链接。');
       return;
     }
     setPending(true);
@@ -523,30 +560,41 @@ export function RequirementComposer({
           ...(item.sourceLink ? { sourceLink: item.sourceLink } : {}),
         }),
       );
-      const input = target
-        ? addRequirementVersionInputSchema.parse({
-            submissionId: originalSubmissionId,
-            rowVersion: target.rowVersion,
-            summary: values.summary ?? '',
-            materials: materialInputs,
-          })
-        : createRequirementInputSchema.parse({
-            projectId,
-            submissionId: originalSubmissionId,
-            title: values.title,
-            businessNumber: values.businessNumber?.trim() || null,
-            summary: values.summary ?? '',
-            materials: materialInputs,
-          });
-      const path = `/projects/${projectId}/requirements${target ? `/${target.id}/versions` : ''}`;
+      const input =
+        replacing && target
+          ? addRequirementVersionResourceInputSchema.parse({
+              submissionId: originalSubmissionId,
+              baseVersionId: target.currentVersion.id,
+              ...(values.title.trim() !== target.requirement.title && {
+                title: values.title.trim(),
+              }),
+              summary: values.summary ?? '',
+              materials: materialInputs,
+            })
+          : createRequirementInputSchema.parse({
+              projectId,
+              submissionId: originalSubmissionId,
+              title: values.title,
+              businessNumber: values.businessNumber?.trim() || null,
+              summary: values.summary ?? '',
+              materials: materialInputs,
+              ...(target?.mode === 'successor' && {
+                predecessorRequirementId: target.requirement.id,
+              }),
+            });
+      const path = `/projects/${projectId}/requirements${replacing && target ? `/${target.requirement.id}/current-materials` : ''}`;
       assertCurrent();
       const result = await api(
         path,
-        { method: 'POST', body: input, signal: scope.abort.signal },
+        {
+          method: replacing ? 'PUT' : 'POST',
+          body: input,
+          signal: scope.abort.signal,
+        },
         requirementVersionCreatedSchema,
       );
       assertCurrent();
-      await onSaved(result.requirement.id, result.version.id);
+      await onSaved(result.requirement.id);
       assertCurrent();
       onClose();
     } catch (err) {
@@ -566,9 +614,7 @@ export function RequirementComposer({
     <>
       <Modal
         title={
-          draftReady && target
-            ? `上传新版本：${target.title}`
-            : '新建需求与首版材料'
+          replacing ? '更新需求资料' : target ? '新建后续需求' : '新建需求'
         }
         open={open}
         zIndex={uiLayers.dialog}
@@ -595,9 +641,11 @@ export function RequirementComposer({
             >
               {draftPending
                 ? '完整上传与保存中'
-                : target
-                  ? '保存新版本'
-                  : '创建需求'}
+                : replacing
+                  ? '保存当前资料'
+                  : target
+                    ? '创建后续需求'
+                    : '创建需求'}
             </Button>
           </Space>
         }
@@ -659,20 +707,14 @@ export function RequirementComposer({
                     },
                   ]}
                 >
-                  <Input
-                    maxLength={200}
-                    disabled={pending || target !== null}
-                  />
+                  <Input maxLength={200} disabled={pending} />
                 </Form.Item>
                 <Form.Item
                   name="businessNumber"
                   label="需求编号（可留空）"
                   rules={[{ max: 100, message: '编号不超过 100 字符' }]}
                 >
-                  <Input
-                    maxLength={100}
-                    disabled={pending || target !== null}
-                  />
+                  <Input maxLength={100} disabled={pending || replacing} />
                 </Form.Item>
               </div>
               {!requirement && (
@@ -681,17 +723,13 @@ export function RequirementComposer({
                     icon={<SearchOutlined />}
                     onClick={() => void lookup()}
                     loading={lookupPending}
-                    disabled={pending || target !== null}
+                    disabled={pending}
                   >
                     查找已有需求
                   </Button>
                   <AuxiliaryAction
                     label="AI语义查找"
-                    disabled={
-                      pending ||
-                      target !== null ||
-                      capabilities.status !== 'ready'
-                    }
+                    disabled={pending || capabilities.status !== 'ready'}
                     source={async () => {
                       assertCurrent();
                       const values = await form.validateFields([
@@ -728,19 +766,6 @@ export function RequirementComposer({
                       };
                     }}
                   />
-                  {target && (
-                    <Button
-                      disabled={pending}
-                      onClick={() => {
-                        if (current())
-                          setTarget((previous) =>
-                            current() ? null : previous,
-                          );
-                      }}
-                    >
-                      改为独立新建
-                    </Button>
-                  )}
                 </Space>
               )}
               {candidates && !target && (
@@ -767,123 +792,63 @@ export function RequirementComposer({
                         render: (value: string | null) => value ?? '—',
                       },
                       {
-                        title: '匹配版本与最新版本',
-                        render: (_, candidate) => (
-                          <Space direction="vertical">
-                            {candidates.exactMaterialMatches
-                              .filter(
-                                (match) => match.requirementId === candidate.id,
-                              )
-                              .map((match) => (
-                                <Tag key={match.requirementVersionId}>
-                                  完整材料相同 V{match.versionNo}
-                                  {match.versionNo < match.latestVersionNo
-                                    ? ` · 已有最新 V${match.latestVersionNo}`
-                                    : ' · 最新版'}
-                                </Tag>
-                              ))}
-                            <span>
-                              最新 V
-                              {candidates.latestVersions.find(
-                                (version) =>
-                                  version.requirementId === candidate.id,
-                              )?.versionNo ?? '未取得'}
-                            </span>
-                          </Space>
-                        ),
+                        title: '材料匹配',
+                        render: (_, candidate) =>
+                          candidates.exactMaterialMatches.some(
+                            (match) =>
+                              match.requirementId === candidate.id &&
+                              match.versionNo === match.latestVersionNo,
+                          ) ? (
+                            <Tag>当前资料相同</Tag>
+                          ) : candidates.exactMaterialMatches.some(
+                              (match) => match.requirementId === candidate.id,
+                            ) ? (
+                            <Tag>已有相同的资料快照</Tag>
+                          ) : (
+                            '—'
+                          ),
                       },
                       {
-                        title: '归属选择',
+                        title: '操作',
                         render: (_, candidate) => (
-                          <Space direction="vertical">
-                            {candidates.exactMaterialMatches
-                              .filter(
-                                (match) => match.requirementId === candidate.id,
-                              )
-                              .map((match) => (
-                                <Button
-                                  key={match.requirementVersionId}
-                                  disabled={Boolean(adoptingVersion)}
-                                  loading={
-                                    adoptingVersion ===
-                                    match.requirementVersionId
-                                  }
-                                  onClick={() =>
-                                    void adoptVersion(
-                                      candidate,
-                                      match.requirementVersionId,
-                                    )
-                                  }
-                                >
-                                  采用已有 V{match.versionNo}（不新建版本）
-                                </Button>
-                              ))}
-                            {(() => {
-                              const latest = candidates.latestVersions.find(
-                                (version) =>
-                                  version.requirementId === candidate.id,
-                              );
-                              return latest &&
-                                !candidates.exactMaterialMatches.some(
-                                  (match) =>
-                                    match.requirementVersionId ===
-                                    latest.requirementVersionId,
-                                ) ? (
-                                <Button
-                                  disabled={Boolean(adoptingVersion)}
-                                  loading={
-                                    adoptingVersion ===
-                                    latest.requirementVersionId
-                                  }
-                                  onClick={() =>
-                                    void adoptVersion(
-                                      candidate,
-                                      latest.requirementVersionId,
-                                    )
-                                  }
-                                >
-                                  采用最新 V{latest.versionNo}（使用已有资料）
-                                </Button>
-                              ) : null;
-                            })()}
-                            <Button
-                              disabled={Boolean(adoptingVersion)}
-                              onClick={() => {
-                                if (!current()) return;
-                                setTarget(candidate);
-                                form.setFieldsValue({
-                                  title: candidate.title,
-                                  businessNumber:
-                                    candidate.businessNumber ?? '',
-                                });
-                              }}
-                            >
-                              作为该需求的新版本
-                            </Button>
-                          </Space>
+                          <Button
+                            disabled={Boolean(adoptingVersion)}
+                            loading={adoptingVersion === candidate.id}
+                            onClick={() => void openExisting(candidate)}
+                          >
+                            查看已有需求
+                          </Button>
                         ),
                       },
                     ]}
                   />
                   <p className="caption">
-                    采用已有版本只打开并使用该版资料，不创建版本。要保留本次所选材料，可明确新建版本或继续独立新建；重复编号需修改或留空。
+                    查看已有需求会关闭本次新建表单。仍需独立新建时，可修改重复编号或留空。
                   </p>
                 </CardLike>
               )}
-              {target && (
+              {requirement && (
                 <Alert
                   className="section-alert"
                   type="info"
                   showIcon
-                  title={`明确为已有需求「${target.title}」新增版本，基准 ${target.rowVersion}`}
-                  description="新版本保留旧材料与历史，不继承旧批准，也不自动升级已有测试计划。请选择本版完整材料，旧材料缺席不会删除旧原件。"
+                  title={
+                    replacing
+                      ? requirement.title
+                      : `前序需求 · ${requirement.title}`
+                  }
+                  description={
+                    replacing
+                      ? '可保留、移除或继续添加材料。已保存的用例仍可查阅采用的原资料。'
+                      : '后续需求拥有独立资料和用例，可从详情返回查看前序需求。'
+                  }
                 />
               )}
               <Form.Item
                 name="summary"
-                label={target ? '本版变更说明' : '材料说明'}
+                label={replacing ? '资料变更说明' : '材料说明'}
                 extra={
-                  target
+                  replacing
                     ? undefined
                     : '启用系统辅助后，平台会在模型许可范围内使用标题和简短摘要生成工作台显示名。'
                 }

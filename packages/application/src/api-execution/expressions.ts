@@ -2,6 +2,7 @@ import type {
   JsonValue,
   RuntimeVariables,
 } from '../../../contracts/src/api-execution.js';
+import type { ApiInterfaceResponseContract } from '../../../contracts/src/api-catalog.js';
 import { DomainError } from '../errors.js';
 import {
   apiCaseContentSchema,
@@ -13,6 +14,8 @@ import {
   apiPlaceholderPattern,
   readApiPath,
 } from '../../../contracts/src/api-variable-refs.js';
+import { matchesResponseContract } from './response-contract.js';
+import { xmlElementText } from './xml-observation.js';
 
 export const readPath = readApiPath;
 export function nonEmpty(value: unknown): value is string | number | boolean {
@@ -25,7 +28,12 @@ export function contextVariables(
   environment: Record<string, JsonValue>,
   variables: RuntimeVariables,
 ) {
-  return { env: environment, case: variables.case, extract: variables.extract };
+  return {
+    env: environment,
+    case: variables.case,
+    extract: variables.extract,
+    steps: variables.steps ?? {},
+  };
 }
 export function interpolate(value: unknown, context: unknown): JsonValue {
   if (typeof value === 'string') {
@@ -89,6 +97,9 @@ export type RawObservation = {
   status: number | null;
   headers: Record<string, string>;
   body: JsonValue;
+  elapsedMs?: number;
+  jsonParsed?: boolean;
+  responseContract?: ApiInterfaceResponseContract;
 };
 function observationValue(
   source: string,
@@ -104,10 +115,39 @@ function observationValue(
   if (source === 'header') return response.headers[(path ?? '').toLowerCase()];
   if (source === 'variable')
     return readPath(
-      { case: variables.case, extract: variables.extract },
+      {
+        case: variables.case,
+        extract: variables.extract,
+        steps: variables.steps,
+      },
       path ?? '',
     );
   return readPath(response.body, path ?? '');
+}
+export function readAssertionObservation(
+  assertion: Pick<z.infer<typeof assertionSchema>, 'source' | 'path'>,
+  response: RawObservation,
+  variables: RuntimeVariables,
+): unknown {
+  switch (assertion.source) {
+    case 'elapsedMs':
+      return response.elapsedMs;
+    case 'xml':
+      return typeof response.body === 'string' && assertion.path
+        ? xmlElementText(response.body, assertion.path)
+        : undefined;
+    case 'contract':
+      return response.responseContract
+        ? matchesResponseContract(response.responseContract, response)
+        : undefined;
+    default:
+      return observationValue(
+        assertion.source,
+        assertion.path,
+        response,
+        variables,
+      );
+  }
 }
 export function evaluateAssertions(
   assertions: z.infer<typeof assertionSchema>[],
@@ -115,12 +155,18 @@ export function evaluateAssertions(
   variables: RuntimeVariables,
 ) {
   return assertions.map((assertion) => {
-    const actual = observationValue(
-      assertion.source,
-      assertion.path,
-      response,
-      variables,
-    );
+    const actual = readAssertionObservation(assertion, response, variables);
+    if (
+      actual === undefined &&
+      ['elapsedMs', 'xml', 'contract'].includes(assertion.source)
+    )
+      return {
+        passed: false,
+        message:
+          assertion.source === 'contract'
+            ? `断言${assertion.id}无法核对固定响应契约。`
+            : `断言${assertion.id}未读取到断言值。`,
+      };
     const expected = assertion.expected;
     let passed = false;
     if (assertion.operator === 'exists')

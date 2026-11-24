@@ -89,7 +89,7 @@ const resultStatus = (item: Item) =>
 function scenarioKey(item: Item) {
   const scope = item.scopeItem;
   return 'scenarioId' in scope
-    ? scope.scenarioId
+    ? (scope.scenarioId ?? 'independent-api-cases')
     : JSON.stringify([
         scope.requirementId,
         scope.requirementVersionId,
@@ -303,7 +303,7 @@ export function ReportWorkbench({
     for (const item of facts.items) {
       const key = scenarioKey(item);
       const group = map.get(key) ?? {
-        label: item.scopeItem.scenario.title,
+        label: item.scopeItem.scenario?.title ?? '独立单接口用例',
         rows: [],
       };
       group.rows.push(item);
@@ -324,7 +324,7 @@ export function ReportWorkbench({
       (!needle ||
         [
           item.scopeItem.content.title,
-          item.scopeItem.scenario.title,
+          item.scopeItem.scenario?.title,
           itemNumber(item),
           caseReference(item),
           item.result?.id,
@@ -497,45 +497,67 @@ export function ReportWorkbench({
             title="未回传执行结果"
             description="此项在冻结范围内，当前没有收到执行事实。"
           />
-          <p className="caption">场景 · {item.scopeItem.scenario.title}</p>
+          <p className="caption">
+            {item.scopeItem.scenario
+              ? `场景 · ${item.scopeItem.scenario.title}`
+              : '独立单接口用例'}
+          </p>
         </Card>
       );
+    const scope = item.scopeItem;
     return (
-      <ResultDetailPanel
-        key={item.scopeItem.runItemId}
-        project={project}
-        resultId={result.id}
-        executionKind={facts.kind}
-        inline
-        reportBasisRevisionId={focusedRevision ?? result.revisionId}
-        {...(selection?.initialStep
-          ? { initialStep: selection.initialStep }
-          : {})}
-        {...(selection?.returnTo ? { returnTo: selection.returnTo } : {})}
-        {...(archived
-          ? {
-              archivedAssessment: {
-                outcome: result.finalOutcome,
-                reason: result.assessmentReason,
-              },
-            }
-          : {})}
-        {...(reportScope(report.id, report.revisionId, item)
-          ? { reportReview: reportScope(report.id, report.revisionId, item)! }
-          : {})}
-        readOnly={!writableDetail}
-        onRevisionSelect={(id) =>
-          chooseResultRevision(result.id, id === result.revisionId ? null : id)
-        }
-        onStepSelect={(id) =>
-          setHash((query) => {
-            query.set('resultId', result.id);
-            query.set('step', String(id));
-          })
-        }
-        onClose={() => undefined}
-        onChanged={onChanged}
-      />
+      <>
+        {facts.kind === 'API' && scope.caseId && scope.caseRevisionId && (
+          <a
+            href={`#api-regression?${new URLSearchParams({
+              projectId: project.id,
+              caseId: scope.caseId,
+              revisionId: scope.caseRevisionId,
+              view: 'workbench',
+            })}`}
+          >
+            查看本轮冻结用例修订
+          </a>
+        )}
+        <ResultDetailPanel
+          key={item.scopeItem.runItemId}
+          project={project}
+          resultId={result.id}
+          executionKind={facts.kind}
+          inline
+          reportBasisRevisionId={focusedRevision ?? result.revisionId}
+          {...(selection?.initialStep
+            ? { initialStep: selection.initialStep }
+            : {})}
+          {...(selection?.returnTo ? { returnTo: selection.returnTo } : {})}
+          {...(archived
+            ? {
+                archivedAssessment: {
+                  outcome: result.finalOutcome,
+                  reason: result.assessmentReason,
+                },
+              }
+            : {})}
+          {...(reportScope(report.id, report.revisionId, item)
+            ? { reportReview: reportScope(report.id, report.revisionId, item)! }
+            : {})}
+          readOnly={!writableDetail}
+          onRevisionSelect={(id) =>
+            chooseResultRevision(
+              result.id,
+              id === result.revisionId ? null : id,
+            )
+          }
+          onStepSelect={(id) =>
+            setHash((query) => {
+              query.set('resultId', result.id);
+              query.set('step', String(id));
+            })
+          }
+          onClose={() => undefined}
+          onChanged={onChanged}
+        />
+      </>
     );
   }
   function review(item: Item | undefined) {

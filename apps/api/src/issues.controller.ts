@@ -91,15 +91,6 @@ export class IssuesController {
         return res.json(
           await this.problems.confirmBatch(actor, projectId, req.body),
         );
-      const preview = /^confirmation-previews\/([^/]+)$/.exec(path);
-      if (preview?.[1] && req.method === 'GET')
-        return res.json(
-          await this.problems.batchPreview(
-            actor,
-            projectId,
-            idSchema.parse(preview[1]),
-          ),
-        );
       const match = /^([^/]+)(?:\/(confirm|dismiss|review-retests))?$/.exec(
         path,
       );

@@ -36,6 +36,8 @@ import {
 } from '@ant-design/icons';
 import { z } from 'zod';
 import { idSchema } from '../../../packages/contracts/src/base';
+import { assetDetailSchema } from '../../../packages/contracts/src/assets';
+import { requirementDetailSchema } from '../../../packages/contracts/src/requirements';
 import { auxiliaryTaskReceiptSchema } from '../../../packages/contracts/src/auxiliary';
 import { availableModelV2ListSchema } from '../../../packages/contracts/src/model-configuration-v2';
 import type { AvailableModelV2 } from '../../../packages/contracts/src/model-configuration-v2';
@@ -724,15 +726,92 @@ export function Workspace({
         group.requirementId === composerRequirementId &&
         group.projectId === targetProjectId,
     );
+  const composerSceneId = restoredTarget?.value?.objectIds?.[0];
+  const composerTargetKey =
+    targetProjectId && composerRequirementId
+      ? [targetProjectId, composerRequirementId, composerSceneId].join('/')
+      : '';
+  const [resolvedComposerTarget, setResolvedComposerTarget] = useState<{
+    key: string;
+    requirement: string | null;
+    scene?: string;
+  }>();
+  useEffect(() => {
+    if (!targetProjectId || !composerRequirementId) return;
+    let current = true;
+    const root = '/projects/' + targetProjectId;
+    void api(
+      root + '/requirements/' + composerRequirementId,
+      {},
+      requirementDetailSchema,
+    ).then(
+      async (detail) => {
+        if (!current) return;
+        setResolvedComposerTarget({
+          key: composerTargetKey,
+          requirement: detail.requirement.title,
+        });
+        if (!composerSceneId) return;
+        const sceneResult = await api(
+          root + '/assets/' + composerSceneId,
+          {},
+          assetDetailSchema,
+        ).catch(() => null);
+        const asset = sceneResult?.asset;
+        if (
+          current &&
+          asset &&
+          !asset.removedAt &&
+          asset.kind === 'UI' &&
+          asset.targetType === 'scenario' &&
+          (asset.requirementBasis?.requirementId === composerRequirementId ||
+            detail.versions.some(
+              (version) => version.id === asset.requirementVersionId,
+            ) ||
+            detail.currentVersion.id === asset.requirementVersionId)
+        )
+          setResolvedComposerTarget({
+            key: composerTargetKey,
+            requirement: detail.requirement.title,
+            scene: asset.title,
+          });
+      },
+      () => {
+        if (current)
+          setResolvedComposerTarget({
+            key: composerTargetKey,
+            requirement: null,
+          });
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [
+    targetProjectId,
+    composerRequirementId,
+    composerSceneId,
+    composerTargetKey,
+  ]);
+  const resolved =
+    resolvedComposerTarget?.key === composerTargetKey
+      ? resolvedComposerTarget
+      : undefined;
   const composerRequirementLabel = composerRequirementId
-    ? (composerRequirement?.alias ??
-      composerRequirement?.generatedName ??
-      composerRequirement?.formalTitle ??
-      (active?.requirementId === composerRequirementId
-        ? active.requirementTitle
-        : null) ??
-      '当前关联需求')
+    ? resolved
+      ? resolved.requirement
+      : (composerRequirement?.formalTitle ??
+        (active?.requirementId === composerRequirementId
+          ? active.requirementTitle
+          : null))
     : null;
+  const composerRequirementCaption =
+    composerRequirementLabel ??
+    (composerRequirementId
+      ? resolved
+        ? '需求不可访问'
+        : '正在读取需求'
+      : '不关联需求');
   const hasRestoredTargetDifference = Boolean(
     activeId &&
     restoredTarget &&
@@ -3101,10 +3180,19 @@ export function Workspace({
                   title={composerRequirementLabel ?? '选择需求'}
                   aria-label="选择当前对话需求"
                 >
-                  {composerRequirementLabel ?? '不关联需求'}
+                  {composerRequirementCaption}
                   <AppIcon name="down" />
                 </Button>
               </WorkspaceContextPicker>
+              {resolved?.scene && (
+                <span
+                  className="composer-scene-context"
+                  title={'场景 · ' + resolved.scene}
+                >
+                  <AppIcon name="folder-closed" />
+                  <span>{resolved.scene}</span>
+                </span>
+              )}
             </div>
           </WorkspaceContextDrawer>
           <WorkspacePendingMessages

@@ -118,8 +118,13 @@ const ExternalMcpDecisionsPage = lazy(() =>
   })),
 );
 const ApiWorkbenchPage = lazy(() =>
-  import('./api-workbench').then((module) => ({
-    default: module.ApiWorkbenchPage,
+  import('./api-automation-page').then((module) => ({
+    default: module.ApiAutomationPage,
+  })),
+);
+const ApiCatalogPage = lazy(() =>
+  import('./api-catalog-page').then((module) => ({
+    default: module.ApiCatalogPage,
   })),
 );
 const PlatformUsagePanel = lazy(() =>
@@ -132,9 +137,14 @@ const pages = [
   { key: 'requirements', label: '需求管理', icon: <AppIcon name="file" /> },
   { key: 'cases', label: 'UI 用例管理', icon: <AppIcon name="check" /> },
   {
-    key: 'api-regression',
-    label: '接口用例管理',
+    key: 'api-catalog',
+    label: '接口管理',
     icon: <AppIcon name="api" />,
+  },
+  {
+    key: 'api-regression',
+    label: '自动化测试',
+    icon: <AppIcon name="play" />,
   },
   { key: 'plans', label: '测试计划', icon: <AppIcon name="calendar" /> },
   { key: 'reports', label: '执行与报告', icon: <AppIcon name="play" /> },
@@ -227,13 +237,9 @@ function readStandaloneRoute():
 
   const view = query.get('view');
   if (page === 'cases' && (view === 'workbench' || view === 'meeting')) {
-    const scope = readCaseScope();
-    if (scope?.kind === 'UI')
-      return { kind: 'case', projectId: scope.projectId };
-  }
-  if (page === 'api-regression' && view === 'workbench') {
     const projectId = idSchema.safeParse(query.get('projectId'));
-    if (projectId.success && idSchema.safeParse(query.get('caseId')).success)
+    const requirementId = idSchema.safeParse(query.get('requirementId'));
+    if (projectId.success && requirementId.success)
       return { kind: 'case', projectId: projectId.data };
   }
   return null;
@@ -266,6 +272,7 @@ function readCaseScope(): CaseScope | null {
     versionNo,
     kind,
     title,
+    ...(query.get('basis') === 'snapshot' && { historical: true }),
   };
 }
 
@@ -457,7 +464,19 @@ function SignedIn({
     requestNavigation(() => {
       const nextHash =
         key === 'cases' && selectedScope
-          ? `${key}?${new URLSearchParams({ projectId: selectedScope.projectId, requirementId: selectedScope.requirementId, versionId: selectedScope.requirementVersionId, title: selectedScope.title, versionNo: String(selectedScope.versionNo), kind: selectedScope.kind }).toString()}`
+          ? `${selectedScope.kind === 'API' ? 'api-regression' : key}?${new URLSearchParams(
+              {
+                projectId: selectedScope.projectId,
+                requirementId: selectedScope.requirementId,
+                ...(selectedScope.historical && {
+                  versionId: selectedScope.requirementVersionId,
+                  title: selectedScope.title,
+                  versionNo: String(selectedScope.versionNo),
+                  kind: selectedScope.kind,
+                  basis: 'snapshot',
+                }),
+              },
+            )}`
           : key;
       if (window.location.hash === `#${nextHash}`) return;
       navigationGranted.current = true;
@@ -608,10 +627,6 @@ function SignedIn({
         userId={me.user.id}
         project={selectedProject}
         scope={caseScope}
-        onScopeChange={(scope) => {
-          setCaseScope(scope);
-          navigate('cases', scope);
-        }}
       />
     );
   else if (page === 'plans')
@@ -645,6 +660,23 @@ function SignedIn({
         project={selectedProject}
       />
     );
+  else if (page === 'api-catalog')
+    content = (
+      <ApiCatalogPage
+        key={selectedProject?.id ?? 'none'}
+        userId={me.user.id}
+        project={selectedProject}
+        onNavigate={(hash) => {
+          if (
+            !/^#(?:api-catalog|api-regression)(?:\?|$)/.test(hash) ||
+            window.location.hash === hash
+          )
+            return;
+          navigationGranted.current = true;
+          window.location.hash = hash;
+        }}
+      />
+    );
   else if (page === 'api-regression')
     content = (
       <ApiWorkbenchPage
@@ -653,7 +685,7 @@ function SignedIn({
         project={selectedProject}
         onNavigate={(hash) => {
           if (
-            !/^#api-regression(?:\?|$)/.test(hash) ||
+            !/^#(?:api-catalog|api-regression)(?:\?|$)/.test(hash) ||
             window.location.hash === hash
           )
             return;

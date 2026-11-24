@@ -7,7 +7,7 @@ import {
 } from '../../../contracts/src/auxiliary.js';
 import { apiCaseContentSchema } from '../../../contracts/src/domain.js';
 import type { SqlExecutor } from '../../../persistence/src/database.js';
-import { requireProject } from '../access/policy.js';
+import { requireProject, requireProjectDraftWrite } from '../access/policy.js';
 import { conversationRow, personalActor } from '../conversations/common.js';
 import { DomainError, stale } from '../errors.js';
 import { assertSafeModelInput } from '../security/model-input.js';
@@ -69,16 +69,20 @@ export async function authorizeAuxiliarySource(
     );
     return conversation;
   }
-  await requireProject(
-    tx,
-    actor,
-    input.projectId,
-    input.purpose === 'requirementLookup'
-      ? 'requirements.write'
-      : input.purpose === 'sqlReview'
-        ? 'assets.write'
-        : 'project.read',
-  );
+  if (input.purpose === 'requirementLookup')
+    await requireProjectDraftWrite(
+      tx,
+      actor,
+      input.projectId,
+      'requirements.write',
+    );
+  else
+    await requireProject(
+      tx,
+      actor,
+      input.projectId,
+      input.purpose === 'sqlReview' ? 'assets.write' : 'project.read',
+    );
   if (
     input.purpose === 'requirementLookup' &&
     input.materials?.some((material) => material.fileResourceId)

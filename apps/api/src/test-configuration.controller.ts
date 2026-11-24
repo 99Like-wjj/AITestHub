@@ -57,8 +57,6 @@ export class TestConfigurationController {
         return res.json(
           await this.service.setCredential(actor, projectId, id, req.body),
         );
-      if (!match[2] && req.method === 'GET')
-        return res.json(await this.service.get(actor, projectId, id));
       if (!match[2] && req.method === 'PUT')
         return res.json(
           await this.service.save(actor, projectId, id, req.body),

@@ -3,6 +3,7 @@ import {
   Alert,
   App,
   Button,
+  Dropdown,
   Input,
   Modal,
   Select,
@@ -31,6 +32,36 @@ const safeHttp = z.object({
   body: z.json(),
 });
 
+function formatOriginalBody(raw: string) {
+  try {
+    JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  const tokens =
+    raw.match(/"(?:[^"\\]|\\.)*"|[{}\[\],:]|[^\s{}\[\],:]+/gs) ?? [];
+  let depth = 0;
+  const lines: string[] = [];
+  const newline = () => lines.push('\n', '  '.repeat(depth));
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token === '{' || token === '[') {
+      lines.push(token);
+      depth++;
+      if (tokens[index + 1] !== (token === '{' ? '}' : ']')) newline();
+    } else if (token === '}' || token === ']') {
+      depth--;
+      if (tokens[index - 1] !== (token === '}' ? '{' : '[')) newline();
+      lines.push(token);
+    } else if (token === ',') {
+      lines.push(token);
+      newline();
+    } else if (token === ':') lines.push(': ');
+    else if (token) lines.push(token);
+  }
+  return lines.join('');
+}
+
 function responseFields(value: JsonValue) {
   const fields: { value: string; label: string; sample: JsonValue }[] = [];
   function visit(part: JsonValue, path: string, depth: number) {
@@ -49,7 +80,12 @@ function responseFields(value: JsonValue) {
           depth + 1,
         );
       }
-    } else if (typeof part !== 'string' || !part.includes('[REDACTED')) {
+    } else if (
+      (typeof part !== 'string' || !part.includes('[REDACTED')) &&
+      (typeof part !== 'number' ||
+        !Number.isInteger(part) ||
+        Number.isSafeInteger(part))
+    ) {
       fields.push({
         value: path,
         label: path + ' · ' + (part === null ? 'null' : typeof part),
@@ -66,11 +102,13 @@ export function ApiAttemptEvidence({
   onRule,
   cleanup,
   logs,
+  catalogDraftHref,
 }: {
   attempt: Attempt;
   onRule?: (rule: ResponseRule) => string | undefined;
   cleanup?: ReactNode;
   logs?: ReactNode;
+  catalogDraftHref?: string;
 }) {
   const { message } = App.useApp();
   const [raw, setRaw] = useState(false);
@@ -93,6 +131,14 @@ export function ApiAttemptEvidence({
     response.body.length <= 256 * 1024
       ? response.body
       : undefined;
+  const responseText =
+    response?.rawBody !== undefined
+      ? raw
+        ? response.rawBody
+        : formatOriginalBody(response.rawBody)
+      : typeof response?.body === 'string'
+        ? response.body
+        : JSON.stringify(response?.body, null, 2);
 
   const request = safeHttp.safeParse(attempt.request_safe);
   const fields =
@@ -100,7 +146,15 @@ export function ApiAttemptEvidence({
       ? responseFields(response.body)
       : [];
 
-  async function copyRequest() {
+  async function copyEvidence(text: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      void message.success(`已复制${label}。`);
+    } catch {
+      setCopyFallback(text);
+    }
+  }
+  function copyRequest() {
     if (!request.success) return;
     const { method, url, headers, body } = request.data;
     const text = [
@@ -110,19 +164,15 @@ export function ApiAttemptEvidence({
         ? []
         : ['', typeof body === 'string' ? body : JSON.stringify(body)]),
     ].join('\n');
-    try {
-      await navigator.clipboard.writeText(text);
-      void message.success('已复制服务端脱敏的请求报文。');
-    } catch {
-      setCopyFallback(text);
-    }
+    void copyEvidence(text, '请求报文');
   }
-  function openRule(kind: ResponseRule['kind']) {
-    const first = fields[0];
-    if (!first) return;
+  function openRule(
+    kind: ResponseRule['kind'],
+    field: (typeof fields)[number],
+  ) {
     setRuleKind(kind);
-    setPath(first.value);
-    setExpected(JSON.stringify(first.sample));
+    setPath(field.value);
+    setExpected(JSON.stringify(field.sample));
     setName('');
     setSensitive(false);
     setError(undefined);
@@ -179,9 +229,11 @@ export function ApiAttemptEvidence({
                       实际读取 {response.receivedBytes} 字节
                     </span>
                   )}
-                  <Button size="small" onClick={() => setRaw(!raw)}>
-                    {raw ? '格式化' : '查看原文'}
-                  </Button>
+                  {response.rawBody !== undefined && (
+                    <Button size="small" onClick={() => setRaw(!raw)}>
+                      {raw ? '格式化' : '查看原文'}
+                    </Button>
+                  )}
                   {htmlResponse !== undefined && (
                     <Button
                       size="small"
@@ -190,37 +242,78 @@ export function ApiAttemptEvidence({
                       隔离预览 HTML
                     </Button>
                   )}
-                  {fields.length > 0 && (
-                    <>
-                      <Button
-                        size="small"
-                        onClick={() => openRule('assertion')}
-                      >
-                        生成断言草稿
-                      </Button>
-                      <Button
-                        size="small"
-                        onClick={() => openRule('extractor')}
-                      >
-                        生成提取草稿
-                      </Button>
-                    </>
+                  {responseText && (
+                    <Button
+                      size="small"
+                      onClick={() =>
+                        void copyEvidence(responseText, '响应正文')
+                      }
+                    >
+                      复制正文
+                    </Button>
                   )}
                 </Space>
                 {response.errorCode && (
                   <Alert type="info" showIcon title={response.errorCode} />
                 )}
-                <pre className="message-code">
-                  {typeof response.body === 'string'
-                    ? response.body
-                    : JSON.stringify(response.body, null, raw ? 0 : 2)}
-                </pre>
+                <pre className="message-code">{responseText}</pre>
+                {fields.length > 0 && (
+                  <details>
+                    <summary>响应字段 · {fields.length} 项</summary>
+                    <ul className="api-response-fields">
+                      {fields.map((field) => (
+                        <li key={field.value}>
+                          <Dropdown
+                            trigger={['hover', 'click']}
+                            menu={{
+                              items: [
+                                {
+                                  key: 'assertion',
+                                  label: '生成断言草稿',
+                                  onClick: () => openRule('assertion', field),
+                                },
+                                {
+                                  key: 'extractor',
+                                  label: '生成提取草稿',
+                                  onClick: () => openRule('extractor', field),
+                                },
+                              ],
+                            }}
+                          >
+                            <Button
+                              size="small"
+                              type="text"
+                              aria-haspopup="menu"
+                            >
+                              {field.label}
+                            </Button>
+                          </Dropdown>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
                 <details>
                   <summary>安全响应头</summary>
                   <pre className="message-code">
                     {JSON.stringify(response.headers, null, 2)}
                   </pre>
                 </details>
+                {Boolean(response.cookieSummary?.length) && (
+                  <details>
+                    <summary>响应 Cookie 摘要</summary>
+                    <ul>
+                      {response.cookieSummary?.map((cookie, index) => (
+                        <li key={cookie.name + ':' + index}>
+                          {cookie.name}
+                          {cookie.httpOnly && ' · HttpOnly'}
+                          {cookie.secure && ' · Secure'}
+                          {cookie.sameSite && ' · SameSite=' + cookie.sameSite}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
               </div>
             ) : (
               <p className="caption">此请求意图尚无安全响应。</p>
@@ -232,9 +325,16 @@ export function ApiAttemptEvidence({
             children: (
               <div className="stack">
                 {request.success && (
-                  <Button size="small" onClick={() => void copyRequest()}>
-                    复制脱敏请求
-                  </Button>
+                  <Space wrap>
+                    <Button size="small" onClick={() => void copyRequest()}>
+                      复制脱敏请求
+                    </Button>
+                    {catalogDraftHref && (
+                      <Button size="small" href={catalogDraftHref}>
+                        保存为接口草稿
+                      </Button>
+                    )}
+                  </Space>
                 )}
                 <pre className="message-code">
                   {JSON.stringify(attempt.request_safe, null, 2)}
@@ -301,7 +401,7 @@ export function ApiAttemptEvidence({
         />
       </Modal>
       <Modal
-        title="复制脱敏请求"
+        title="复制报文"
         open={copyFallback !== undefined}
         onCancel={() => setCopyFallback(undefined)}
         footer={

@@ -6,26 +6,38 @@ import mysql from 'mysql2/promise';
 import { z } from 'zod';
 import type {
   JsonValue,
+  SafeResponse,
   WorkerTransport,
 } from '../../../packages/contracts/src/api-execution.js';
 import { encodeMultipart, type MultipartFileLoader } from './multipart-body.js';
+import { createHash } from 'node:crypto';
 
 export interface RawTransportResponse {
   status: number | null;
   headers: Record<string, string>;
   body: JsonValue;
+  rawBody?: string;
+  cookieSummary?: NonNullable<SafeResponse['cookieSummary']>;
   elapsedMs: number;
   receivedBytes?: number;
+  jsonParsed?: boolean;
   errorCode: string | null;
-  sideEffectCertainty: 'known' | 'unknown';
+  sideEffectCertainty: 'known' | 'unknown' | 'notApplicable';
 }
-function captureBody(bytes: Buffer): JsonValue {
+function captureBody(
+  bytes: Buffer,
+): Pick<RawTransportResponse, 'body' | 'jsonParsed' | 'rawBody'> {
   const text = bytes.toString('utf8');
+  // Preserve the exact source where it fits alongside normalized evidence in the receipt.
+  const raw =
+    bytes.length <= 128 * 1024 && Buffer.from(text, 'utf8').equals(bytes)
+      ? { rawBody: text }
+      : {};
   let value: unknown;
   try {
     value = JSON.parse(text) as unknown;
   } catch {
-    return text;
+    return { body: text, jsonParsed: false, ...raw };
   }
   const pending: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
   let nodes = 0;
@@ -38,7 +50,33 @@ function captureBody(bytes: Buffer): JsonValue {
       for (const child of Object.values(item.value))
         pending.push({ value: child, depth: item.depth + 1 });
   }
-  return z.json().parse(value);
+  return { body: z.json().parse(value), jsonParsed: true, ...raw };
+}
+function summarizeCookies(
+  headers: string[] | undefined,
+): NonNullable<SafeResponse['cookieSummary']> {
+  return (headers ?? []).slice(0, 64).flatMap((header) => {
+    const [pair, ...attributes] = header.split(';');
+    const split = pair?.indexOf('=') ?? -1;
+    const name = split > 0 ? pair?.slice(0, split).trim() : undefined;
+    if (!name || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,120}$/.test(name)) return [];
+    const attributesLower = attributes.map((attribute) =>
+      attribute.trim().toLowerCase(),
+    );
+    const sameSite = attributesLower
+      .find((attribute) => attribute.startsWith('samesite='))
+      ?.slice(9);
+    return [
+      {
+        name,
+        secure: attributesLower.includes('secure'),
+        httpOnly: attributesLower.includes('httponly'),
+        ...(sameSite === 'lax' || sameSite === 'strict' || sameSite === 'none'
+          ? { sameSite }
+          : {}),
+      },
+    ];
+  });
 }
 /** Exactly one ClientRequest, fresh connection, no redirect following or implicit retry. */
 async function requestHttp(
@@ -58,6 +96,32 @@ async function requestHttp(
   let body =
     transport.body === null ? null : Buffer.from(transport.body, 'utf8');
   let multipartContentType: string | undefined;
+  if (transport.binary) {
+    if (
+      body !== null ||
+      transport.multipart ||
+      ['GET', 'HEAD'].includes(transport.method.toUpperCase())
+    )
+      return notSent('REQUEST_NOT_DISPATCHED_HEADER_CONFLICT');
+    try {
+      if (!loadMultipartFile || signal?.aborted)
+        throw new Error('File unavailable');
+      const file = await loadMultipartFile(transport.binary);
+      if (
+        file.length !== transport.binary.bytes ||
+        createHash('sha256').update(file).digest('hex') !==
+          transport.binary.sha256
+      )
+        throw new Error('Transport file digest changed');
+      body = Buffer.from(file);
+    } catch {
+      return notSent(
+        signal?.aborted
+          ? 'REQUEST_NOT_DISPATCHED_INTERRUPTED'
+          : 'REQUEST_NOT_DISPATCHED_FILE_UNAVAILABLE',
+      );
+    }
+  }
   if (transport.multipart) {
     if (
       body !== null ||
@@ -152,7 +216,8 @@ async function requestHttp(
             settle({
               status: response.statusCode ?? null,
               headers,
-              body: captureBody(Buffer.concat(chunks)),
+              ...captureBody(Buffer.concat(chunks)),
+              cookieSummary: summarizeCookies(response.headers['set-cookie']),
               receivedBytes: size,
               errorCode: null,
               sideEffectCertainty: 'known',
@@ -181,6 +246,13 @@ async function requestHttp(
     else request.end();
   });
 }
+function observationRows(result: unknown): RawTransportResponse['body'] {
+  const bytes = JSON.stringify(result);
+  if (Buffer.byteLength(bytes) > 256 * 1024)
+    throw new Error('Database observation exceeds response limit');
+  return { rows: JSON.parse(bytes) as RawTransportResponse['body'] };
+}
+
 async function requestSql(
   transport: Extract<WorkerTransport, { type: 'sql' }>,
 ): Promise<RawTransportResponse> {
@@ -200,6 +272,7 @@ async function requestSql(
       });
       try {
         await client.connect();
+        if (transport.mode === 'read') await client.query('BEGIN READ ONLY');
         const result = await client.query(
           transport.statement,
           transport.values,
@@ -207,10 +280,14 @@ async function requestSql(
         return {
           status: null,
           headers: {},
-          body: { affectedRows: result.rowCount ?? 0 },
+          body:
+            transport.mode === 'read'
+              ? observationRows(result.rows)
+              : { affectedRows: result.rowCount ?? 0 },
           elapsedMs: Math.round(performance.now() - started),
           errorCode: null,
-          sideEffectCertainty: 'known',
+          sideEffectCertainty:
+            transport.mode === 'read' ? 'notApplicable' : 'known',
         };
       } finally {
         await client.end().catch(() => {});
@@ -229,6 +306,23 @@ async function requestSql(
     });
     let completed = false;
     try {
+      if (transport.mode === 'read') {
+        await connection.query('START TRANSACTION READ ONLY');
+        const [rows] = await connection.execute<mysql.RowDataPacket[]>(
+          { sql: transport.statement, timeout: transport.timeoutMs },
+          transport.values,
+        );
+        await connection.rollback();
+        completed = true;
+        return {
+          status: null,
+          headers: {},
+          body: observationRows(rows),
+          elapsedMs: Math.round(performance.now() - started),
+          errorCode: null,
+          sideEffectCertainty: 'notApplicable',
+        };
+      }
       const [result] = await connection.execute<mysql.ResultSetHeader>(
         { sql: transport.statement, timeout: transport.timeoutMs },
         transport.values,

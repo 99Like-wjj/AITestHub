@@ -80,6 +80,7 @@ const reviewedOfficeReadOperations: ReadonlySet<string> = new Set([
   'ath_requirements.auxiliary-status',
   'ath_requirements.find',
   'ath_requirements.get',
+  'ath_requirements.history',
   'ath_requirements.list',
   'ath_requirements.list-page',
   'ath_results.get',
@@ -124,6 +125,8 @@ function officeBusinessOperationSchema(
 /** Fixed names, no filesystem, shell, arbitrary network/SQL, execute or subagent entry. */
 export const AI_BUSINESS_TOOL_NAMES = [
   'ath_assets',
+  'ath_api_catalog',
+  'ath_api_automation',
   'ath_reviews',
   'ath_plans',
   'ath_api_runs',
@@ -170,6 +173,7 @@ async function assertWriteTarget(
   const envelope = z
     .object({
       id: z.string().optional(),
+      op: z.string(),
       entryId: z.string().optional(),
       spaceId: z.string().optional(),
       runId: z.string().optional(),
@@ -177,7 +181,11 @@ async function assertWriteTarget(
       input: z.record(z.string(), z.unknown()).optional(),
     })
     .parse(input);
-  const body = envelope.input ?? {};
+  const body =
+    name === 'ath_api_automation'
+      ? z.record(z.string(), z.unknown()).parse(input)
+      : (envelope.input ?? {});
+  const apiAsset = name === 'ath_api_automation' || name === 'ath_api_catalog';
   const batchRuns =
     name === 'ath_ui_executions' &&
     z.object({ op: z.literal('close-progress-batch') }).safeParse(input).success
@@ -186,11 +194,27 @@ async function assertWriteTarget(
           []
         ).map((item) => item.runId)
       : [];
+  const uiScene =
+    name === 'ath_assets' && envelope.op === 'create-scoped-case'
+      ? z.object({ scenarioId: z.string() }).safeParse(body.scenario).data
+          ?.scenarioId
+      : name === 'ath_assets' &&
+          envelope.op === 'create-case' &&
+          typeof body.scenarioId === 'string'
+        ? body.scenarioId
+        : undefined;
+  const supplementCase =
+    name === 'ath_assets' && envelope.op === 'create-scoped-case'
+      ? z.object({ caseId: z.string() }).safeParse(body.supplementOrigin).data
+          ?.caseId
+      : undefined;
   const ids = [
     envelope.id,
     envelope.entryId,
     envelope.spaceId,
     envelope.runId,
+    uiScene,
+    supplementCase,
     ...batchRuns,
     ...['objectIds', 'sourceIds'].flatMap(
       (key) => z.array(z.string()).safeParse(body[key]).data ?? [],
@@ -198,11 +222,27 @@ async function assertWriteTarget(
     ...['masterId'].map((key) =>
       typeof body[key] === 'string' ? body[key] : undefined,
     ),
+    ...(apiAsset
+      ? ['id', 'assetId', 'parentId'].map((key) =>
+          typeof body[key] === 'string' ? body[key] : undefined,
+        )
+      : []),
+    ...(name === 'ath_api_automation'
+      ? [
+          z
+            .object({ scenarioId: z.string().optional().nullable() })
+            .safeParse(body.content).data?.scenarioId ?? undefined,
+        ]
+      : []),
     ...(typeof body.sourceCaseId === 'string' ? [body.sourceCaseId] : []),
   ].filter((id): id is string => id !== undefined);
   if (
     fixed.objectIds?.length &&
-    (!ids.length || ids.some((id) => !fixed.objectIds?.includes(id)))
+    (!ids.length ||
+      (name === 'ath_assets' &&
+        envelope.op === 'create-scoped-case' &&
+        !uiScene) ||
+      ids.some((id) => !fixed.objectIds?.includes(id)))
   )
     throw new DomainError(
       'BUSINESS_CONFLICT',
@@ -211,7 +251,26 @@ async function assertWriteTarget(
     );
   if (!fixed.requirementId) return;
   const expected = fixed.requirementId;
-  if (envelope.requirementId && envelope.requirementId !== expected)
+  if (name === 'ath_api_catalog')
+    throw new DomainError(
+      'BUSINESS_CONFLICT',
+      '接口目录是项目级资产，请使用项目作为本条消息的操作范围。',
+      409,
+    );
+  async function requirementOwns(ids: string[]) {
+    const matched = await db.query(
+      `SELECT a.id FROM app.test_assets a
+       LEFT JOIN app.test_assets parent ON parent.id=a.parent_id AND parent.project_id=a.project_id
+       JOIN app.requirement_versions v ON v.id=COALESCE(a.requirement_version_id,parent.requirement_version_id)
+       WHERE a.id=ANY($1::uuid[]) AND a.project_id=$2 AND v.requirement_id=$3`,
+      [ids, args.projectId, expected],
+    );
+    return matched.rowCount === new Set(ids).size;
+  }
+  if (
+    (envelope.requirementId && envelope.requirementId !== expected) ||
+    (typeof body.requirementId === 'string' && body.requirementId !== expected)
+  )
     throw new DomainError(
       'BUSINESS_CONFLICT',
       '写入需求与消息固定目标不一致。',
@@ -219,12 +278,30 @@ async function assertWriteTarget(
     );
   const version =
     body.requirementVersionId ??
+    body.basisRequirementVersionId ??
     (typeof body.content === 'object' &&
     body.content !== null &&
     'requirementVersionId' in body.content
       ? body.content.requirementVersionId
       : undefined);
   if (typeof version === 'string') {
+    if (name === 'ath_assets' && ids.length && !(await requirementOwns(ids)))
+      throw new DomainError(
+        'BUSINESS_CONFLICT',
+        '用例或场景未关联本条消息固定的需求。',
+        409,
+      );
+    if (
+      name === 'ath_api_automation' &&
+      envelope.op === 'revise-scenario' &&
+      (typeof body.assetId !== 'string' ||
+        !(await requirementOwns([body.assetId])))
+    )
+      throw new DomainError(
+        'BUSINESS_CONFLICT',
+        '原场景未关联本条消息固定的需求。',
+        409,
+      );
     if (
       !(
         await db.query(
@@ -240,6 +317,15 @@ async function assertWriteTarget(
       );
     return;
   }
+  if (
+    name === 'ath_api_automation' &&
+    (envelope.op === 'revise-scenario' || envelope.op === 'create-scenario')
+  )
+    throw new DomainError(
+      'BUSINESS_CONFLICT',
+      '请在项目操作范围内创建独立场景或解除需求关联。',
+      409,
+    );
   if (name === 'ath_requirement_materials' && !envelope.requirementId)
     throw new DomainError(
       'BUSINESS_CONFLICT',
@@ -261,16 +347,13 @@ async function assertWriteTarget(
       : []),
   ].filter((id): id is string => id !== undefined);
   if (
-    (name === 'ath_assets' ||
+    (name === 'ath_api_automation' ||
+      name === 'ath_assets' ||
       name === 'ath_reviews' ||
       (name === 'ath_api_runs' && body.content !== undefined)) &&
     assetIds.length
   ) {
-    const count = await db.query(
-      `SELECT a.id FROM app.test_assets a JOIN app.requirement_versions v ON v.id=a.requirement_version_id WHERE a.id=ANY($1::uuid[]) AND a.project_id=$2 AND v.requirement_id=$3`,
-      [assetIds, fixed.projectId, expected],
-    );
-    if (count.rowCount === new Set(assetIds).size) return;
+    if (await requirementOwns(assetIds)) return;
   }
   if (name === 'ath_plans' || name === 'ath_api_runs') {
     const caseIds = [
@@ -278,11 +361,7 @@ async function assertWriteTarget(
       ...(z.array(z.string()).safeParse(body.selectedCaseIds).data ?? []),
     ];
     if (caseIds.length) {
-      const count = await db.query(
-        `SELECT a.id FROM app.test_assets a JOIN app.requirement_versions v ON v.id=a.requirement_version_id WHERE a.id=ANY($1::uuid[]) AND a.project_id=$2 AND v.requirement_id=$3`,
-        [caseIds, fixed.projectId, expected],
-      );
-      if (count.rowCount === new Set(caseIds).size) return;
+      if (await requirementOwns(caseIds)) return;
     }
   }
   if (

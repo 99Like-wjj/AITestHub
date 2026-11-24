@@ -1,4 +1,3 @@
-import { useEffect, useRef, useState } from 'react';
 import type { z } from 'zod';
 import {
   multipartMaxFileBytes,
@@ -6,13 +5,8 @@ import {
   multipartRequestBodySchema,
 } from '../../../packages/contracts/src/api-multipart';
 import { Alert, Button, Input, Select } from 'antd';
-import {
-  fileCenterListSchema,
-  type FileCenterEntry,
-} from '../../../packages/contracts/src/agent-workspace';
-import { fileReceiptSchema } from '../../../packages/contracts/src/files';
-import { api, describeError } from './api';
 import { VariableField, type ApiVariableOption } from './api-variable-fields';
+import { useApiFileSelection } from './api-file-fields';
 
 type MultipartPartDraft = z.infer<
   typeof multipartRequestBodySchema
@@ -31,88 +25,16 @@ export function ApiMultipartFields({
   variableOptions: ApiVariableOption[];
   onChange: (parts: MultipartPartDraft[]) => void;
 }) {
-  const [query, setQuery] = useState('');
-  const [files, setFiles] = useState<FileCenterEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [checking, setChecking] = useState(false);
-  const [error, setError] = useState<string>();
-  const activeCheck = useRef<AbortController | null>(null);
-  const hasFile = parts.some((part) => part.kind === 'file');
-
-  useEffect(() => {
-    if (!hasFile) return;
-    const signal = new AbortController();
-    const params = new URLSearchParams({
-      projectId,
-      query: query.trim(),
-      limit: '50',
-    });
-    setLoading(true);
-    const timer = window.setTimeout(() => {
-      void api(
-        '/me/file-center?' + params,
-        { signal: signal.signal },
-        fileCenterListSchema,
-      )
-        .then((response) => {
-          if (signal.signal.aborted) return;
-          const verified = new Map<string, FileCenterEntry>();
-          for (const file of response.entries) {
-            if (
-              file.projectId === projectId &&
-              file.available &&
-              !file.deletedAt &&
-              BigInt(file.bytes) <= BigInt(multipartMaxFileBytes)
-            )
-              verified.set(file.resourceId, file);
-          }
-          setFiles([...verified.values()]);
-        })
-        .catch((failure: unknown) => {
-          if (!signal.signal.aborted) setError(describeError(failure));
-        })
-        .finally(() => {
-          if (!signal.signal.aborted) setLoading(false);
-        });
-    }, 200);
-    return () => {
-      window.clearTimeout(timer);
-      signal.abort();
-    };
-  }, [projectId, query, hasFile]);
-  useEffect(() => () => activeCheck.current?.abort(), [projectId]);
+  const selection = useApiFileSelection({
+    projectId,
+    maximumBytes: multipartMaxFileBytes,
+    active: parts.some((part) => part.kind === 'file'),
+  });
 
   function replace(index: number, part: MultipartPartDraft) {
     onChange(parts.map((value, at) => (at === index ? part : value)));
   }
-  async function chooseFile(index: number, name: string, id: string) {
-    activeCheck.current?.abort();
-    const controller = new AbortController();
-    activeCheck.current = controller;
-    setChecking(true);
-    setError(undefined);
-    try {
-      const { file } = await api(
-        '/files/' + id,
-        { signal: controller.signal },
-        fileReceiptSchema,
-      );
-      if (
-        file.projectId !== projectId ||
-        file.ownerScope !== 'project' ||
-        file.status !== 'verified' ||
-        BigInt(file.bytes) > BigInt(multipartMaxFileBytes)
-      )
-        throw Error('此文件不是当前项目中已验证的原件。');
-      if (!controller.signal.aborted)
-        replace(index, { kind: 'file', name, fileResourceId: file.id });
-    } catch (failure) {
-      if (!controller.signal.aborted) setError(describeError(failure));
-    } finally {
-      if (!controller.signal.aborted) setChecking(false);
-    }
-  }
-  const locked = disabled || checking;
+  const locked = disabled || selection.checking;
   return (
     <div className="stack">
       <p className="caption">
@@ -120,20 +42,9 @@ export function ApiMultipartFields({
         ID。运行前平台仍会核对原件和限额。
       </p>
       {parts.map((part, index) => {
-        const fileOptions = files.map((file) => ({
-          value: file.resourceId,
-          label:
-            (file.originalName ?? file.path) + ' · ' + file.bytes + ' 字节',
-        }));
-        if (
-          part.kind === 'file' &&
-          part.fileResourceId &&
-          !fileOptions.some((item) => item.value === part.fileResourceId)
-        )
-          fileOptions.unshift({
-            value: part.fileResourceId,
-            label: '原文件引用 · ' + part.fileResourceId,
-          });
+        const fileOptions = selection.options(
+          part.kind === 'file' ? part.fileResourceId : undefined,
+        );
         return (
           <div className="card pad stack" key={index}>
             <div className="api-new-case-inputs">
@@ -178,12 +89,19 @@ export function ApiMultipartFields({
                 value={part.fileResourceId || undefined}
                 showSearch
                 filterOption={false}
-                onSearch={setQuery}
-                loading={loading || checking}
+                onSearch={selection.setQuery}
+                loading={selection.loading || selection.checking}
                 disabled={locked}
                 options={fileOptions}
                 onChange={(id) => {
-                  if (id) void chooseFile(index, part.name, id);
+                  if (id)
+                    void selection.verify(id, (fileResourceId) =>
+                      replace(index, {
+                        kind: 'file',
+                        name: part.name,
+                        fileResourceId,
+                      }),
+                    );
                 }}
                 notFoundContent="没有可选择的文件，检查项目、文件名或登记状态。"
               />
@@ -209,7 +127,9 @@ export function ApiMultipartFields({
           </div>
         );
       })}
-      {error && <Alert type="error" showIcon title={error} />}
+      {selection.error && (
+        <Alert type="error" showIcon title={selection.error} />
+      )}
       <div>
         <Button
           disabled={locked || parts.length >= multipartMaxParts}

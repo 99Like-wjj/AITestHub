@@ -34,7 +34,6 @@ import {
   type OpinionRow,
 } from './repository.js';
 
-import { latestApiRegressionInTransaction } from './api-regression.js';
 import { uiMeetingGate } from './ui-review.js';
 
 interface ApprovalRow extends QueryResultRow {
@@ -657,14 +656,12 @@ export class ReviewService {
     caseId: string,
     kind: 'UI' | 'API',
   ) {
-    if (kind === 'API') {
-      const { approval, snapshot } = await latestApiRegressionInTransaction(
-        transaction,
-        projectId,
-        caseId,
+    if (kind !== 'UI')
+      throw new DomainError(
+        'VALIDATION_ERROR',
+        '接口用例的回归资格由接口自动化维护。',
+        400,
       );
-      return { approval, snapshot };
-    }
     const asset = await getAsset(transaction, projectId, caseId);
     if (asset.target_type !== 'case' || asset.kind !== 'UI')
       throw new DomainError('NOT_FOUND', '没有此类型用例。', 404);
@@ -714,6 +711,8 @@ export class ReviewService {
       )
     ).rows[0];
     if (!row) throw new DomainError('NOT_FOUND', '此项目没有该批准快照。', 404);
+    if (row.kind !== 'UI')
+      throw new DomainError('NOT_FOUND', '此项目没有该 UI 批准快照。', 404);
     return {
       approval: approvalDto(row),
       snapshot: approvalContentSnapshotSchema.parse(row.snapshot),

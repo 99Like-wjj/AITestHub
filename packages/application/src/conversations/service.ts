@@ -35,7 +35,7 @@ import type {
 } from '../../../persistence/src/database.js';
 import { ConfigurationService } from '../configuration/service.js';
 import { readMessageModelSnapshot } from '../configuration/model-selection.js';
-import { requireProject } from '../access/policy.js';
+import { listProjectAccess, requireProject } from '../access/policy.js';
 import { OperationService, canonicalJson } from '../operations/service.js';
 import { DomainError, stale } from '../errors.js';
 import { rejectMissingAcceptedReceipt } from '../recovery/receipts.js';
@@ -253,13 +253,14 @@ export class ConversationsService {
   async list(actor: ActorContext, options: { archived?: boolean } = {}) {
     return this.db.transaction(async (tx) => {
       await personalActor(tx, actor);
+      const projects = await listProjectAccess(tx, actor);
       const rows = await tx.query<ConversationRow>(
         `SELECT c.*,${conversationRequirementTitleSql},${conversationFirstUserTitleSql},(SELECT t.state FROM app.ai_tasks t WHERE t.conversation_id=c.id AND t.owner_id=$1 AND t.state IN ('accepted','running','cancelling') ORDER BY t.created_at DESC,t.id DESC LIMIT 1) active_task_status
         FROM app.ai_conversations c WHERE c.owner_id=$1 AND c.deleted_at IS NULL
         AND (($2 AND c.archived_at IS NOT NULL) OR (NOT $2 AND c.archived_at IS NULL))
-        AND (c.project_id IS NULL OR EXISTS(SELECT 1 FROM app.project_members m JOIN app.projects p ON p.id=m.project_id WHERE m.user_id=$1 AND m.project_id=c.project_id AND m.active AND p.active))
+        AND (c.project_id IS NULL OR c.project_id=ANY($3::uuid[]))
         ORDER BY c.updated_at DESC,c.id LIMIT 200`,
-        [actor.userId, options.archived ?? false],
+        [actor.userId, options.archived ?? false, projects.map(({ id }) => id)],
       );
       return { conversations: rows.rows.map(conversationDto) };
     });
@@ -787,13 +788,14 @@ export class ConversationsService {
     z.string().max(500).parse(query);
     return this.db.transaction(async (tx) => {
       await personalActor(tx, actor);
+      const projects = await listProjectAccess(tx, actor);
       const rows = await tx.query<ConversationRow>(
         `SELECT c.*,${conversationRequirementTitleSql},${conversationFirstUserTitleSql},(SELECT t.state FROM app.ai_tasks t WHERE t.conversation_id=c.id AND t.owner_id=$1 AND t.state IN ('accepted','running','cancelling') ORDER BY t.created_at DESC,t.id DESC LIMIT 1) active_task_status
         FROM app.ai_conversations c WHERE c.owner_id=$1 AND c.deleted_at IS NULL
-        AND (c.project_id IS NULL OR EXISTS(SELECT 1 FROM app.project_members m JOIN app.projects p ON p.id=m.project_id WHERE m.user_id=$1 AND m.project_id=c.project_id AND m.active AND p.active))
+        AND (c.project_id IS NULL OR c.project_id=ANY($4::uuid[]))
         AND ($2='' OR position(lower($2) in lower(COALESCE(c.alias,c.default_title)))>0 OR EXISTS(SELECT 1 FROM app.ai_messages m WHERE m.conversation_id=c.id AND m.deleted_at IS NULL AND position(lower($2) in lower(m.content))>0))
         ORDER BY c.updated_at DESC,c.id LIMIT $3`,
-        [actor.userId, query, query ? 20 : 5],
+        [actor.userId, query, query ? 20 : 5, projects.map(({ id }) => id)],
       );
       return { conversations: rows.rows.map(conversationDto) };
     });

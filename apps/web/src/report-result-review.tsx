@@ -29,7 +29,7 @@ import { api, describeError } from './api';
 import { BeijingTime } from './beijing-time';
 import { CommandDialog, useBusinessCommand } from './business-command';
 import { EvidenceGallery, type EvidenceGalleryItem } from './evidence-gallery';
-import { severityLabels } from './issue-context';
+import { severityLabels, useIssueContext } from './issue-context';
 import {
   ReportReceiptControl,
   useReportCommandRecovery,
@@ -66,18 +66,22 @@ const localDateTime = () => {
 
 function ReportIssueDialog({
   projectId,
+  userId,
   scope,
   mode,
   description,
   retest,
+  needsRequirement,
   onClose,
   onSaved,
 }: {
   projectId: string;
+  userId: string;
   scope: ReportProblemReviewScope;
   mode: IssueMode;
   description: string;
   retest?: Retest | undefined;
+  needsRequirement: boolean;
   onClose: () => void;
   onSaved: (
     issue: z.infer<typeof fileReportIssueReceiptSchema>['issue'],
@@ -89,6 +93,16 @@ function ReportIssueDialog({
     'normal',
   );
   const [assigneeId, setAssignee] = useState<string>();
+  const [requirementId, setRequirement] = useState<string>();
+  const [requirementVersionId, setRequirementVersion] = useState<string>();
+  const requirementContext = useIssueContext(
+    mode === 'new' && needsRequirement ? projectId : null,
+    false,
+    userId,
+  );
+  const selectedRequirement = requirementContext.requirements.find(
+    (option) => option.id === requirementId,
+  );
   const [issueId, setIssue] = useState<string>();
   const [assignees, setAssignees] = useState<
     z.infer<typeof reportIssueAssigneesSchema>['users']
@@ -145,7 +159,17 @@ function ReportIssueDialog({
         reportReview: scope,
         ...(retest ? { retestId: retest.id } : {}),
         ...(mode === 'new'
-          ? { target: mode, title, description: text, assigneeId, severity }
+          ? {
+              target: mode,
+              title,
+              description: text,
+              assigneeId,
+              severity,
+              ...(needsRequirement && requirementId ? { requirementId } : {}),
+              ...(needsRequirement && requirementVersionId
+                ? { requirementVersionId }
+                : {}),
+            }
           : {
               target: mode,
               issueId: target?.id,
@@ -167,14 +191,21 @@ function ReportIssueDialog({
       open
       title={mode === 'new' ? '提缺陷并指派' : '关联已有缺陷'}
       command={command}
-      dirty={Boolean(title || text !== description || assigneeId || issueId)}
+      dirty={Boolean(
+        title || text !== description || assigneeId || issueId || requirementId,
+      )}
       onClose={onClose}
       onSave={() => void save()}
       saveLabel={mode === 'new' ? '确认提单并指派' : '确认关联'}
       allowSave={
         !sending &&
         (mode === 'new'
-          ? Boolean(title.trim() && text.trim() && assigneeId)
+          ? Boolean(
+              title.trim() &&
+              text.trim() &&
+              assigneeId &&
+              (!needsRequirement || selectedRequirement),
+            )
           : Boolean(issueId))
       }
     >
@@ -188,6 +219,9 @@ function ReportIssueDialog({
         }}
       />
       {loadError && <Alert type="error" showIcon title={loadError} />}
+      {requirementContext.error && (
+        <Alert type="error" showIcon title={requirementContext.error} />
+      )}
       <p className="caption">
         来源已绑定当前结果修订
         {scope.stepOrdinal ? `的步骤 ${scope.stepOrdinal}` : ''}。
@@ -196,6 +230,43 @@ function ReportIssueDialog({
       <Form layout="vertical">
         {mode === 'new' ? (
           <>
+            {needsRequirement && (
+              <>
+                <Form.Item label="缺陷归属需求" required>
+                  <Select
+                    aria-label="缺陷归属需求"
+                    showSearch={{ optionFilterProp: 'label' }}
+                    value={requirementId}
+                    onChange={(id) => {
+                      setRequirement(id);
+                      setRequirementVersion(undefined);
+                    }}
+                    disabled={sending}
+                    placeholder="选择项目中的实际需求"
+                    notFoundContent="项目中暂无可选需求"
+                    options={requirementContext.requirements.map((entry) => ({
+                      value: entry.id,
+                      label: entry.title,
+                    }))}
+                  />
+                </Form.Item>
+                <Form.Item label="需求版本（可选）">
+                  <Select
+                    aria-label="缺陷归属需求版本"
+                    allowClear
+                    value={requirementVersionId}
+                    onChange={setRequirementVersion}
+                    disabled={sending || !selectedRequirement}
+                    options={
+                      selectedRequirement?.versions.map((entry) => ({
+                        value: entry.id,
+                        label: `版本 ${entry.versionNo}`,
+                      })) ?? []
+                    }
+                  />
+                </Form.Item>
+              </>
+            )}
             <Form.Item label="缺陷标题" htmlFor="report-issue-title" required>
               <Input
                 id="report-issue-title"
@@ -726,10 +797,15 @@ export function ReportResultReview({
       {issueMode && (
         <ReportIssueDialog
           projectId={projectId}
+          userId={userId}
           mode={issueMode}
           scope={issueScope}
           description={issueDescription}
           retest={reproduced}
+          needsRequirement={
+            content.kind === 'API' &&
+            item.scopeItem.requirementVersionId === null
+          }
           onClose={() => setIssueMode(undefined)}
           onSaved={(issue) => {
             setIssueMode(undefined);

@@ -765,3 +765,24 @@
 .api-proof-receipt-status {
   margin: 8px 10px;
 }
+
+.api-response-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 6px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.api-response-fields button {
+  max-width: 100%;
+  height: auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.api-response-fields li {
+  min-width: 0;
+  max-width: 100%;
+}

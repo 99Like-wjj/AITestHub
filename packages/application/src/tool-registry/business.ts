@@ -1,5 +1,6 @@
 import { registerRequirementQueryTools } from './requirement-queries.js';
 import { registerUiDeliveryTools } from './ui-delivery.js';
+import { registerApiAssetTools } from './api-assets.js';
 import {
   uiArchivePreviewToolSchema,
   uiArchiveCommitToolSchema,
@@ -105,6 +106,7 @@ export function createBusinessRegistry(
   registerRequirementStateTools(registry, db);
   registerRequirementQueryTools(registry, db, services.auxiliary);
   registerUiDeliveryTools(registry, db, services.files);
+  registerApiAssetTools(registry, db);
   const assets = new AssetService(db);
   const reviews = new ReviewService(db);
   const uiReviews = new UiReviewService(db);
@@ -948,7 +950,7 @@ export function createBusinessRegistry(
           report.facts.items
             .filter((item) =>
               JSON.stringify({
-                scenario: item.scopeItem.scenario.title,
+                scenario: item.scopeItem.scenario?.title ?? '单接口用例',
                 title: item.scopeItem.content.title,
                 observations: item.result?.content.actualObservations,
               })

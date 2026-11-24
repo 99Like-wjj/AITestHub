@@ -137,6 +137,7 @@ const officialBusinessRoots = new Set([
   'plans',
   'api-run',
   'api-runs',
+  'api-catalog',
   'schedule',
   'schedules',
   'test-configuration',

@@ -80,12 +80,19 @@ export function registerInternalTools(
   add(
     'ath_requirement_materials',
     'get-manifest',
-    z.strictObject({ op: z.literal('get-manifest'), ...target }),
-    'read',
-    async (a, i) => ({
-      versions: (await requirements.detail(a, i.projectId, i.requirementId))
-        .versions,
+    z.strictObject({
+      op: z.literal('get-manifest'),
+      ...target,
+      requirementVersionId: idSchema.optional(),
     }),
+    'read',
+    (a, i) =>
+      requirements.manifest(
+        a,
+        i.projectId,
+        i.requirementId,
+        i.requirementVersionId,
+      ),
   );
   add(
     'ath_requirement_membership',

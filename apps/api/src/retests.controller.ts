@@ -49,18 +49,9 @@ export class RetestsController {
           commandIdSchema.parse(decodeURIComponent(receipt[1])),
         ),
       );
-    const group =
-      /^groups\/([^/]+)(?:\/(start-api|start-preview|associate-run))?$/.exec(
-        path,
-      );
+    const group = /^groups\/([^/]+)\/(start-api|start-preview)$/.exec(path);
     if (group?.[1]) {
       const id = idSchema.parse(group[1]);
-      if (group[2] === 'associate-run' && req.method === 'POST')
-        return res.json(
-          await this.retests.associateRun(actor, projectId, id, req.body),
-        );
-      if (!group[2] && req.method === 'GET')
-        return res.json(await this.retests.group(actor, projectId, id));
       if (group[2] === 'start-preview' && req.method === 'GET')
         return res.json(await this.retests.startPreview(actor, projectId, id));
       if (group[2] === 'start-api' && req.method === 'POST')

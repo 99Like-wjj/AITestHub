@@ -35,6 +35,10 @@ import type { TestConfigurationView } from '../../../packages/contracts/src/test
 import { api, describeError } from './api';
 import { ApiCleanupFields } from './api-cleanup-fields';
 import { ApiMultipartFields } from './api-multipart-fields';
+import { ApiBinaryFields } from './api-file-fields';
+import { ApiRequestStageFields } from './api-stage-fields';
+import { storedExplorerSetting, storeExplorerSetting } from './explorer-tree';
+import { multipartMaxFileBytes } from '../../../packages/contracts/src/api-multipart';
 import { AppIcon } from './app-icon';
 import { uiLayers } from './ui-layers';
 import {
@@ -215,7 +219,7 @@ function NamedValues({
 type ApiPane =
   'request' | 'data' | 'variables' | 'cleanup' | 'revisions' | 'sources';
 const paneTitles: Record<Exclude<ApiPane, 'request'>, string> = {
-  data: '测试数据',
+  data: '运行数据',
   variables: '用例变量',
   cleanup: '数据清理',
   revisions: '修订与资格',
@@ -240,6 +244,8 @@ export function ApiCaseFields({
   workspaceSummary,
   environmentHost,
   onValidate,
+  maxRequests = 100,
+  workspaceKey,
 }: {
   projectId: string;
   variant?: 'business' | 'cleanup';
@@ -261,6 +267,8 @@ export function ApiCaseFields({
   workspaceSummary?: ReactNode;
   environmentHost?: HTMLDivElement | null;
   onValidate?: () => void;
+  maxRequests?: number;
+  workspaceKey?: string | undefined;
 
   ruleFocus?:
     | {
@@ -271,7 +279,12 @@ export function ApiCaseFields({
     | undefined;
 }) {
   const workbench = presentation === 'workbench';
-  const [activeStep, setActiveStep] = useState(value.requests[0]?.stepId);
+  const stepPreference = workspaceKey && `automation:step:${workspaceKey}`;
+  const [activeStep, setActiveStep] = useState(
+    () =>
+      (stepPreference && storedExplorerSetting(stepPreference)) ||
+      value.requests[0]?.stepId,
+  );
   const [activePane, setActivePane] = useState<ApiPane>('request');
   const [openedPanes, setOpenedPanes] = useState(new Set<ApiPane>());
   const showPane = (pane: ApiPane) => {
@@ -295,7 +308,7 @@ export function ApiCaseFields({
     error?: string;
   }>();
   const [graphParts, setGraphParts] = useState<
-    Record<string, { query: string; variables: string }>
+    Record<string, { query: string; variables: string; operationName: string }>
   >({});
 
   const bodyDrafts = useRef(
@@ -314,6 +327,10 @@ export function ApiCaseFields({
   )
     ? activeStep
     : value.requests[0]?.stepId;
+  useEffect(() => {
+    if (stepPreference && currentStep)
+      storeExplorerSetting(stepPreference, currentStep);
+  }, [stepPreference, currentStep]);
   const [configurations, setConfigurations] = useState<TestConfigurationView[]>(
     [],
   );
@@ -453,7 +470,7 @@ export function ApiCaseFields({
     return options;
   }
   function confirmCurl() {
-    if (disabled || value.requests.length >= 100) return;
+    if (disabled || value.requests.length >= maxRequests) return;
     if (curlPreview) {
       onChange({ ...value, requests: [...value.requests, curlPreview] });
       setActiveStep(curlPreview.stepId);
@@ -511,7 +528,7 @@ export function ApiCaseFields({
   function changeGraph(
     request: DraftRequest,
     index: number,
-    parts: { query: string; variables: string },
+    parts: { query: string; variables: string; operationName: string },
   ) {
     setGraphParts((current) => ({ ...current, [request.stepId]: parts }));
     let bodyText = '';
@@ -523,7 +540,17 @@ export function ApiCaseFields({
         !Array.isArray(variables) &&
         parts.query.trim()
       )
-        bodyText = JSON.stringify({ query: parts.query, variables }, null, 2);
+        bodyText = JSON.stringify(
+          {
+            query: parts.query,
+            variables,
+            ...(parts.operationName.trim() && {
+              operationName: parts.operationName.trim(),
+            }),
+          },
+          null,
+          2,
+        );
     } catch {
       // Invalid Variables remain in the typed input; the request cannot be saved until corrected.
     }
@@ -563,6 +590,15 @@ export function ApiCaseFields({
       update(index, { body: { format: 'json', value: {} }, bodyText: '{}' });
     } else if (next === 'multipart') {
       update(index, { body: { format: 'multipart', parts: [] }, bodyText: '' });
+    } else if (next === 'binary') {
+      update(index, {
+        body: {
+          format: 'binary',
+          fileResourceId: '',
+          mediaType: 'application/octet-stream',
+        },
+        bodyText: '',
+      });
     } else if (next === 'form') {
       update(index, { body: { format: 'form', fields: [] }, bodyText: '' });
     } else if (next === 'text' || next === 'xml') {
@@ -677,6 +713,9 @@ export function ApiCaseFields({
     const references = [
       ...new Set(apiTemplateReferences(request.url.split('?')[0])),
     ].filter((ref) => !ref.startsWith('env.baseUrls.'));
+    const authMode =
+      request.authMode ??
+      (request.purposeRef || request.authProfileRef ? 'explicit' : 'none');
     const authProfile = configurations.find(
       (entry) => entry.id === request.authProfileRef,
     )?.content;
@@ -684,9 +723,20 @@ export function ApiCaseFields({
       authProfile?.kind === 'authProfile'
         ? authProfile.authentication.destination
         : undefined;
+    const storedGraph =
+      request.body.format === 'json' &&
+      request.body.value &&
+      typeof request.body.value === 'object' &&
+      !Array.isArray(request.body.value)
+        ? request.body.value
+        : null;
     const graph = graphParts[request.stepId] ?? {
-      query: '',
-      variables: '{}',
+      query: typeof storedGraph?.query === 'string' ? storedGraph.query : '',
+      variables: JSON.stringify(storedGraph?.variables ?? {}, null, 2),
+      operationName:
+        typeof storedGraph?.operationName === 'string'
+          ? storedGraph.operationName
+          : '',
     };
     return (
       <Card
@@ -826,38 +876,95 @@ export function ApiCaseFields({
               children: (
                 <Space direction="vertical" style={{ width: '100%' }}>
                   <Select
-                    aria-label={`${labelPrefix} ${index + 1} 账号用途`}
-                    value={request.purposeRef}
-                    allowClear
-                    showSearch
-                    optionFilterProp="label"
-                    loading={configurationLoading}
+                    aria-label={`${labelPrefix} ${index + 1} 认证方式`}
+                    value={authMode}
                     disabled={disabled}
                     style={{ width: '100%' }}
-                    options={referenceOptions('purpose', request.purposeRef)}
-                    placeholder="不指定账号用途"
-                    onChange={(id: string | undefined) =>
-                      update(index, { purposeRef: id })
+                    options={[
+                      { value: 'none', label: '无需认证' },
+                      {
+                        value: 'inherit',
+                        label: '继承固定接口来源',
+                        disabled: !request.source,
+                      },
+                      { value: 'explicit', label: '手工选择项目认证' },
+                    ]}
+                    onChange={(mode: NonNullable<DraftRequest['authMode']>) =>
+                      update(
+                        index,
+                        mode === 'explicit'
+                          ? { authMode: mode }
+                          : {
+                              authMode: mode,
+                              purposeRef: undefined,
+                              authProfileRef: undefined,
+                            },
+                      )
                     }
                   />
-                  <Select
-                    aria-label={`${labelPrefix} ${index + 1} 认证定义`}
-                    value={request.authProfileRef}
-                    allowClear
-                    showSearch
-                    optionFilterProp="label"
-                    loading={configurationLoading}
-                    disabled={disabled}
-                    style={{ width: '100%' }}
-                    options={referenceOptions(
-                      'authProfile',
-                      request.authProfileRef,
-                    )}
-                    placeholder="不指定认证定义；不自动借用其他账号"
-                    onChange={(id: string | undefined) =>
-                      update(index, { authProfileRef: id })
-                    }
-                  />
+                  {authMode === 'inherit' && (
+                    <div className="stack">
+                      <span className="caption">
+                        诊断读取本步骤固定接口修订的认证定义。若上级没有明确认证，需手工选择用途或无需认证。
+                      </span>
+                      {request.source && (
+                        <Button
+                          size="small"
+                          type="link"
+                          href={
+                            '#api-catalog?' +
+                            new URLSearchParams({
+                              projectId: request.source.projectId,
+                              endpointId: request.source.interfaceId,
+                              revisionId: request.source.revisionId,
+                            })
+                          }
+                        >
+                          查看固定认证来源
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                  {authMode === 'explicit' && (
+                    <>
+                      <Select
+                        aria-label={`${labelPrefix} ${index + 1} 账号用途`}
+                        value={request.purposeRef}
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        loading={configurationLoading}
+                        disabled={disabled}
+                        style={{ width: '100%' }}
+                        options={referenceOptions(
+                          'purpose',
+                          request.purposeRef,
+                        )}
+                        placeholder="不指定账号用途"
+                        onChange={(id: string | undefined) =>
+                          update(index, { purposeRef: id })
+                        }
+                      />
+                      <Select
+                        aria-label={`${labelPrefix} ${index + 1} 认证定义`}
+                        value={request.authProfileRef}
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        loading={configurationLoading}
+                        disabled={disabled}
+                        style={{ width: '100%' }}
+                        options={referenceOptions(
+                          'authProfile',
+                          request.authProfileRef,
+                        )}
+                        placeholder="不指定认证定义；不自动借用其他账号"
+                        onChange={(id: string | undefined) =>
+                          update(index, { authProfileRef: id })
+                        }
+                      />
+                    </>
+                  )}
                 </Space>
               ),
             },
@@ -1093,11 +1200,7 @@ export function ApiCaseFields({
                       { value: 'json', label: 'JSON' },
                       { value: 'form', label: 'x-www-form-urlencoded' },
                       { value: 'multipart', label: 'form-data' },
-                      {
-                        value: 'binary',
-                        label: 'Binary（独立二进制传输未开放）',
-                        disabled: true,
-                      },
+                      { value: 'binary', label: 'Binary' },
                       { value: 'xml', label: 'XML' },
                       { value: 'graphql', label: 'GraphQL JSON' },
                       { value: 'text', label: 'Raw' },
@@ -1132,6 +1235,18 @@ export function ApiCaseFields({
                         options={options}
                         onChange={(query) =>
                           changeGraph(request, index, { ...graph, query })
+                        }
+                      />
+                      <Input
+                        aria-label="GraphQL Operation Name"
+                        placeholder="Operation Name（可选）"
+                        disabled={disabled}
+                        value={graph.operationName}
+                        onChange={(event) =>
+                          changeGraph(request, index, {
+                            ...graph,
+                            operationName: event.target.value,
+                          })
                         }
                       />
                       <VariableField
@@ -1227,6 +1342,16 @@ export function ApiCaseFields({
                       }
                     />
                   )}
+                  {request.body.format === 'binary' && (
+                    <ApiBinaryFields
+                      projectId={projectId}
+                      maximumBytes={multipartMaxFileBytes}
+                      disabled={disabled}
+                      fileResourceId={request.body.fileResourceId}
+                      mediaType={request.body.mediaType}
+                      onChange={(body) => update(index, { body })}
+                    />
+                  )}
                   {request.body.format === 'form' && (
                     <NamedValues
                       label="表单字段"
@@ -1260,51 +1385,94 @@ export function ApiCaseFields({
                           value={assertion.source}
                           disabled={disabled}
                           options={[
-                            'status',
-                            'json',
-                            'header',
-                            'body',
-                            'variable',
-                          ].map((source) => ({
-                            value: source,
-                            label: source,
-                          }))}
+                            { value: 'status', label: 'HTTP 状态' },
+                            { value: 'elapsedMs', label: '响应耗时（毫秒）' },
+                            { value: 'json', label: 'JSON 路径' },
+                            { value: 'xml', label: 'XML 元素' },
+                            { value: 'header', label: '响应头' },
+                            { value: 'body', label: '响应正文' },
+                            { value: 'variable', label: '变量' },
+                            {
+                              value: 'contract',
+                              label: '响应契约',
+                              disabled: !request.source,
+                            },
+                          ]}
                           onChange={(source: Assertion['source']) =>
                             update(index, {
-                              assertions: request.assertions.map((item, pos) =>
-                                pos === at ? { ...item, source } : item,
+                              assertions: request.assertions.map(
+                                (item, pos) => {
+                                  if (pos !== at) return item;
+                                  const { path: _path, ...base } = item;
+                                  return {
+                                    ...base,
+                                    source,
+                                    operator: 'equals',
+                                    expectedText:
+                                      source === 'contract' ? 'true' : '',
+                                  };
+                                },
                               ),
                             })
                           }
                         />
-                        <Input
-                          aria-label={`${labelPrefix} ${index + 1} 断言 ${at + 1} 路径`}
-                          placeholder="JSON/响应头/变量路径"
-                          value={assertion.path ?? ''}
-                          disabled={disabled}
-                          onChange={(event) =>
-                            update(index, {
-                              assertions: request.assertions.map((item, pos) =>
-                                pos === at
-                                  ? {
-                                      ...item,
-                                      path: event.target.value,
-                                    }
-                                  : item,
-                              ),
-                            })
-                          }
-                        />
+                        {!['status', 'elapsedMs', 'contract', 'body'].includes(
+                          assertion.source,
+                        ) && (
+                          <Input
+                            aria-label={`${labelPrefix} ${index + 1} 断言 ${at + 1} 路径`}
+                            placeholder={
+                              assertion.source === 'xml'
+                                ? '/order/items/item[2]'
+                                : 'JSON/响应头/变量路径'
+                            }
+                            value={assertion.path ?? ''}
+                            disabled={disabled}
+                            onChange={(event) =>
+                              update(index, {
+                                assertions: request.assertions.map(
+                                  (item, pos) =>
+                                    pos === at
+                                      ? {
+                                          ...item,
+                                          path: event.target.value,
+                                        }
+                                      : item,
+                                ),
+                              })
+                            }
+                          />
+                        )}
                         <Select
                           aria-label={`${labelPrefix} ${index + 1} 断言 ${at + 1} 运算符`}
                           value={assertion.operator}
-                          disabled={disabled}
-                          options={assertionOperatorSchema.options.map(
-                            (operator) => ({
+                          disabled={disabled || assertion.source === 'contract'}
+                          options={assertionOperatorSchema.options
+                            .filter((operator) => {
+                              if (assertion.source === 'contract')
+                                return operator === 'equals';
+                              if (assertion.source === 'elapsedMs')
+                                return [
+                                  'equals',
+                                  'notEquals',
+                                  'greaterThan',
+                                  'lessThan',
+                                  'exists',
+                                ].includes(operator);
+                              if (assertion.source === 'xml')
+                                return [
+                                  'equals',
+                                  'notEquals',
+                                  'contains',
+                                  'matches',
+                                  'exists',
+                                ].includes(operator);
+                              return true;
+                            })
+                            .map((operator) => ({
                               value: operator,
                               label: operator,
-                            }),
-                          )}
+                            }))}
                           onChange={(operator: Assertion['operator']) =>
                             update(index, {
                               assertions: request.assertions.map((item, pos) =>
@@ -1330,7 +1498,13 @@ export function ApiCaseFields({
                       {assertion.operator !== 'exists' && (
                         <Input
                           aria-label={`${labelPrefix} ${index + 1} 断言 ${at + 1} 预期JSON值`}
-                          placeholder='JSON 预期值，如 200、"ok"、true'
+                          placeholder={
+                            assertion.source === 'contract'
+                              ? 'true 或 false'
+                              : assertion.source === 'elapsedMs'
+                                ? '非负毫秒数'
+                                : 'JSON 预期值，如 200、"ok"、true'
+                          }
                           value={assertion.expectedText}
                           disabled={disabled}
                           onChange={(event) =>
@@ -1501,24 +1675,35 @@ export function ApiCaseFields({
               label: field === 'preScript' ? '前置操作' : '后置操作',
               children: (
                 <Space orientation="vertical" style={{ width: '100%' }}>
-                  <Typography.Text type="secondary">
-                    脚本在受控运行环境中执行。配置页只维护文本。
-                  </Typography.Text>
-                  <Input.TextArea
-                    aria-label={
-                      labelPrefix +
-                      ' ' +
-                      (index + 1) +
-                      (field === 'preScript' ? ' 前处理脚本' : ' 响应处理脚本')
-                    }
-                    rows={5}
-                    value={request[field] ?? ''}
+                  <ApiRequestStageFields
+                    projectId={projectId}
+                    source={request.source}
+                    value={request.stageSettings}
+                    phase={field === 'preScript' ? 'pre' : 'post'}
                     disabled={disabled}
-                    maxLength={64000}
-                    onChange={(event) =>
-                      update(index, { [field]: event.target.value })
+                    onChange={(stageSettings) =>
+                      update(index, { stageSettings })
                     }
                   />
+                  {request[field] && (
+                    <Input.TextArea
+                      aria-label={
+                        labelPrefix +
+                        ' ' +
+                        (index + 1) +
+                        (field === 'preScript'
+                          ? ' 前处理脚本'
+                          : ' 响应处理脚本')
+                      }
+                      rows={5}
+                      value={request[field] ?? ''}
+                      disabled={disabled}
+                      maxLength={64000}
+                      onChange={(event) =>
+                        update(index, { [field]: event.target.value })
+                      }
+                    />
+                  )}
                 </Space>
               ),
             })),
@@ -1601,7 +1786,13 @@ export function ApiCaseFields({
       revisions: workspacePanels?.revisions,
       sources: workspacePanels?.sources,
     };
-    const paneOrder = ['data', 'variables', 'cleanup', 'revisions'] as const;
+    const paneOrder = [
+      'data',
+      'variables',
+      'cleanup',
+      'sources',
+      'revisions',
+    ] as const;
     const indicators = {
       data: value.base.dataRows?.length ?? 0,
       variables: value.variableEntries.length,
@@ -1610,12 +1801,14 @@ export function ApiCaseFields({
           ? '未配置'
           : value.cleanupDraft.steps.length,
       revisions: undefined,
+      sources: value.requests.filter((request) => request.source).length,
     };
     const paneIcons = {
       data: 'calendar',
       variables: 'api',
       cleanup: 'check',
       revisions: 'book',
+      sources: 'api',
     } as const;
     return (
       <div className="api-proto-fields">
@@ -1628,7 +1821,7 @@ export function ApiCaseFields({
             <h2>执行编排</h2>
             <Dropdown
               trigger={['click']}
-              disabled={disabled || value.requests.length >= 100}
+              disabled={disabled || value.requests.length >= maxRequests}
               menu={{
                 items: [
                   { key: 'manual', label: '手工添加请求' },

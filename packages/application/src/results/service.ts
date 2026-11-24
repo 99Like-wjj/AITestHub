@@ -32,7 +32,6 @@ import { assertSafeResultContent } from './safety.js';
 import { readHumanRetests, recordHumanRetest } from './human-retests.js';
 import { ensureFailedProblemInTransaction } from '../issues/problems.js';
 import { lockReportResult } from '../issues/review-evidence.js';
-import { missingUiFiles } from './preparation.js';
 import { assertSubmissionFileBudget } from '../files/submission-budget.js';
 import { assertReferencedEvidenceFileBudget } from './submission-budget.js';
 import {
@@ -74,10 +73,6 @@ export class ResultService {
   ) {
     this.operations = new OperationService(db);
   }
-  missingUiFiles(actor: ActorContext, projectId: string, runId: string) {
-    return missingUiFiles(this.db, actor, projectId, runId);
-  }
-
   readHumanRetests(actor: ActorContext, projectId: string, raw: unknown) {
     return readHumanRetests(this.db, actor, projectId, raw);
   }

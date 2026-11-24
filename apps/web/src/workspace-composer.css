@@ -35,6 +35,20 @@
   color: var(--muted);
   cursor: default;
 }
+.user-composer .composer-scene-context {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.user-composer .composer-scene-context > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .user-composer .composer-context-bar .ico,
 .user-composer .composer-context-bar .anticon {
   width: 17px;

@@ -10,7 +10,7 @@ import type {
   Database,
   SqlExecutor,
 } from '../../../persistence/src/database.js';
-import { requireProject } from '../access/policy.js';
+import { requireProject, requireProjectDraftWrite } from '../access/policy.js';
 import { DomainError, stale } from '../errors.js';
 import { audit } from '../events.js';
 import { OperationService } from '../operations/service.js';
@@ -152,7 +152,7 @@ export class CoverageCheckpointService {
       input.commandId,
       input,
       async (tx) => {
-        await requireProject(tx, actor, projectId, 'assets.write');
+        await requireProjectDraftWrite(tx, actor, projectId, 'assets.write');
       },
       async (tx) => {
         const references = [

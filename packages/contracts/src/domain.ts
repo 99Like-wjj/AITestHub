@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { multipartRequestBodySchema } from './api-multipart.js';
+import {
+  apiSharedScriptReferenceSchema,
+  apiSharedScriptSourceSchema,
+} from './api-shared-scripts.js';
+import { apiBinaryRequestBodySchema, multipartRequestBodySchema } from './api-multipart.js';
+import { apiStageSettingsSchema, apiStageSourceSchema } from './api-stage-actions.js';
 import {
 safeSourceLinkSchema,
 sanitizeSourceLinkFields,
@@ -134,6 +139,16 @@ export const requirementVersionSchema = z.strictObject({
   materialSetDigest: sha256Schema,
   materials: z.array(materialSchema).max(200),
 });
+export const requirementAssetBasisSchema = z.strictObject({
+  requirementId: idSchema,
+  basisVersionId: idSchema,
+  basisVersionNo: z.number().int().positive(),
+  lockedVersionId: idSchema,
+  lockedVersionNo: z.number().int().positive(),
+  warning: z.literal('REQUIREMENT_BASIS_DIFFERS_FROM_LOCKED').nullable(),
+});
+export type RequirementAssetBasis = z.infer<typeof requirementAssetBasisSchema>;
+
 export const scenarioContentSchema = z.strictObject({
   kind: kindSchema,
   requirementVersionId: idSchema,
@@ -203,10 +218,15 @@ export const assertionOperatorSchema = z.enum([
   'greaterThan',
   'lessThan',
 ]);
+export const apiXmlElementPathSchema = z
+  .string()
+  .max(2000)
+  .regex(/^\/[A-Za-z_][A-Za-z0-9_.:-]*(?:\[[1-9]\d{0,3}\])?(?:\/[A-Za-z_][A-Za-z0-9_.:-]*(?:\[[1-9]\d{0,3}\])?)*$/u);
+
 export const assertionSchema = z
   .strictObject({
     id: localIdSchema,
-    source: z.enum(['status', 'json', 'header', 'body', 'variable']),
+    source: z.enum(['status', 'json', 'header', 'body', 'variable', 'elapsedMs', 'xml', 'contract']),
     path: z.string().max(2000).optional(),
     operator: assertionOperatorSchema,
     expected: z.json().optional(),
@@ -229,6 +249,22 @@ export const assertionSchema = z
         message: '此断言来源需要字段路径',
       });
     }
+    const { source, path, operator, expected } = assertion;
+    if ((source === 'elapsedMs' || source === 'contract') && path !== undefined)
+      context.addIssue({code:'custom',path:['path'],message:'此断言不使用字段路径'});
+    if (source === 'elapsedMs' && operator !== 'exists' &&
+      (!['equals','notEquals','greaterThan','lessThan'].includes(operator)
+      || typeof expected !== 'number' || !Number.isFinite(expected) || expected < 0))
+      context.addIssue({code:'custom',path:['expected'],message:'耗时断言需要非负毫秒数及数值比较运算符'});
+    if (source === 'xml') {
+      if (!apiXmlElementPathSchema.safeParse(path).success)
+        context.addIssue({code:'custom',path:['path'],message:'请输入 XML 元素路径，如 /order/items/item[2]'});
+      if (operator !== 'exists' &&
+        (!['equals','notEquals','contains','matches'].includes(operator)||typeof expected !== 'string'))
+        context.addIssue({code:'custom',path:['expected'],message:'XML 元素文本需要字符串及文本比较运算符'});
+    }
+    if (source === 'contract' && (operator !== 'equals' || typeof expected !== 'boolean'))
+      context.addIssue({code:'custom',path:['expected'],message:'响应契约断言使用等于 true 或 false'});
   });
 export const requestBodySchema = z.discriminatedUnion('format', [
   z.strictObject({ format: z.literal('none') }),
@@ -239,30 +275,47 @@ export const requestBodySchema = z.discriminatedUnion('format', [
     mediaType: z.string().max(256),
   }),
   multipartRequestBodySchema,
+  apiBinaryRequestBodySchema,
   z.strictObject({
     format: z.literal('form'),
     fields: z.array(namedValueSchema).max(200),
   }),
 ]);
 export const scriptSchema = z.string().max(64_000);
+export const apiInterfaceSourceSchema = z.strictObject({
+  projectId: idSchema,
+  interfaceId: idSchema,
+  revisionId: idSchema,
+});
 export const apiRequestStepSchema = z
   .strictObject({
-    stepId: localIdSchema,
+    stepId: z.string().regex(/^[A-Za-z0-9_-]{1,140}$/),
     name: titleSchema,
     method: httpMethodSchema,
     url: z.string().min(1).max(8000),
     query: z.array(namedValueSchema).max(200),
     headers: z.array(namedValueSchema).max(200),
     body: requestBodySchema,
+    authMode: z.enum(['none', 'inherit', 'explicit']).optional(),
     purposeRef: idSchema.optional(),
     authProfileRef: idSchema.optional(),
     extractors: z.array(extractorSchema).max(100),
     assertions: z.array(assertionSchema).max(200),
     preScript: scriptSchema.optional(),
     postScript: scriptSchema.optional(),
+    stageSettings: apiStageSettingsSchema.optional(),
     timeoutMs: z.number().int().min(100).max(120_000).optional(),
+    source: apiInterfaceSourceSchema.optional(),
   })
   .superRefine((step, context) => {
+    if (step.authMode === 'inherit' && !step.source)
+      context.addIssue({ code: 'custom', path: ['source'], message: '继承认证需要选定固定接口修订。' });
+    if ((step.authMode === 'none' || step.authMode === 'inherit') && (step.purposeRef || step.authProfileRef))
+      context.addIssue({ code: 'custom', path: ['authMode'], message: '无需认证或继承认证不能同时填写显式配置。' });
+    if (step.authMode === 'explicit' && !step.purposeRef && !step.authProfileRef)
+      context.addIssue({ code: 'custom', path: ['authMode'], message: '手工认证需要选择明确的账号用途或认证配置。' });
+    if (step.assertions.some((assertion) => assertion.source === 'contract') && !step.source)
+      context.addIssue({code:'custom',path:['source'],message:'响应契约断言需要固定接口修订'});
     const names = step.extractors.map((extractor) => extractor.name);
     if (new Set(names).size !== names.length) {
       context.addIssue({
@@ -307,6 +360,7 @@ export const cleanupPolicySchema = z.discriminatedUnion('mode', [
 export const apiDataRowSchema = z.strictObject({
   id: localIdSchema,
   name: z.string().trim().min(1).max(120),
+  enabled: z.boolean().optional(),
   values: z.record(variableNameSchema, z.json()),
 });
 export const apiPreparationReferenceSchema = z.strictObject({
@@ -316,20 +370,136 @@ export const apiPreparationReferenceSchema = z.strictObject({
 });
 export const apiDataRowAnchorSchema = apiDataRowSchema.pick({ id: true, name: true });
 export const apiPreparationAnchorSchema = apiPreparationReferenceSchema.pick({ caseId: true, revisionId: true });
+const apiFlowIdentitySchema = z.strictObject({
+  nodeId: z.string().regex(/^[A-Za-z0-9_-]{1,140}$/),
+  name: titleSchema,
+  enabled: z.boolean().optional(),
+  stageSource: apiStageSourceSchema.optional(),
+});
+export const apiFlowConditionSchema = z.strictObject({
+  left: z.string().min(1).max(2000),
+  operator: z.enum(['eq', 'neq', 'exists', 'gt', 'gte', 'lt', 'lte', 'contains']),
+  right: z.json().optional(),
+}).superRefine((condition, ctx) => {
+  if (condition.operator !== 'exists' && condition.right === undefined)
+    ctx.addIssue({ code: 'custom', path: ['right'], message: '该条件需要实际比较值。' });
+});
+const apiLeafFlowNodeSchemas = [
+  apiFlowIdentitySchema.extend({ type: z.literal('request'), stepId: localIdSchema }),
+  apiFlowIdentitySchema.extend({ type: z.literal('wait'), milliseconds: z.number().int().min(1).max(30_000) }),
+  apiFlowIdentitySchema.extend({
+    type: z.literal('script'),
+    script: scriptSchema,
+    sharedScriptSource: apiSharedScriptSourceSchema.optional(),
+  }),
+  apiFlowIdentitySchema.extend({
+    type: z.literal('sharedScript'),
+    ...apiSharedScriptReferenceSchema.shape,
+  }),
+  apiFlowIdentitySchema.extend({
+    type: z.literal('databaseRead'),
+    queryId: idSchema,
+    parameters: z.record(variableNameSchema, z.string().max(8000)),
+    resultVariable: variableNameSchema,
+  }),
+  apiFlowIdentitySchema.extend({
+    type: z.literal('case'),
+    projectId: idSchema,
+    caseId: idSchema,
+    revisionId: idSchema,
+    parameters: z.record(variableNameSchema, z.json()),
+  }),
+] as const;
+
+type ApiFlowVariables = Record<string, z.infer<ReturnType<typeof z.json>>>;
+export type ApiFlowNode =
+  | z.infer<(typeof apiLeafFlowNodeSchemas)[number]>
+  | (z.infer<typeof apiFlowIdentitySchema> & (
+      | { type: 'group'; children: ApiFlowNode[]; variables?: ApiFlowVariables | undefined; sourceCase?: { projectId: string; caseId: string; revisionId: string } | undefined }
+      | { type: 'if'; condition: z.infer<typeof apiFlowConditionSchema>; whenTrue: ApiFlowNode[]; whenFalse: ApiFlowNode[] }
+      | { type: 'forEach'; source: string; itemVariable: string; indexVariable: string; maxItems: number; children: ApiFlowNode[] }
+      | { type: 'repeat'; count: number; indexVariable: string; children: ApiFlowNode[] }
+    ));
+const apiFlowChildrenSchema = z.lazy(() => boundedApiFlowList);
+const apiFlowNodeSchema: z.ZodType<ApiFlowNode> = z.discriminatedUnion('type', [
+  ...apiLeafFlowNodeSchemas,
+  apiFlowIdentitySchema.extend({
+    type: z.literal('group'), children: apiFlowChildrenSchema,
+    variables: z.record(variableNameSchema, z.json()).optional(),
+    sourceCase: z.strictObject({ projectId: idSchema, caseId: idSchema, revisionId: idSchema }).optional(),
+  }),
+  apiFlowIdentitySchema.extend({
+    type: z.literal('if'), condition: apiFlowConditionSchema,
+    whenTrue: apiFlowChildrenSchema, whenFalse: apiFlowChildrenSchema,
+  }),
+  apiFlowIdentitySchema.extend({
+    type: z.literal('forEach'), source: z.string().min(1).max(2000),
+    itemVariable: variableNameSchema, indexVariable: variableNameSchema,
+    maxItems: z.number().int().min(1).max(100), children: apiFlowChildrenSchema,
+  }),
+  apiFlowIdentitySchema.extend({
+    type: z.literal('repeat'), count: z.number().int().min(1).max(100),
+    indexVariable: variableNameSchema, children: apiFlowChildrenSchema,
+  }),
+]);
+const boundedApiFlowList = z.array(apiFlowNodeSchema).max(100);
+
+function flowFitsBudget(value: unknown): boolean {
+  const pending: { node: unknown; depth: number }[] = [];
+  if (!Array.isArray(value) || !value.length || value.length > 100) return false;
+  pending.push(...value.map((node: unknown) => ({ node, depth: 1 })));
+  let count = 0;
+  while (pending.length) {
+    const entry = pending.pop();
+    if (!entry || ++count > 200 || entry.depth > 8) return false;
+    if (typeof entry.node !== 'object' || entry.node === null) continue;
+    for (const key of ['children', 'whenTrue', 'whenFalse'] as const) {
+      const list = Object.getOwnPropertyDescriptor(entry.node, key)?.value;
+      if (!Array.isArray(list)) continue;
+      if (list.length > 100) return false;
+      pending.push(...list.map((node: unknown) => ({ node, depth: entry.depth + 1 })));
+    }
+  }
+  return true;
+}
+
+export const apiFlowSchema = z.preprocess(
+  (value) => flowFitsBudget(value) ? value : [],
+  boundedApiFlowList.min(1, '编排至少一个节点，最多八层、二百个节点。'),
+);
+
+export function apiFlowNodes(flow: readonly ApiFlowNode[]): ApiFlowNode[] {
+  return flow.flatMap((node): ApiFlowNode[] => {
+    switch (node.type) {
+      case 'group':
+      case 'repeat':
+      case 'forEach':
+        return [node, ...apiFlowNodes(node.children)];
+      case 'if':
+        return [node, ...apiFlowNodes(node.whenTrue), ...apiFlowNodes(node.whenFalse)];
+      default:
+        return [node];
+    }
+  });
+}
+
 export const apiCaseContentSchema = z
   .strictObject({
     kind: z.literal('API'),
-    scenarioId: idSchema,
+    scenarioId: idSchema.nullable(),
     title: titleSchema,
     testPoint: safeTextSchema,
     preconditions: z.array(z.string().max(10_000)).max(100),
     expected: safeTextSchema,
     basisRefs: z.array(basisRefSchema).max(100),
-    dslVersion: z.literal('ath.api-case.v1'),
+    dslVersion: z.literal('ath.api-case.v2'),
+    tags: z.array(titleSchema).max(20).optional(),
     variables: z.record(variableNameSchema, z.json()),
     dataRows: z.array(apiDataRowSchema).min(1).max(100).optional(),
     preparations: z.array(apiPreparationReferenceSchema).min(1).max(20).optional(),
-    steps: z.array(apiRequestStepSchema).min(1).max(100),
+    steps: z.array(apiRequestStepSchema).max(100),
+    flow: apiFlowSchema,
+    stageSettings: apiStageSettingsSchema.optional(),
     cleanup: cleanupPolicySchema,
   })
   .superRefine((content, context) => {
@@ -355,6 +525,15 @@ export const apiCaseContentSchema = z
         });
       }
     }
+    const nodes = apiFlowNodes(content.flow);
+    if (new Set(nodes.map((node) => node.nodeId)).size !== nodes.length)
+      context.addIssue({ code: 'custom', path: ['flow'], message: '编排节点标识不可重复。' });
+    const registry = new Set(content.steps.map((step) => step.stepId));
+    const requests = nodes.flatMap((node) => node.type === 'request' ? [node.stepId] : []);
+    if (new Set(requests).size !== requests.length || requests.length !== registry.size || requests.some((id) => !registry.has(id)))
+      context.addIssue({ code: 'custom', path: ['flow'], message: '每条请求须在编排中出现一次，并引用已登记的步骤。' });
+    if (nodes.some((node) => node.type === 'forEach' && node.itemVariable === node.indexVariable))
+      context.addIssue({ code: 'custom', path: ['flow'], message: '循环元素和索引须使用不同变量。' });
   });
 export const caseContentSchema = z.discriminatedUnion('kind', [
   uiCaseContentSchema,
@@ -403,12 +582,15 @@ export const assetChangeSetSchema = z
     submissionId: commandIdSchema,
     kind: kindSchema,
     projectId: idSchema,
-    requirementVersionId: idSchema,
+    requirementVersionId: idSchema.optional(),
+    requirementId: idSchema.optional(),
     mode: z.enum(['incremental', 'completeSet']),
     operations: z.array(assetOperationSchema).min(1).max(10_000),
     baseRevisionMap: z.record(idSchema, idSchema),
   })
   .superRefine((changeSet, context) => {
+    if (!changeSet.requirementId && !changeSet.requirementVersionId)
+      context.addIssue({code:'custom',path:['requirementId'],message:'请选择提交所属的需求。'});
     for (const [index, operation] of changeSet.operations.entries()) {
       if (operation.operation === 'explicitRemove') continue;
       const content = operation.content;
@@ -439,8 +621,8 @@ export const approvalSnapshotSchema = z.strictObject({
   kind: kindSchema,
   caseId: idSchema,
   caseRevisionId: idSchema,
-  scenarioRevisionId: idSchema,
-  setRevisionId: idSchema,
+  scenarioRevisionId: idSchema.nullable(),
+  setRevisionId: idSchema.nullable(),
   opinionContextDigest: sha256Schema,
   approvedBy: idSchema,
   approvedAt: timestampSchema,
@@ -541,14 +723,23 @@ export const missingRequirementSchema = z.strictObject({
   objectId: idSchema.optional(),
   message: z.string().min(1).max(2000),
 });
+export const apiRunScenarioSchema = z.strictObject({
+  title: titleSchema,
+  objective: safeTextSchema,
+  sharedPreconditions: z.array(z.string().max(10_000)).max(100),
+  basisRefs: z.array(basisRefSchema).max(100),
+  requirementVersionId: idSchema.nullable(),
+});
 export const scopeItemSchema = z.strictObject({
   runItemId: idSchema,
   caseId: idSchema,
+  caseRevisionId: idSchema.optional(),
+  disabledNodeIds: z.array(localIdSchema).max(200).optional(),
   approvalSnapshotId: idSchema,
-  requirementVersionId: idSchema,
-  setId: idSchema,
-  scenarioId: idSchema,
-  scenario: scenarioContentSchema,
+  requirementVersionId: idSchema.nullable(),
+  setId: idSchema.nullable(),
+  scenarioId: idSchema.nullable(),
+  scenario: z.union([scenarioContentSchema, apiRunScenarioSchema]).nullable(),
   content: caseContentSchema,
   ordinal: z.number().int().min(0),
   issueIds: z.array(idSchema),
@@ -578,10 +769,15 @@ export const executionScopeSchema = z
   })
   .superRefine((scope, context) => {
     for (const [index, item] of scope.items.entries()) {
-      if (
-        item.content.kind !== scope.kind ||
-        item.scenario.kind !== scope.kind
-      ) {
+      const scenario = item.scenario;
+      const validUi = item.content.kind === 'UI' && scenario && 'kind' in scenario &&
+        scenario.kind === 'UI' && item.requirementVersionId !== null && item.setId !== null && item.scenarioId !== null;
+      const validApi = item.content.kind === 'API' && item.setId === null &&
+        item.content.scenarioId === item.scenarioId &&
+        (scenario ? !('kind' in scenario) && item.scenarioId !== null &&
+          scenario.requirementVersionId === item.requirementVersionId :
+          item.scenarioId === null && item.requirementVersionId === null);
+      if (scope.kind === 'UI' ? !validUi : !validApi) {
         context.addIssue({
           code: 'custom',
           path: ['items', index],

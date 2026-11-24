@@ -3,6 +3,7 @@ import type { QueryResultRow } from 'pg';
 import { z } from 'zod';
 import {
   apiCaseContentSchema,
+  apiFlowNodes,
   executionScopeSchema,
   planSchema,
   scopeItemSchema,
@@ -29,6 +30,8 @@ import type {
 } from '../../../persistence/src/database.js';
 import { requireProject } from '../access/policy.js';
 import { getAsset } from '../assets/repository.js';
+import { latestApiRegressionInTransaction } from '../assets/api-regression.js';
+import { getApiFlowReadConnectionIds } from '../assets/api-automation.js';
 import { ReviewService } from '../assets/reviews.js';
 import { audit } from '../events.js';
 import { DomainError, stale } from '../errors.js';
@@ -199,11 +202,12 @@ export class PlanService {
             await transaction.query<{
               id: string;
               title: string;
-              requirement_version_id: string;
+              requirement_version_id: string | null;
             }>(
-              `SELECT a.id,r.content->>'title' title,a.requirement_version_id FROM app.test_assets a
+              `SELECT a.id,r.content->>'title' title,parent.requirement_version_id FROM app.test_assets a
          JOIN app.asset_revisions r ON r.id=a.current_revision_id
-         WHERE a.project_id=$1 AND a.kind='API' AND a.target_type='case' AND a.id=ANY($2::uuid[])`,
+         LEFT JOIN app.test_assets parent ON parent.id=a.parent_id AND parent.project_id=a.project_id
+         WHERE a.project_id=$1 AND a.kind='API' AND a.set_id IS NULL AND a.target_type='case' AND a.id=ANY($2::uuid[])`,
               [
                 projectId,
                 logicalItemsSchema.parse(row.items).map((item) => item.caseId),
@@ -428,19 +432,14 @@ export class PlanService {
         fixed.push({ ...kept, ordinal: fixed.length });
         continue;
       }
-      const current = await getAsset(transaction, projectId, caseId);
-      if (current.target_type !== 'case' || current.kind !== input.kind)
-        throw new DomainError('NOT_FOUND', '计划范围内没有该类型用例。', 404);
       if (input.kind === 'API') {
-        await this.reviews.latestApprovedInTransaction(
-          transaction,
-          projectId,
-          caseId,
-          'API',
-        );
+        await latestApiRegressionInTransaction(transaction, projectId, caseId);
         items.push({ caseId });
         continue;
       }
+      const current = await getAsset(transaction, projectId, caseId);
+      if (current.target_type !== 'case' || current.kind !== 'UI')
+        throw new DomainError('NOT_FOUND', '计划范围内没有该类型用例。', 404);
       if (current.requirement_version_id !== input.requirementVersionId)
         throw new DomainError(
           'PRECONDITIONS_MISSING',
@@ -681,19 +680,31 @@ export class PlanService {
     caseId: string,
   ) {
     try {
-      const approved = await this.reviews.latestApprovedInTransaction(
+      const approved = await latestApiRegressionInTransaction(
         transaction,
         projectId,
         caseId,
-        'API',
       );
       const composition = await freezeApiCaseComposition(
         transaction,
+        actor,
         projectId,
         apiCaseContentSchema.parse(approved.snapshot.case.content),
+        caseId,
+        { caseRevisionId: approved.snapshot.case.revisionId },
       );
-      const { content, preparationSources } = composition;
-      const rows = materializedApiRows(composition);
+      const { content, preparationSources, disabledNodeIds } = composition;
+      const rows = materializedApiRows(composition).filter(({ dataRow }) =>
+        dataRow
+          ? approved.snapshot.qualifiedDataRowIds.includes(dataRow.id)
+          : approved.snapshot.qualifiedDataRowIds.length === 0,
+      );
+      if (!rows.length)
+        throw new DomainError(
+          'PRECONDITIONS_MISSING',
+          '可回归资格中的数据行不再可用。',
+          422,
+        );
       const requests = [
         ...content.steps,
         ...(content.cleanup.mode === 'none'
@@ -708,12 +719,18 @@ export class PlanService {
       const profileIds = requests.flatMap((step) =>
         step.authProfileRef ? [step.authProfileRef] : [],
       );
-      const connectionIds =
-        content.cleanup.mode === 'none'
+      const connectionIds = [
+        ...(await getApiFlowReadConnectionIds(
+          transaction,
+          projectId,
+          apiFlowNodes(content.flow),
+        )),
+        ...(content.cleanup.mode === 'none'
           ? []
           : content.cleanup.steps.flatMap((step) =>
               step.type === 'sql' ? [step.connectionId] : [],
-            );
+            )),
+      ];
       if (
         content.cleanup.mode !== 'none' &&
         content.cleanup.steps.some(
@@ -789,6 +806,7 @@ export class PlanService {
         content,
         rows,
         preparationSources,
+        disabledNodeIds,
       };
     } catch (error: unknown) {
       if (!(error instanceof DomainError)) throw error;
@@ -1310,15 +1328,10 @@ export class PlanService {
           '执行请求范围不符合计划，定时不能自动选择子集。',
           422,
         );
-      const sets = await transaction.query<{ set_id: string }>(
-        'SELECT DISTINCT set_id FROM app.test_assets WHERE project_id=$1 AND id=ANY($2::uuid[])',
+      await transaction.query(
+        "SELECT id FROM app.test_assets WHERE project_id=$1 AND kind='API' AND set_id IS NULL AND target_type='case' AND id=ANY($2::uuid[]) ORDER BY id FOR SHARE",
         [request.project_id, request.selected_case_ids],
       );
-      if (sets.rows.length)
-        await transaction.query(
-          'SELECT id FROM app.test_assets WHERE id=ANY($1::uuid[]) ORDER BY id FOR SHARE',
-          [sets.rows.map((row) => row.set_id)],
-        );
       const analysed = [];
       for (const caseId of request.selected_case_ids) {
         const item = await this.analyseApiCaseInTransaction(
@@ -1358,12 +1371,16 @@ export class PlanService {
         scopeItemSchema.parse({
           runItemId: randomUUID(),
           caseId: entry.approved.approval.caseId,
+          caseRevisionId: entry.approved.approval.caseRevisionId,
+          ...(entry.disabledNodeIds.length
+            ? { disabledNodeIds: entry.disabledNodeIds }
+            : {}),
           approvalSnapshotId: entry.approved.approval.id,
           requirementVersionId:
             entry.approved.snapshot.case.requirementVersionId,
-          setId: entry.approved.snapshot.case.setId,
-          scenarioId: entry.approved.snapshot.scenario.id,
-          scenario: entry.approved.snapshot.scenario.content,
+          setId: null,
+          scenarioId: entry.approved.snapshot.scenario?.id ?? null,
+          scenario: entry.approved.snapshot.scenario?.content ?? null,
           content: frozen.content,
           ...(frozen.dataRow ? { dataRow: frozen.dataRow } : {}),
           ...(entry.preparationSources.length

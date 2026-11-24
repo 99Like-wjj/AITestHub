@@ -4,6 +4,7 @@ idSchema,
 titleSchema,
 commandIdSchema,
 persistedRowVersionSchema,
+timestampSchema,
 } from './base.js';
 import {
 materialInputSchema,
@@ -35,13 +36,20 @@ export const createRequirementInputSchema = z.strictObject({
   submissionId: commandIdSchema,
   summary: z.string().max(10_000),
   materials: materialInputs,
+  predecessorRequirementId: idSchema.optional(),
 });
 export const addRequirementVersionInputSchema = z.strictObject({
   submissionId: commandIdSchema,
-  rowVersion: persistedRowVersionSchema,
+  rowVersion: persistedRowVersionSchema.optional(),
+  baseVersionId: idSchema.optional(),
+  title: titleSchema.optional(),
+  businessNumber: z.string().trim().min(1).max(100).nullable().optional(),
   summary: z.string().max(10_000),
   materials: materialInputs,
-});
+}).refine(
+  (input) => (input.baseVersionId !== undefined) !== (input.rowVersion !== undefined),
+  '提交时请选择一个资料编辑基准。',
+);
 /** Server structural envelope; current/pinned ResourcePolicy remains authoritative. */
 export const createRequirementResourceInputSchema =
   createRequirementInputSchema.safeExtend({
@@ -135,8 +143,30 @@ export const requirementPageSchema = z.strictObject({
 export const requirementEligibleParticipantsSchema = z.strictObject({
   users: z.array(requirementParticipantSchema),
 });
+export const requirementMaterialLockSchema = z.strictObject({
+  versionId: idSchema,
+  versionNo: z.number().int().positive(),
+  lockedAt: timestampSchema,
+  lockedBy: idSchema.nullable(),
+});
+const requirementLineageItemSchema = z.strictObject({
+  requirementId: idSchema,
+  title: titleSchema,
+  businessNumber: z.string().nullable(),
+});
+export const requirementHistorySchema = z.strictObject({
+  versions: z.array(requirementVersionSchema),
+});
+export const requirementMaterialManifestSchema = requirementHistorySchema.extend({
+  currentVersion: requirementVersionSchema,
+  materialLock: requirementMaterialLockSchema.nullable(),
+});
 export const requirementDetailSchema = z.strictObject({
   requirement: requirementSchema,
+  currentVersion: requirementVersionSchema,
+  materialLock: requirementMaterialLockSchema.nullable(),
+  predecessor: requirementLineageItemSchema.extend({ versionId: idSchema }).nullable(),
+  successors: z.array(requirementLineageItemSchema),
   versions: z.array(requirementVersionSchema),
   participants: z.array(requirementParticipantSchema),
 });

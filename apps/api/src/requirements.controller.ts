@@ -48,20 +48,6 @@ export class RequirementsController {
         ),
       );
     }
-    if (path === 'prepare-version' && req.method === 'POST') {
-      const body = z.record(z.string(), z.unknown()).parse(req.body),
-        nested = z.record(z.string(), z.unknown()).parse(body.input);
-      if (
-        (body.target === 'existing' && body.projectId !== projectId) ||
-        (body.target === 'new' && nested.projectId !== projectId)
-      )
-        throw new DomainError(
-          'VALIDATION_ERROR',
-          '准备范围与路径项目不一致。',
-          400,
-        );
-      return res.json(await this.service.prepareVersion(actor, body));
-    }
     if (path === '' && req.method === 'POST') {
       const body = z.record(z.string(), z.unknown()).parse(req.body);
       if ('projectId' in body && body.projectId !== projectId)
@@ -142,24 +128,18 @@ export class RequirementsController {
         ),
       );
     const match =
-      /^([^/]+)(?:\/(versions|participants|state|archive|collaboration))?$/.exec(
+      /^([^/]+)(?:\/(history|current-materials|archive|collaboration))?$/.exec(
         path,
       );
-    if (match?.[1]) {
+    if (match?.[1] && (match[2] || req.method === 'GET')) {
       const id = idSchema.parse(match[1]);
       if (!match[2] && req.method === 'GET')
         return res.json(await this.service.detail(actor, projectId, id));
-      if (match[2] === 'versions' && req.method === 'POST')
-        return res
-          .status(201)
-          .json(await this.service.addVersion(actor, projectId, id, req.body));
-      if (match[2] === 'participants' && req.method === 'PUT')
+      if (match[2] === 'history' && req.method === 'GET')
+        return res.json(await this.service.history(actor, projectId, id));
+      if (match[2] === 'current-materials' && req.method === 'PUT')
         return res.json(
-          await this.service.participants(actor, projectId, id, req.body),
-        );
-      if (match[2] === 'state' && req.method === 'PUT')
-        return res.json(
-          await this.service.setState(actor, projectId, id, req.body),
+          await this.service.addVersion(actor, projectId, id, req.body),
         );
       if (match[2] === 'collaboration' && req.method === 'PUT')
         return res.json(

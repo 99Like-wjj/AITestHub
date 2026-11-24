@@ -10,6 +10,7 @@ import type {
 } from '../../../persistence/src/database.js';
 import {
   currentUser,
+  listProjectAccess,
   requirePlatformAdmin,
   requireProject,
 } from '../access/policy.js';
@@ -32,37 +33,15 @@ export class ProjectService {
 
   async list(actor: ActorContext) {
     return this.db.transaction(async (tx) => {
-      const user = await currentUser(tx, actor);
-      if (
-        actor.allowedCapabilities &&
-        !actor.allowedCapabilities.includes('project.read')
-      ) {
-        throw new DomainError(
-          'FORBIDDEN',
-          '此个人 Key 未开放项目读取能力。',
-          403,
-        );
-      }
-      const result = await tx.query<{
-        id: string;
-        name: string;
-        is_admin: boolean | null;
-        roles: ProjectRole[] | null;
-        row_version: number;
-      }>(
-        `SELECT p.id,p.name,m.is_admin,m.roles,p.row_version FROM app.projects p
-         LEFT JOIN app.project_members m ON m.project_id=p.id AND m.user_id=$1 AND m.active
-         WHERE p.active AND (m.user_id IS NOT NULL OR $2) ORDER BY p.created_at,p.id`,
-        [actor.userId, actor.entrypoint === 'web' && user.is_platform_admin],
-      );
+      const projects = await listProjectAccess(tx, actor);
       return {
-        projects: result.rows.map((p) => ({
-          id: p.id,
-          name: p.name,
-          isAdmin: p.is_admin ?? false,
-          roles: p.roles ?? [],
-          rowVersion: p.row_version,
-        })),
+        projects: projects.map(
+          ({
+            memberVersion: _memberVersion,
+            inheritsPlatformAdmin: _inherited,
+            ...project
+          }) => project,
+        ),
       };
     });
   }
@@ -103,7 +82,7 @@ export class ProjectService {
           id: project.id,
           name: project.name,
           rowVersion: project.row_version,
-          isAdmin: input.administratorIds.includes(actor.userId),
+          isAdmin: true,
           roles: [],
         },
       };

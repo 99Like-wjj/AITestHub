@@ -9,6 +9,10 @@ import {
 import type { SqlExecutor } from '../../../persistence/src/database.js';
 import { DomainError } from '../errors.js';
 import { canonicalJson } from '../operations/service.js';
+import {
+  requirementBasisJoins,
+  requirementBasisProjection,
+} from '../requirements/material-lock.js';
 
 export interface AssetRow extends QueryResultRow {
   id: string;
@@ -24,6 +28,7 @@ export interface AssetRow extends QueryResultRow {
   review_state: 'pending' | 'needsOptimization' | 'aiOptimized' | 'approved';
   removed_at: Date | null;
   content: unknown;
+  requirement_basis?: unknown;
 }
 export interface OpinionRow extends QueryResultRow {
   id: string;
@@ -35,8 +40,9 @@ export interface OpinionRow extends QueryResultRow {
   removed_at: Date | null;
   row_version: number;
 }
-export const assetSelect =
-  'SELECT a.*,r.content FROM app.test_assets a JOIN app.asset_revisions r ON r.id=a.current_revision_id';
+export const assetSelect = `SELECT a.*,r.content,${requirementBasisProjection}
+  FROM app.test_assets a JOIN app.asset_revisions r ON r.id=a.current_revision_id
+  ${requirementBasisJoins('a.project_id', 'COALESCE(r.basis_requirement_version_id,a.requirement_version_id)')}`;
 export function assetDto(row: AssetRow): Asset {
   const content = assetContentSchema.parse(row.content);
   return assetSchema.parse({
@@ -44,6 +50,9 @@ export function assetDto(row: AssetRow): Asset {
     projectId: row.project_id,
     kind: row.kind,
     requirementVersionId: row.requirement_version_id,
+    ...(row.requirement_basis
+      ? { requirementBasis: row.requirement_basis }
+      : {}),
     setId: row.set_id,
     targetType: row.target_type,
     parentId: row.parent_id,

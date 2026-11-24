@@ -73,10 +73,8 @@ import {
   ProblemStateTag,
 } from './semantic-status';
 import { BeijingTime } from './beijing-time';
-import {
-  RequirementDirectory,
-  RequirementDirectoryLabel,
-} from './requirement-directory';
+import { RequirementDirectory } from './requirement-directory';
+import { ExplorerTree, type ExplorerNode } from './explorer-tree';
 import { useIssueCounts, useIssueReadScope } from './issues-counts';
 import { BulkActionBar } from './bulk-action-bar';
 import { ResultFilters, ResultListState } from './result-list';
@@ -620,6 +618,53 @@ export function IssuesPage({
   const counts = new Map(
     aggregate.data?.requirements.map((row) => [row.requirementId, row]) ?? [],
   );
+  const directoryRecords = problemTab(tab) ? problems : issues;
+  const issueDirectory: ExplorerNode[] = [
+    {
+      id: 'all',
+      title: '全部需求',
+      kind: 'all',
+      count: `${aggregate.data?.totals.formal ?? '—'} 项缺陷`,
+    },
+    ...context.requirements.map((requirement): ExplorerNode => {
+      const records = directoryRecords.filter(
+        (record) => record.requirementId === requirement.id,
+      );
+      const children = requirement.versions.map((version): ExplorerNode => ({
+        id: `version:${requirement.id}:${version.id}`,
+        title: `版本 v${version.versionNo}`,
+        children: records
+          .filter((record) => record.requirementVersionId === version.id)
+          .map((record) => ({
+            id: `record:${record.id}`,
+            title: record.title,
+            kind: 'issue',
+            ...('number' in record && { detail: record.number }),
+          })),
+      }));
+      const unspecified = records.filter(
+        (record) => record.requirementVersionId === null,
+      );
+      if (unspecified.length)
+        children.push({
+          id: `version:${requirement.id}:unspecified`,
+          title: '未指定版本',
+          children: unspecified.map((record) => ({
+            id: `record:${record.id}`,
+            title: record.title,
+            kind: 'issue',
+            ...('number' in record && { detail: record.number }),
+          })),
+        });
+      return {
+        id: `requirement:${requirement.id}`,
+        title: requirement.title,
+        archived: requirement.archived,
+        count: `${counts.get(requirement.id)?.formal ?? '—'} 项缺陷`,
+        children,
+      };
+    }),
+  ];
   const selectedCounts = requirementId
     ? counts.get(requirementId)
     : aggregate.data?.totals;
@@ -760,44 +805,40 @@ export function IssuesPage({
           onSearchChange={setRequirementSearch}
           searchPlaceholder="搜索需求名称或 ID"
         >
-          <button
-            type="button"
-            className={`tree-node requirement-directory-button ${!requirementId ? 'active' : ''}`}
-            aria-pressed={!requirementId}
-            onClick={() => setRequirementId(null)}
-          >
-            <RequirementDirectoryLabel
-              title="全部需求"
-              count={`${displayCount(aggregate.data?.totals.formal)} 项缺陷`}
-            />
-          </button>
-          {context.requirements
-            .filter((r) =>
-              [r.id, r.title].some((text) =>
-                text
-                  .toLowerCase()
-                  .includes(requirementSearch.trim().toLowerCase()),
-              ),
-            )
-            .map((requirement) => (
-              <button
-                type="button"
-                key={requirement.id}
-                className={`tree-node requirement-directory-button ${requirementId === requirement.id ? 'active' : ''}`}
-                aria-pressed={requirementId === requirement.id}
-                onClick={() => setRequirementId(requirement.id)}
-              >
-                <RequirementDirectoryLabel
-                  title={requirement.title}
-                  archived={requirement.archived}
-                  count={`${displayCount(counts.get(requirement.id)?.formal)} 项缺陷`}
-                />
-              </button>
-            ))}
-          <div className="divider" />
-          <p className="caption" style={{ padding: '0 10px' }}>
-            导航数字按当前筛选汇总各需求的全部版本。
-          </p>
+          <ExplorerTree
+            nodes={issueDirectory}
+            label="缺陷目录"
+            search={requirementSearch}
+            selected={
+              selection
+                ? `record:${selection.id}`
+                : requirementId
+                  ? requirementVersion
+                    ? `version:${requirementId}:${requirementVersion}`
+                    : `requirement:${requirementId}`
+                  : 'all'
+            }
+            storageKey={`explorer:issues:${me.user.id}:${project.id}`}
+            onSelect={(key) => {
+              if (key === 'all') setRequirementId(null);
+              else if (key.startsWith('requirement:'))
+                setRequirementId(key.slice(12));
+              else if (key.startsWith('version:')) {
+                const [, id, version] = key.split(':');
+                if (id && version) {
+                  setRequirementId(id);
+                  setRequirementVersion(version);
+                }
+              } else {
+                const id = key.slice(7);
+                if (directoryRecords.some((record) => record.id === id))
+                  openSelection({
+                    id,
+                    kind: problemTab(tab) ? 'problem' : 'issue',
+                  });
+              }
+            }}
+          />
         </RequirementDirectory>
         <section className="issue-pane">
           <div className="card">

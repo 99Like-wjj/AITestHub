@@ -40,6 +40,8 @@ import {
   type UiCaseReviewDraft,
 } from './ui-case-review-pane';
 import type { CaseScope } from './requirements';
+import { UiRequirementBasis } from './ui-requirement-basis';
+import { AssetReviewPanel } from './asset-review-panel';
 import {
   matchingApproval,
   uiPlanHandoffHash,
@@ -73,17 +75,22 @@ export function useUiCaseStages(
 ) {
   const [stages, setStages] = useState<CaseStage[]>([]);
   const projectId = scope?.projectId;
-  const versionId = scope?.requirementVersionId;
+  const basisId = scope?.historical
+    ? scope.requirementVersionId
+    : scope?.requirementId;
+  const basisField = scope?.historical
+    ? 'requirementVersionId'
+    : 'requirementId';
   useEffect(() => {
     if (
       !enabled ||
       !projectId ||
-      !versionId ||
+      !basisId ||
       !assets.some((asset) => asset.targetType === 'case')
     )
       return;
     const controller = new AbortController();
-    const query = new URLSearchParams({ requirementVersionId: versionId });
+    const query = new URLSearchParams({ [basisField]: basisId });
     void api(
       '/projects/' + projectId + '/assets/ui-case-review-stages?' + query,
       { signal: controller.signal },
@@ -96,7 +103,7 @@ export function useUiCaseStages(
         if (!controller.signal.aborted) setStages([]);
       });
     return () => controller.abort();
-  }, [projectId, versionId, enabled, assets]);
+  }, [projectId, basisField, basisId, enabled, assets]);
   const stageByCase = useMemo(
     () => new Map(stages.map((item) => [item.caseId, item])),
     [stages],
@@ -119,30 +126,33 @@ export function UiCaseStageBadge({ stage }: { stage: CaseStage['stage'] }) {
 }
 
 export function UiReviewHistory({
-  projectId,
-  requirementVersionId,
+  scope,
   title,
   open,
   onClose,
   onSelect,
 }: {
-  projectId: string;
-  requirementVersionId: string;
+  scope: CaseScope;
   title: string;
   open: boolean;
   onClose: () => void;
-  onSelect: (meetingId: string) => void;
+  onSelect: (meetingId: string, requirementVersionId: string) => void;
 }) {
   const [rows, setRows] =
     useState<z.infer<typeof uiReviewMeetingListSchema>['meetings']>();
   const [error, setError] = useState<string>();
+  const { projectId, requirementId, requirementVersionId, historical } = scope;
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
     setRows(undefined);
     setError(undefined);
+    const query = new URLSearchParams({
+      archived: 'true',
+      ...(historical ? { requirementVersionId } : { requirementId }),
+    });
     void api(
-      `/projects/${projectId}/assets/ui-review-meetings?archived=true&requirementVersionId=${requirementVersionId}`,
+      `/projects/${projectId}/assets/ui-review-meetings?${query}`,
       { signal: controller.signal },
       uiReviewMeetingListSchema,
     )
@@ -153,7 +163,7 @@ export function UiReviewHistory({
         if (!controller.signal.aborted) setError(describeError(failure));
       });
     return () => controller.abort();
-  }, [projectId, requirementVersionId, open]);
+  }, [projectId, requirementId, requirementVersionId, historical, open]);
   return (
     <Modal
       title="评审历史"
@@ -178,14 +188,19 @@ export function UiReviewHistory({
                   {formatBeijingTime(meeting.createdAt, true)}
                 </p>
               </div>
-              <Button size="small" onClick={() => onSelect(meeting.id)}>
+              <Button
+                size="small"
+                onClick={() =>
+                  onSelect(meeting.id, meeting.requirementVersionId)
+                }
+              >
                 查看快照
               </Button>
             </article>
           ))}
         </div>
       ) : (
-        <Empty description="当前需求版本暂无已定稿评审会话。" />
+        <Empty description="当前需求暂无已定稿评审会话。" />
       )}
     </Modal>
   );
@@ -197,6 +212,7 @@ export function UiCaseWorkbench({
   userId,
   assets,
   requestedCase,
+  requestedScene,
   requestedRevision,
   meetingId,
   archived,
@@ -204,11 +220,12 @@ export function UiCaseWorkbench({
   loading,
   error,
   tester,
+  canEdit,
   onBack,
   onCase,
+  onScene,
   onRevision,
   onApprove,
-  onEdit,
   onDetails,
   onOpenTeam,
   onOpenHistory,
@@ -221,6 +238,7 @@ export function UiCaseWorkbench({
   userId: string;
   assets: Asset[];
   requestedCase: string | undefined;
+  requestedScene: string | undefined;
   requestedRevision: string | undefined;
   meetingId: string | undefined;
   archived: boolean;
@@ -228,13 +246,14 @@ export function UiCaseWorkbench({
   loading: boolean;
   error: string | undefined;
   tester: boolean;
+  canEdit: boolean;
   onBack: () => void;
   onCase: (caseId: string) => void;
+  onScene: (sceneId: string) => void;
   onRevision: (revisionId?: string) => void;
   onApprove: (ids: string[]) => Promise<void>;
-  onEdit: (asset: Asset) => void;
   onDetails: (asset: Asset) => void;
-  onOpenTeam: (meetingId: string) => void;
+  onOpenTeam: (meetingId: string, asset: Asset) => void;
   onOpenHistory: (meetingId: string, caseId: string) => void;
   onSupplement: (
     asset: Asset,
@@ -247,6 +266,7 @@ export function UiCaseWorkbench({
   const [search, setSearch] = useState('');
   const [snapshot, setSnapshot] = useState<Meeting>();
   const [detail, setDetail] = useState<Detail>();
+  const [removedLink, setRemovedLink] = useState<Detail>();
   const [liveReview, setLiveReview] = useState<Meeting>();
   const [originRecord, setOriginRecord] = useState<{
     assetId: string;
@@ -268,36 +288,105 @@ export function UiCaseWorkbench({
   const [planItems, setPlanItems] = useState<UiPlanEligibility[]>();
   const [planError, setPlanError] = useState<string>();
   const [choice, setChoice] = useState<string[]>([]);
-  const readonly = Boolean(meetingId) || archived;
+  const linkedRemoved =
+    removedLink?.asset.id === requestedCase ? removedLink : undefined;
+  const readonly =
+    Boolean(meetingId) ||
+    archived ||
+    Boolean(scope.historical) ||
+    Boolean(linkedRemoved);
   const currentCases = useMemo(
     () =>
       assets.filter(
         (asset) =>
           asset.kind === 'UI' &&
-          asset.requirementVersionId === scope.requirementVersionId &&
           asset.targetType === 'case' &&
           !asset.removedAt,
       ),
-    [assets, scope.requirementVersionId],
+    [assets],
   );
-  const scenarios = useMemo(
+  const sceneAssets = useMemo(
     () =>
-      new Map(
-        assets
-          .filter((asset) => asset.targetType === 'scenario')
-          .map((asset) => [asset.id, asset.title]),
+      assets.filter(
+        (asset) => asset.targetType === 'scenario' && !asset.removedAt,
       ),
     [assets],
   );
+  const scenarios = new Map(
+    sceneAssets.map((asset) => [asset.id, asset.title]),
+  );
   const cases = meetingId ? (snapshot?.cases ?? []) : currentCases;
+  const needsLinkedRead = Boolean(
+    requestedCase &&
+    !meetingId &&
+    !cases.some((item) => item.id === requestedCase) &&
+    available &&
+    !loading,
+  );
+  useEffect(() => {
+    if (!needsLinkedRead || !requestedCase) return;
+    const controller = new AbortController();
+    void api(
+      `/projects/${scope.projectId}/assets/${requestedCase}`,
+      { signal: controller.signal },
+      assetDetailSchema,
+    )
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        const { asset } = result;
+        if (
+          asset.targetType !== 'case' ||
+          asset.kind !== 'UI' ||
+          !asset.removedAt
+        )
+          return;
+        const sameScope =
+          scope.historical || !asset.requirementBasis
+            ? asset.requirementVersionId === scope.requirementVersionId
+            : asset.requirementBasis.requirementId === scope.requirementId;
+        if (sameScope) setRemovedLink(result);
+      })
+      .catch((failure: unknown) => {
+        if (!controller.signal.aborted) setReadError(describeError(failure));
+      });
+    return () => controller.abort();
+  }, [
+    needsLinkedRead,
+    requestedCase,
+    scope.projectId,
+    scope.requirementId,
+    scope.requirementVersionId,
+    scope.historical,
+  ]);
   const caseStage = useUiCaseStages(
     scope,
     currentCases,
     !meetingId && available,
   );
-  const active = requestedCase
-    ? cases.find((asset) => asset.id === requestedCase)
-    : cases[0];
+  const activeScene = meetingId
+    ? undefined
+    : requestedScene
+      ? sceneAssets.find((asset) => asset.id === requestedScene)
+      : !requestedCase && !cases.length
+        ? sceneAssets[0]
+        : undefined;
+  const active = activeScene
+    ? undefined
+    : requestedCase
+      ? (cases.find((asset) => asset.id === requestedCase) ??
+        linkedRemoved?.asset)
+      : cases[0];
+  const planVersionId =
+    active?.requirementVersionId ??
+    activeScene?.requirementVersionId ??
+    scope.requirementVersionId;
+  const planCases = useMemo(
+    () =>
+      currentCases.filter(
+        (asset) => asset.requirementVersionId === planVersionId,
+      ),
+    [currentCases, planVersionId],
+  );
   const activeId = active?.id;
   const activeRevision = active?.revisionId;
   const activeRowVersion = active?.rowVersion;
@@ -310,10 +399,24 @@ export function UiCaseWorkbench({
       ),
   );
   const position = displayedRows.findIndex((asset) => asset.id === activeId);
+  const visibleSceneIds = new Set(displayedRows.map((asset) => asset.parentId));
+  if (!meetingId && filter === 'all') {
+    for (const scene of sceneAssets) {
+      if (
+        scene.title
+          .toLocaleLowerCase()
+          .includes(search.trim().toLocaleLowerCase())
+      )
+        visibleSceneIds.add(scene.id);
+    }
+  }
   useEffect(() => {
     setFilter('all');
     setSearch('');
   }, [meetingId]);
+  useEffect(() => {
+    if (requestedScene) setReadError(undefined);
+  }, [requestedScene]);
   useEffect(() => {
     if (!activeId || !available) return;
     const controller = new AbortController();
@@ -377,7 +480,14 @@ export function UiCaseWorkbench({
     scope.requirementVersionId,
   ]);
   useEffect(() => {
-    if (meetingId || !activeId || !activeRevision || !available) return;
+    if (
+      meetingId ||
+      linkedRemoved ||
+      !activeId ||
+      !activeRevision ||
+      !available
+    )
+      return;
     const controller = new AbortController();
     setReadError(undefined);
     setDetail((entry) =>
@@ -394,7 +504,8 @@ export function UiCaseWorkbench({
       .then((response) => {
         if (controller.signal.aborted) return;
         if (
-          response.asset.requirementVersionId !== scope.requirementVersionId ||
+          response.asset.requirementVersionId !==
+            active?.requirementVersionId ||
           response.asset.kind !== 'UI' ||
           response.asset.targetType !== 'case'
         ) {
@@ -409,6 +520,7 @@ export function UiCaseWorkbench({
     return () => controller.abort();
   }, [
     meetingId,
+    linkedRemoved,
     activeId,
     activeRevision,
     activeRowVersion,
@@ -431,7 +543,7 @@ export function UiCaseWorkbench({
         if (controller.signal.aborted) return;
         setPlanItems(items);
         setChoice(
-          currentCases
+          planCases
             .filter((asset) =>
               items.some((item) => Boolean(matchingApproval(asset, item))),
             )
@@ -442,9 +554,10 @@ export function UiCaseWorkbench({
         if (!controller.signal.aborted) setPlanError(describeError(failure));
       });
     return () => controller.abort();
-  }, [scopePlan, scope.projectId, currentCases]);
+  }, [scopePlan, scope.projectId, planCases]);
 
-  const focusedDetail = detail?.asset.id === activeId ? detail : undefined;
+  const focusedDetail =
+    linkedRemoved ?? (detail?.asset.id === activeId ? detail : undefined);
   const currentAsset = focusedDetail?.asset;
   const currentRowVersion = currentAsset?.rowVersion;
   useEffect(() => {
@@ -472,8 +585,9 @@ export function UiCaseWorkbench({
     latestRevision && revisionId && latestRevision !== revisionId,
   );
   const writable = tester && !readonly && !earlier && !currentAsset?.removedAt;
+  const editable = canEdit && !readonly && !earlier && !currentAsset?.removedAt;
   const eligibility = new Map(planItems?.map((item) => [item.caseId, item]));
-  const eligible = currentCases.flatMap((asset) => {
+  const eligible = planCases.flatMap((asset) => {
     const approvalSnapshotId = matchingApproval(
       asset,
       eligibility.get(asset.id),
@@ -485,7 +599,7 @@ export function UiCaseWorkbench({
   );
   const blocked =
     planItems &&
-    currentCases.filter(
+    planCases.filter(
       (asset) => !matchingApproval(asset, eligibility.get(asset.id)),
     );
   const review = meetingId ? snapshot : liveReview;
@@ -507,7 +621,7 @@ export function UiCaseWorkbench({
     : null;
   const [eligibleCount, setEligibleCount] = useState<number>();
   useEffect(() => {
-    if (readonly || !available || !tester || !currentCases.length) {
+    if (readonly || !available || !tester || !planCases.length) {
       setEligibleCount(undefined);
       return;
     }
@@ -520,7 +634,7 @@ export function UiCaseWorkbench({
       .then(({ items }) => {
         if (!controller.signal.aborted)
           setEligibleCount(
-            currentCases.filter((row) =>
+            planCases.filter((row) =>
               items.some((item) => Boolean(matchingApproval(row, item))),
             ).length,
           );
@@ -529,7 +643,7 @@ export function UiCaseWorkbench({
         if (!controller.signal.aborted) setEligibleCount(undefined);
       });
     return () => controller.abort();
-  }, [readonly, available, tester, currentCases, scope.projectId]);
+  }, [readonly, available, tester, planCases, scope.projectId]);
   const origin =
     originRecord?.assetId === activeId ? originRecord?.origin : undefined;
   const sourceInScope =
@@ -568,11 +682,16 @@ export function UiCaseWorkbench({
       <div className="ui-case-workbench-main">
         <header className="ui-case-workbench-heading">
           <div>
-            <h1>{scope.title}</h1>
+            <div className="row wrap">
+              <h1>{scope.title}</h1>
+              <UiRequirementBasis scope={scope} cases={currentCases} />
+            </div>
             <p className="caption">
-              需求版本 v{scope.versionNo} ·{' '}
-              {new Set(cases.map((asset) => asset.parentId)).size} 个场景 ·{' '}
-              {cases.length} 条 UI 用例
+              {scope.historical && `资料快照 v${scope.versionNo} · `}
+              {meetingId
+                ? new Set(cases.map((asset) => asset.parentId)).size
+                : sceneAssets.length}{' '}
+              个场景 · {cases.length} 条 UI 用例
               {meetingId && ' · 评审会话快照'}
               {readonly && ' · 只读'}
             </p>
@@ -597,8 +716,8 @@ export function UiCaseWorkbench({
           <Alert
             type="info"
             showIcon
-            title="此需求版本不在当前浏览范围。"
-            description="返回 UI 用例管理，确认当前项目、版本和归档筛选。"
+            title="此需求不在当前浏览范围。"
+            description="返回 UI 用例管理，确认当前项目和归档筛选。"
           />
         )}
         {(loading && !cases.length) ||
@@ -662,9 +781,7 @@ export function UiCaseWorkbench({
                     />
                   </div>
                   <div className="ui-case-pane-scroll ui-case-tree">
-                    {[
-                      ...new Set(displayedRows.map((asset) => asset.parentId)),
-                    ].map((parentId) => {
+                    {[...visibleSceneIds].map((parentId) => {
                       const group = displayedRows.filter(
                         (asset) => asset.parentId === parentId,
                       );
@@ -672,7 +789,22 @@ export function UiCaseWorkbench({
                         <details key={parentId ?? 'unknown'} open>
                           <summary>
                             <AppIcon name="folder-closed" />
-                            {scenarios.get(parentId ?? '') ?? '用例场景'}{' '}
+                            {parentId && !meetingId ? (
+                              <button
+                                type="button"
+                                className="ui-case-directory-scene"
+                                aria-current={parentId === activeScene?.id}
+                                disabled={busy}
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  onScene(parentId);
+                                }}
+                              >
+                                {scenarios.get(parentId) ?? '用例场景'}
+                              </button>
+                            ) : (
+                              (scenarios.get(parentId ?? '') ?? '用例场景')
+                            )}{' '}
                             <small>{group.length}</small>
                           </summary>
                           {group.map((asset) => (
@@ -703,10 +835,15 @@ export function UiCaseWorkbench({
                               )}
                             </button>
                           ))}
+                          {!group.length && (
+                            <p className="caption ui-case-library-no-rows">
+                              该场景暂无用例。
+                            </p>
+                          )}
                         </details>
                       );
                     })}
-                    {!displayedRows.length && (
+                    {!visibleSceneIds.size && (
                       <Empty
                         image={Empty.PRESENTED_IMAGE_SIMPLE}
                         description="没有匹配用例。"
@@ -769,7 +906,52 @@ export function UiCaseWorkbench({
                     className="ui-case-pane-scroll ui-case-reader-content"
                     tabIndex={0}
                   >
-                    {active ? (
+                    {activeScene && 'objective' in activeScene.content ? (
+                      <>
+                        <h2 className="ui-case-reading-title">
+                          {activeScene.title}
+                        </h2>
+                        <p className="caption">
+                          {
+                            currentCases.filter(
+                              (item) => item.parentId === activeScene.id,
+                            ).length
+                          }{' '}
+                          条用例
+                        </p>
+                        <h3>场景测试目标</h3>
+                        <p className="preserve-lines">
+                          {activeScene.content.objective}
+                        </p>
+                        {activeScene.content.sharedPreconditions.length > 0 && (
+                          <section>
+                            <h3>共享前置条件</h3>
+                            <ul>
+                              {activeScene.content.sharedPreconditions.map(
+                                (condition, index) => (
+                                  <li key={index}>{condition}</li>
+                                ),
+                              )}
+                            </ul>
+                          </section>
+                        )}
+                        {activeScene.content.basisRefs.length > 0 && (
+                          <section>
+                            <h3>资料依据</h3>
+                            <ul>
+                              {activeScene.content.basisRefs.map(
+                                (basis, index) => (
+                                  <li key={index}>
+                                    {basis.description}
+                                    {basis.locator && ' · ' + basis.locator}
+                                  </li>
+                                ),
+                              )}
+                            </ul>
+                          </section>
+                        )}
+                      </>
+                    ) : active ? (
                       <>
                         <div className="ui-case-reading-meta">
                           <span
@@ -926,7 +1108,7 @@ export function UiCaseWorkbench({
                   aria-label="评审与复审"
                 >
                   <header className="ui-case-column-head">
-                    <h2>用例评审</h2>
+                    <h2>{activeScene ? '场景意见' : '评审与复审'}</h2>
                     {(readonly || earlier || caseRound) && (
                       <span className="ui-case-round">
                         {readonly || earlier
@@ -955,7 +1137,16 @@ export function UiCaseWorkbench({
                         </span>
                       </div>
                     )}
-                    {readonly || earlier ? (
+                    {activeScene ? (
+                      <AssetReviewPanel
+                        key={activeScene.id + ':' + activeScene.revisionId}
+                        projectId={scope.projectId}
+                        asset={activeScene}
+                        revisionId={activeScene.revisionId}
+                        tester={tester && !readonly}
+                        onChanged={onChanged}
+                      />
+                    ) : readonly || earlier ? (
                       <>
                         <Alert
                           type="info"
@@ -995,7 +1186,9 @@ export function UiCaseWorkbench({
                             }
                             onApprove={onApprove}
                             onChanged={onChanged}
-                            onOpenTeam={onOpenTeam}
+                            onOpenTeam={(meetingId) =>
+                              onOpenTeam(meetingId, currentAsset)
+                            }
                             onOpenHistory={(id) =>
                               onOpenHistory(id, currentAsset.id)
                             }
@@ -1004,7 +1197,7 @@ export function UiCaseWorkbench({
                             }
                           />
                           <Space wrap size={6}>
-                            {writable && (
+                            {editable && (
                               <Button
                                 size="small"
                                 icon={<AppIcon name="spark" />}
@@ -1018,15 +1211,9 @@ export function UiCaseWorkbench({
                               trigger={['click']}
                               menu={{
                                 items: [
-                                  ...(writable
-                                    ? [{ key: 'edit', label: '编辑当前内容' }]
-                                    : []),
                                   { key: 'details', label: '查看资产详情' },
                                 ],
-                                onClick: ({ key }) =>
-                                  key === 'edit'
-                                    ? onEdit(currentAsset)
-                                    : onDetails(currentAsset),
+                                onClick: () => onDetails(currentAsset),
                               }}
                             >
                               <Button
@@ -1059,7 +1246,7 @@ export function UiCaseWorkbench({
           if (!chosenApprovals.length) return;
           window.location.hash = uiPlanHandoffHash(
             scope.projectId,
-            scope.requirementVersionId,
+            planVersionId,
             chosenApprovals,
           );
         }}

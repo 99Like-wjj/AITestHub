@@ -614,8 +614,7 @@
 .ui-case-library-toolbar,
 .ui-case-library-actions,
 .ui-case-library-scope-controls,
-.ui-case-library-filters,
-.ui-case-library-version {
+.ui-case-library-filters {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -633,16 +632,103 @@
   font-size: 17px;
   line-height: 1.4;
 }
+
+.ui-requirement-basis-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ui-requirement-basis-tag i {
+  inline-size: 6px;
+  block-size: 6px;
+  border-radius: 50%;
+  background: #a77a28;
+}
+
+.ui-requirement-basis-content {
+  max-inline-size: min(360px, 76vw);
+}
+
+.ui-case-directory-scene {
+  min-inline-size: 0;
+  flex: 1;
+  border: 0;
+  border-radius: 5px;
+  padding: 3px 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.ui-case-directory-scene:hover,
+.ui-case-directory-scene[aria-current='true'] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ui-case-import {
+  display: grid;
+  gap: 10px;
+  max-block-size: min(66vh, 700px);
+  overflow: auto;
+}
+
+.ui-case-import-input {
+  display: grid;
+  gap: 6px;
+}
+
+.ui-case-import-file {
+  max-inline-size: 100%;
+  color: var(--text);
+  font: inherit;
+}
+
+.ui-case-import-file::file-selector-button {
+  margin-inline-end: 10px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: inherit;
+  cursor: pointer;
+}
+
+.ui-case-import-entry,
+.ui-case-import-scene,
+.ui-case-import-receipts li {
+  padding: 10px 0;
+  border-block-end: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.ui-case-import-entry p {
+  margin: 3px 0 3px 23px;
+  white-space: pre-wrap;
+}
+
+.ui-case-import-receipts li {
+  display: grid;
+  gap: 4px;
+}
+
+.ui-case-import-scene-name {
+  max-inline-size: 260px;
+}
 .ui-case-library-scope p {
   margin: 3px 0 0;
   line-height: 1.45;
-}
-.ui-case-library-scope label {
-  color: var(--muted);
-  font-size: 12px;
-}
-.ui-case-library-version .ant-select {
-  width: 107px;
 }
 .ui-case-library-list {
   overflow: hidden;

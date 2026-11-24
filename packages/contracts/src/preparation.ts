@@ -46,6 +46,7 @@ export const requirementVersionPreparationSchema = z.strictObject({
   submissionId: commandIdSchema,
   inputDigest: sha256Schema,
   baseRowVersion: persistedRowVersionSchema.nullable(),
+  baseVersionId: idSchema.nullable(),
   nextVersionNo: z.number().int().positive(),
   materialSetDigest: sha256Schema,
   ready: z.boolean(),

@@ -61,7 +61,7 @@ export function registerDomainTools(
     'ath_requirement_materials',
     {
       description:
-        '读取材料清单或幂等提交新需求/新版本。材料必须已完整上传；不接受本地路径或二进制。',
+        '读取现行资料或固定历史修订，幂等新建需求或编辑未锁定资料。材料必须已完整上传；不接受本地路径或二进制。',
       inputSchema: z.union([
         prepareRequirementVersionInputSchema.options[0].extend({
           op: z.literal('prepare-version'),
@@ -94,28 +94,13 @@ export function registerDomainTools(
           const { op, ...body } = input;
           return requirements.prepareVersion(actor, body);
         }
-        if (input.op === 'get-manifest') {
-          const detail = await requirements.detail(
+        if (input.op === 'get-manifest')
+          return requirements.manifest(
             actor,
             input.projectId,
             input.requirementId,
+            input.requirementVersionId,
           );
-          if (
-            input.requirementVersionId &&
-            !detail.versions.some(
-              (version) => version.id === input.requirementVersionId,
-            )
-          ) {
-            throw new DomainError('NOT_FOUND', '此需求内没有该材料版本。', 404);
-          }
-          return {
-            versions: input.requirementVersionId
-              ? detail.versions.filter(
-                  (version) => version.id === input.requirementVersionId,
-                )
-              : detail.versions,
-          };
-        }
         return input.target === 'new'
           ? requirements.create(actor, input.input)
           : requirements.addVersion(

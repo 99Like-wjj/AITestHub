@@ -54,6 +54,10 @@ const relatedTools = [
     names: ['ath_plans', 'ath_ui_executions', 'ath_retests', 'ath_api_runs'],
   },
   {
+    terms: /接口|编排|项目场景|ath-api|\bopenapi\b|\bapi\b|\bendpoints?\b/iu,
+    names: ['ath_api_catalog', 'ath_api_automation', 'ath_api_runs'],
+  },
+  {
     terms: /缺陷|候选问题|待确认问题|bug\b|\bdefects?\b/iu,
     names: ['ath_issues', 'ath_problems', 'ath_issue_lifecycle'],
   },

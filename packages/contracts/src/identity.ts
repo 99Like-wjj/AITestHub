@@ -88,9 +88,12 @@ export const projectSchema = z.strictObject({
   roles: projectRolesSchema,
   rowVersion: persistedRowVersionSchema,
 });
+export const webProjectSchema = projectSchema.extend({
+  inheritsPlatformAdmin: z.boolean(),
+});
 export const meSchema = z.strictObject({
   user: userSchema,
-  projects: z.array(projectSchema),
+  projects: z.array(webProjectSchema),
 });
 export const createProjectInputSchema = z.strictObject({
   name: titleSchema,
@@ -240,6 +243,7 @@ export type AccountRemovalReceipt = z.infer<typeof accountRemovalReceiptSchema>;
 export type UserSummary = z.infer<typeof userSummarySchema>;
 export type Me = z.infer<typeof meSchema>;
 export type Project = z.infer<typeof projectSchema>;
+export type WebProject = z.infer<typeof webProjectSchema>;
 export type ProjectMember = z.infer<typeof projectMemberSchema>;
 export type Theme = z.infer<typeof themeSchema>;
 export type ProjectRole = z.infer<typeof projectRoleSchema>;

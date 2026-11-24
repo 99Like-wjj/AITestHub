@@ -329,7 +329,10 @@ export function RetestScopeView({
               dataSource={group.items}
               scroll={{ x: 900 }}
               columns={[
-                { title: '场景', render: (_, row) => row.scenario.title },
+                {
+                  title: '场景',
+                  render: (_, row) => row.scenario?.title ?? '独立单接口用例',
+                },
                 { title: '用例', render: (_, row) => row.content.title },
                 { title: '精确批准', dataIndex: 'approvalSnapshotId' },
                 { title: '需求版本', dataIndex: 'requirementVersionId' },

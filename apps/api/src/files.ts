@@ -75,7 +75,6 @@ export async function mountFiles(
       const filePath = /^\/([^/]+)(\/content)?$/.exec(path);
       if (
         !(path === '/register' && req.method === 'POST') &&
-        !(path === '/missing' && req.method === 'POST') &&
         !(filePath && ['GET', 'PUT'].includes(req.method))
       ) {
         next();
@@ -93,10 +92,6 @@ export async function mountFiles(
         );
         if (path === '/capabilities' && req.method === 'GET') {
           res.json(await files.capabilities(actor, req.query));
-          return;
-        }
-        if (path === '/missing') {
-          res.json(await files.missing(actor, await json(req)));
           return;
         }
         if (path === '/register') {

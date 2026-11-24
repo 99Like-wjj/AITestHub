@@ -5,7 +5,7 @@ import type {
   Database,
   SqlExecutor,
 } from '../../../persistence/src/database.js';
-import { currentUser, requireProject } from '../access/policy.js';
+import { listProjectAccess, requireProject } from '../access/policy.js';
 import { canonicalJson } from '../operations/service.js';
 import { DomainError } from '../errors.js';
 import type { WorkspaceAccessMode } from '../../../contracts/src/workspace-access.js';
@@ -220,34 +220,30 @@ export class AiRuntimeAccess {
   }
 
   private async authorizationFacts(tx: SqlExecutor, actor: ActorContext) {
-    await currentUser(tx, actor);
-    if (
-      actor.allowedCapabilities &&
-      !actor.allowedCapabilities.includes('project.read')
-    )
-      throw new DomainError(
-        'FORBIDDEN',
-        '当前授权范围不包含平台资料读取。',
-        403,
-      );
-    const projects = await tx.query<{
-      id: string;
-      roles: string[];
-      member_version: number;
-      project_version: number;
-    }>(
-      `SELECT p.id,m.roles,m.row_version member_version,p.row_version project_version
-       FROM app.project_members m JOIN app.projects p ON p.id=m.project_id
-       WHERE m.user_id=$1 AND m.active AND p.active ORDER BY p.id FOR SHARE OF m,p`,
-      [actor.userId],
-    );
+    const projects = await listProjectAccess(tx, actor);
     return {
       userId: actor.userId,
       keyId: actor.keyId ?? null,
       capabilities: actor.allowedCapabilities
         ? [...actor.allowedCapabilities].sort()
         : null,
-      projects: projects.rows,
+      projects: projects
+        .map(
+          ({
+            id,
+            roles,
+            memberVersion,
+            rowVersion,
+            inheritsPlatformAdmin,
+          }) => ({
+            id,
+            roles,
+            member_version: memberVersion,
+            project_version: rowVersion,
+            ...(inheritsPlatformAdmin && { inheritsPlatformAdmin }),
+          }),
+        )
+        .sort((left, right) => left.id.localeCompare(right.id)),
     };
   }
 }

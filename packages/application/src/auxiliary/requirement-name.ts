@@ -6,7 +6,7 @@ import {
 } from '../../../contracts/src/auxiliary.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import type { SqlExecutor } from '../../../persistence/src/database.js';
-import { requireProject } from '../access/policy.js';
+import { requireProjectDraftWrite } from '../access/policy.js';
 import type { ConfigurationService } from '../configuration/service.js';
 import { truncateConversationText } from '../conversations/title.js';
 import { DomainError } from '../errors.js';
@@ -182,7 +182,12 @@ export async function readRequirementNameInput(
     ...(seal.originKeyId ? { keyId: seal.originKeyId } : {}),
     requestId: row.id,
   };
-  await requireProject(tx, actor, row.project_id, 'requirements.write');
+  await requireProjectDraftWrite(
+    tx,
+    actor,
+    row.project_id,
+    'requirements.write',
+  );
   const version = (
     await tx.query<{ title: string; summary: string }>(
       `SELECT r.title,v.summary FROM app.requirements r

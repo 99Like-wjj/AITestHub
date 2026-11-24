@@ -39,6 +39,10 @@ import {
   assetNavigationSchema,
 } from '../../../packages/contracts/src/assets';
 import type { Asset } from '../../../packages/contracts/src/assets';
+import {
+  apiAutomationListSchema,
+  type ApiProjectAsset,
+} from '../../../packages/contracts/src/api-automation';
 import { testConfigurationListSchema } from '../../../packages/contracts/src/test-configuration';
 import type { TestConfigurationView } from '../../../packages/contracts/src/test-configuration';
 import { api, describeError } from './api';
@@ -260,7 +264,7 @@ function PlanEditor({
     productBuild: string;
     requirementVersionId: string;
   }>();
-  const [assets, setAssets] = useState<Asset[]>([]);
+  const [assets, setAssets] = useState<(Asset | ApiProjectAsset)[]>([]);
   const [eligibility, setEligibility] = useState<
     z.infer<typeof uiPlanEligibilitySchema>['items']
   >([]);
@@ -310,11 +314,17 @@ function PlanEditor({
     });
     setCaseIds(plan?.items.map((item) => item.caseId) ?? []);
     void Promise.all([
-      api(
-        `/projects/${projectId}/assets?kind=${kind}`,
-        { signal: controller.signal },
-        assetListSchema,
-      ),
+      kind === 'UI'
+        ? api(
+            `/projects/${projectId}/assets?kind=UI`,
+            { signal: controller.signal },
+            assetListSchema,
+          ).then((result) => result.assets)
+        : api(
+            `/projects/${projectId}/api-automation`,
+            { method: 'POST', body: { op: 'list' }, signal: controller.signal },
+            apiAutomationListSchema,
+          ).then((result) => [...result.scenarios, ...result.cases]),
       api(
         `/projects/${projectId}/assets/navigation?kind=${kind}`,
         { signal: controller.signal },
@@ -342,14 +352,14 @@ function PlanEditor({
     ])
       .then(([data, map, configs, qualified, apiQualified]) => {
         if (!controller.signal.aborted) {
-          setAssets(data.assets);
+          setAssets(data);
           setNavigation(map);
           setEnvironments(configs.configurations);
           setEligibility(qualified.items);
           setApiQualifications(apiQualified.qualifications);
           if (!plan && handoff?.kind === kind) {
             const candidates = handoff.caseIds.flatMap((id) => {
-              const item = data.assets.find((asset) => asset.id === id);
+              const item = data.find((asset) => asset.id === id);
               return item?.targetType === 'case' && !item.removedAt
                 ? [item]
                 : [];
@@ -684,14 +694,20 @@ function PlanEditor({
                     {asset.title}
                     <small>
                       {asset.id} ·{' '}
-                      {assets.find((item) => item.id === asset.setId)?.title ??
-                        asset.setId}{' '}
+                      {'setId' in asset
+                        ? (assets.find((item) => item.id === asset.setId)
+                            ?.title ?? asset.setId)
+                        : asset.parentId
+                          ? (assets.find((item) => item.id === asset.parentId)
+                              ?.title ?? '项目场景')
+                          : '独立单接口用例'}{' '}
                       {kind === 'API' &&
+                      asset.requirementVersionId &&
                       requirementNames.has(asset.requirementVersionId)
                         ? `· ${requirementNames.get(asset.requirementVersionId)} `
                         : ''}
                       · 当前编辑 r{asset.revisionNo} ·{' '}
-                      {kind === 'UI'
+                      {'reviewState' in asset
                         ? reviewLabels[asset.reviewState]
                         : ready
                           ? `可回归 r${ready.revisionNo}`
@@ -1515,7 +1531,10 @@ export function PlansPage({
                   dataSource={uiScope.scope.items}
                   pagination={false}
                   columns={[
-                    { title: '场景', render: (_, item) => item.scenario.title },
+                    {
+                      title: '场景',
+                      render: (_, item) => item.scenario?.title ?? '单接口用例',
+                    },
                     { title: '用例', render: (_, item) => item.content.title },
                     { title: '批准快照 ID', dataIndex: 'approvalSnapshotId' },
                   ]}

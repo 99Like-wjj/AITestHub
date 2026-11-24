@@ -22,6 +22,8 @@ import { TestConfigurationService } from '../test-configuration/service.js';
 import { DomainError } from '../errors.js';
 import { contextVariables, interpolate } from './expressions.js';
 import { compileCleanupSql } from './sql.js';
+import { compileApiDatabaseRead } from './database-reads.js';
+import type { ApiDatabaseReadDefinition } from '../../../contracts/src/api-database-reads.js';
 import type { FrozenConfiguration } from './types.js';
 
 export interface TargetPolicy {
@@ -134,7 +136,8 @@ export function requestFor(
   stepId: string,
 ) {
   if (phase === 'business') {
-    const step = content.steps.find((item) => item.stepId === stepId);
+    const [definitionId] = stepId.split('~', 1);
+    const step = content.steps.find((item) => item.stepId === definitionId);
     if (step) return step;
   }
   if (phase === 'cleanupHttp' && content.cleanup.mode !== 'none') {
@@ -483,6 +486,7 @@ export class ExecutionGateway {
     }
     let body: string | null = null;
     let multipart: MultipartTransport | undefined;
+    let binary: MultipartAttachment | undefined;
     if (step.body.format === 'json') {
       body = JSON.stringify(interpolate(step.body.value, context));
       headers['content-type'] ??= 'application/json';
@@ -529,8 +533,23 @@ export class ExecutionGateway {
           422,
         );
       multipart = { parts };
+    } else if (step.body.format === 'binary') {
+      if (
+        headers['content-type'] !== undefined &&
+        headers['content-type'] !== step.body.mediaType
+      )
+        throw new DomainError(
+          'VALIDATION_ERROR',
+          'Binary 请求的 Content-Type 必须与文件传输类型一致。',
+          400,
+        );
+      binary = await resolveMultipartFile(step.body.fileResourceId);
+      headers['content-type'] = step.body.mediaType;
     }
-    if (['GET', 'HEAD'].includes(step.method) && (body !== null || multipart))
+    if (
+      ['GET', 'HEAD'].includes(step.method) &&
+      (body !== null || multipart || binary)
+    )
       throw new DomainError(
         'VALIDATION_ERROR',
         'GET/HEAD不能携带此传输body。',
@@ -543,6 +562,7 @@ export class ExecutionGateway {
       headers,
       body,
       ...(multipart ? { multipart } : {}),
+      ...(binary ? { binary } : {}),
       timeoutMs: step.timeoutMs ?? 30000,
     };
   }
@@ -705,15 +725,71 @@ export class ExecutionGateway {
     variables: RuntimeVariables,
     transaction?: SqlExecutor,
   ): Promise<SqlTransport> {
-    const connection = configuration.connections.find(
-      (entry) => entry.id === step.connectionId,
+    const compiled = compileCleanupSql(
+      step.driver,
+      step.statement,
+      step.parameters,
+      step.requiredTargets,
+      contextVariables(publicEnvironment(configuration), variables),
     );
-    if (!connection || connection.content.kind !== 'databaseConnection')
-      throw new DomainError('PRECONDITIONS_MISSING', '本轮无该清理连接。', 422);
-    const target = connection.content;
+    const transport = await this.databaseTransport(
+      configuration,
+      step.connectionId,
+      transaction,
+    );
     if (
       step.environmentId !== configuration.environment.id ||
-      step.driver !== target.driver ||
+      step.driver !== transport.driver
+    )
+      throw new DomainError(
+        'PRECONDITIONS_MISSING',
+        '清理定义与本轮环境的连接不一致。',
+        422,
+      );
+    return {
+      ...transport,
+      statement: compiled.statement,
+      values: compiled.values,
+    };
+  }
+
+  async observeDatabase(
+    configuration: FrozenConfiguration,
+    definition: ApiDatabaseReadDefinition,
+    bindings: Readonly<Record<string, string>>,
+    variables: RuntimeVariables,
+    transaction: SqlExecutor,
+  ): Promise<SqlTransport> {
+    const transport = await this.databaseTransport(
+      configuration,
+      definition.connectionId,
+      transaction,
+    );
+    const compiled = compileApiDatabaseRead(
+      transport.driver,
+      definition,
+      bindings,
+      contextVariables(publicEnvironment(configuration), variables),
+    );
+    return { ...transport, ...compiled, mode: 'read' };
+  }
+
+  private async databaseTransport(
+    configuration: FrozenConfiguration,
+    connectionId: string,
+    transaction?: SqlExecutor,
+  ): Promise<Omit<SqlTransport, 'statement' | 'values' | 'mode'>> {
+    const connection = configuration.connections.find(
+      (entry) => entry.id === connectionId,
+    );
+    if (!connection || connection.content.kind !== 'databaseConnection')
+      throw new DomainError(
+        'PRECONDITIONS_MISSING',
+        '本轮没有该测试数据库连接。',
+        422,
+      );
+    const target = connection.content;
+    if (
       target.database === 'aitesthub' ||
       !this.policy.sqlTargets.some(
         (allowed) =>
@@ -728,13 +804,6 @@ export class ExecutionGateway {
         'SQL目标不在部署允许的独立测试库范围，平台业务库不可选。',
         422,
       );
-    const compiled = compileCleanupSql(
-      step.driver,
-      step.statement,
-      step.parameters,
-      step.requiredTargets,
-      contextVariables(publicEnvironment(configuration), variables),
-    );
     const credential = credentialSchema.parse(
       JSON.parse(
         await this.credential(
@@ -752,15 +821,13 @@ export class ExecutionGateway {
       );
     return {
       type: 'sql',
-      driver: step.driver,
+      driver: target.driver,
       host: target.host,
       port: target.port,
       database: target.database,
       tls: target.tls,
       username: credential.username,
       password: credential.password,
-      statement: compiled.statement,
-      values: compiled.values,
       timeoutMs: 15000,
     };
   }

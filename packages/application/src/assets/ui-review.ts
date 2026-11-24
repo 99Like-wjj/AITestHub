@@ -292,7 +292,8 @@ export class UiReviewService {
   async stages(
     actor: ActorContext,
     projectId: string,
-    requirementVersionId: string,
+    requirementVersionId: string | null,
+    requirementId?: string,
   ) {
     return this.db.transaction(async (tx) => {
       await requireProject(tx, actor, projectId, 'project.read');
@@ -300,11 +301,12 @@ export class UiReviewService {
         await tx.query<
           Pick<AssetRow, 'id' | 'current_revision_id' | 'review_state'>
         >(
-          `SELECT id,current_revision_id,review_state FROM app.test_assets
-           WHERE project_id=$1 AND requirement_version_id=$2 AND kind='UI'
+          `SELECT id,current_revision_id,review_state FROM app.test_assets a
+           WHERE project_id=$1 AND ($2::uuid IS NULL OR requirement_version_id=$2) AND kind='UI'
+             AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM app.requirement_versions v WHERE v.project_id=a.project_id AND v.id=a.requirement_version_id AND v.requirement_id=$3))
              AND target_type='case' AND removed_at IS NULL
            ORDER BY created_at,id LIMIT 10000`,
-          [projectId, requirementVersionId],
+          [projectId, requirementVersionId, requirementId ?? null],
         )
       ).rows;
       if (!cases.length) return { items: [] };
@@ -317,9 +319,10 @@ export class UiReviewService {
       const uncertain = new Set<string>();
       const states = (
         await tx.query<{ state: unknown }>(
-          `SELECT state FROM app.ui_review_meetings
-           WHERE project_id=$1 AND requirement_version_id=$2 AND state->>'finalized'='true'`,
-          [projectId, requirementVersionId],
+          `SELECT state FROM app.ui_review_meetings m
+           WHERE project_id=$1 AND ($2::uuid IS NULL OR requirement_version_id=$2) AND state->>'finalized'='true'
+             AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM app.requirement_versions v WHERE v.project_id=m.project_id AND v.id=m.requirement_version_id AND v.requirement_id=$3))`,
+          [projectId, requirementVersionId, requirementId ?? null],
         )
       ).rows;
       for (const row of states) {
@@ -377,31 +380,37 @@ export class UiReviewService {
   async list(
     actor: ActorContext,
     projectId: string,
-    requirementVersionId: string,
+    requirementVersionId: string | null,
     caseId?: string,
     archivedOnly = false,
+    requirementId?: string,
   ) {
     return this.db.transaction(async (tx) => {
       await requireProject(tx, actor, projectId, 'project.read');
       const rows = (
         await tx.query<Room>(
-          `SELECT * FROM app.ui_review_meetings WHERE project_id=$1 AND requirement_version_id=$2
+          `SELECT * FROM app.ui_review_meetings m WHERE project_id=$1 AND ($2::uuid IS NULL OR requirement_version_id=$2)
+             AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM app.requirement_versions v WHERE v.project_id=m.project_id AND v.id=m.requirement_version_id AND v.requirement_id=$5))
              AND ($3::uuid IS NULL OR case_ids @> ARRAY[$3]::uuid[])
              AND (NOT $4 OR state->>'finalized'='true')
            ORDER BY created_at DESC,id DESC LIMIT 100`,
-          [projectId, requirementVersionId, caseId ?? null, archivedOnly],
+          [
+            projectId,
+            requirementVersionId,
+            caseId ?? null,
+            archivedOnly,
+            requirementId ?? null,
+          ],
         )
       ).rows;
       const meetings = rows.map((row) =>
         meetingSummary(row, uiReviewMeetingStateSchema.parse(row.state)),
       );
-      if (!caseId || archivedOnly || !rows.length) return { meetings };
-      const [asset] = await this.assets(
-        tx,
-        projectId,
-        [caseId],
-        requirementVersionId,
-      );
+      const caseVersion =
+        requirementVersionId ?? rows[0]?.requirement_version_id;
+      if (!caseId || archivedOnly || !caseVersion || !rows.length)
+        return { meetings };
+      const [asset] = await this.assets(tx, projectId, [caseId], caseVersion);
       if (!asset) return { meetings };
       const basis = makeBasis(asset, await ancestors(tx, asset));
       const candidates = rows.map((row) => ({

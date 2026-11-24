@@ -309,7 +309,9 @@ export class UiExecutionService {
       );
       if (input.completedItems > 0)
         for (const versionId of new Set(
-          scope.items.map((item) => item.requirementVersionId),
+          scope.items.flatMap((item) =>
+            item.requirementVersionId ? [item.requirementVersionId] : [],
+          ),
         ))
           await recordBusinessActivity(tx, projectId, versionId);
       await audit(

@@ -5,7 +5,7 @@ import {
 } from '../../../contracts/src/preparation.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import type { Database } from '../../../persistence/src/database.js';
-import { requireProject } from '../access/policy.js';
+import { requireProjectDraftWrite } from '../access/policy.js';
 import { DomainError, stale } from '../errors.js';
 import { canonicalJson } from '../operations/service.js';
 import { assertSafeResultContent } from '../results/safety.js';
@@ -28,7 +28,7 @@ export async function prepareRequirementVersion(
     projectId =
       input.target === 'new' ? input.input.projectId : input.projectId;
   return db.transaction(async (tx) => {
-    await requireProject(tx, actor, projectId, 'requirements.write');
+    await requireProjectDraftWrite(tx, actor, projectId, 'requirements.write');
     const namespace =
       input.target === 'new'
         ? ('requirements.create' as const)
@@ -62,6 +62,7 @@ export async function prepareRequirementVersion(
     assertFilePolicyCounts(policy, input.input.materials.length);
     let requirementId: string | null = null,
       baseRowVersion: number | null = null,
+      baseVersionId: string | null = null,
       nextVersionNo = 1;
     if (input.target === 'existing') {
       const row = (
@@ -69,15 +70,43 @@ export async function prepareRequirementVersion(
           id: string;
           row_version: number;
           next_version: number;
+          base_version_id: string;
+          material_lock_version_id: string | null;
+          archived_at: Date | null;
         }>(
-          'SELECT r.id,r.row_version,COALESCE((SELECT max(version_no) FROM app.requirement_versions v WHERE v.requirement_id=r.id),0)+1 next_version FROM app.requirements r WHERE r.project_id=$1 AND r.id=$2',
+          `SELECT r.id,r.row_version,r.material_lock_version_id,r.archived_at,
+             v.id base_version_id,v.version_no+1 next_version
+           FROM app.requirements r
+           JOIN LATERAL(SELECT id,version_no FROM app.requirement_versions
+             WHERE project_id=r.project_id AND requirement_id=r.id ORDER BY version_no DESC LIMIT 1) v ON true
+           WHERE r.project_id=$1 AND r.id=$2`,
           [projectId, input.requirementId],
         )
       ).rows[0];
       if (!row) throw new DomainError('NOT_FOUND', '此项目内没有该需求。', 404);
-      if (row.row_version !== input.input.rowVersion) stale();
+      if (!existing && row.material_lock_version_id)
+        throw new DomainError(
+          'BUSINESS_CONFLICT',
+          '需求资料已锁定，请新建后续需求以维护新内容。',
+          409,
+          { lockedVersionId: row.material_lock_version_id },
+        );
+      if (!existing && row.archived_at)
+        throw new DomainError(
+          'PRECONDITIONS_MISSING',
+          '请先恢复已归档需求再编辑资料。',
+          422,
+        );
+      if (
+        !existing &&
+        (input.input.baseVersionId !== undefined
+          ? input.input.baseVersionId !== row.base_version_id
+          : row.row_version !== input.input.rowVersion)
+      )
+        stale();
       requirementId = row.id;
       baseRowVersion = row.row_version;
+      baseVersionId = row.base_version_id;
       nextVersionNo = row.next_version;
     } else if (
       input.input.businessNumber !== null &&
@@ -167,6 +196,7 @@ export async function prepareRequirementVersion(
         .update(canonicalJson(input))
         .digest('hex'),
       baseRowVersion,
+      baseVersionId,
       nextVersionNo,
       materialSetDigest: createHash('sha256')
         .update(JSON.stringify(digests))

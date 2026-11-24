@@ -12,7 +12,6 @@ import {
   scopeItemSchema,
   scenarioContentSchema,
   uiCaseContentSchema,
-  apiCaseContentSchema,
 } from '../../../contracts/src/domain.js';
 import type {
   Database,
@@ -20,6 +19,10 @@ import type {
 } from '../../../persistence/src/database.js';
 import { requireProject } from '../access/policy.js';
 import { getAsset } from '../assets/repository.js';
+import {
+  getApiProjectAsset,
+  getApiProjectCase,
+} from '../assets/api-automation.js';
 import { OperationService, canonicalJson } from '../operations/service.js';
 import { DomainError, stale } from '../errors.js';
 import { audit } from '../events.js';
@@ -135,7 +138,11 @@ export class RetestService {
           let caseIds: string[];
           if (selected.level === 'scenario') {
             const scenarioIds = selected.scenarioIds ?? [
-              ...new Set(related.map((s) => s.item.scenarioId)),
+              ...new Set(
+                related.flatMap((s) =>
+                  s.item.scenarioId ? [s.item.scenarioId] : [],
+                ),
+              ),
             ];
             if (selected.caseIds?.length)
               throw new DomainError(
@@ -144,6 +151,20 @@ export class RetestService {
                 400,
               );
             for (const sid of scenarioIds) {
+              if (selected.kind === 'API') {
+                const a = await getApiProjectAsset(tx, projectId, sid);
+                if (
+                  a.targetType !== 'scenario' ||
+                  (a.requirementVersionId !== null &&
+                    a.requirementVersionId !== versionId)
+                )
+                  throw new DomainError(
+                    'BUSINESS_CONFLICT',
+                    '接口场景与所选需求版本不一致。',
+                    409,
+                  );
+                continue;
+              }
               const a = await getAsset(tx, projectId, sid);
               if (
                 a.target_type !== 'scenario' ||
@@ -158,7 +179,8 @@ export class RetestService {
             }
             caseIds = (
               await tx.query<{ id: string }>(
-                `SELECT id FROM app.test_assets WHERE project_id=$1 AND kind=$2 AND requirement_version_id=$3
+                `SELECT id FROM app.test_assets WHERE project_id=$1 AND kind=$2
+      AND (($2='UI' AND requirement_version_id=$3) OR ($2='API' AND set_id IS NULL))
       AND parent_id=ANY($4::uuid[]) AND target_type='case' AND removed_at IS NULL ORDER BY created_at,id`,
                 [projectId, selected.kind, versionId, scenarioIds],
               )
@@ -184,10 +206,16 @@ export class RetestService {
           const assets = await Promise.all(
             caseIds.map((id) => getAsset(tx, projectId, id)),
           );
-          await tx.query(
-            'SELECT id FROM app.test_assets WHERE id=ANY($1::uuid[]) ORDER BY id FOR SHARE',
-            [[...new Set(assets.map((a) => a.set_id))]],
-          );
+          if (selected.kind === 'UI')
+            await tx.query(
+              'SELECT id FROM app.test_assets WHERE id=ANY($1::uuid[]) ORDER BY id FOR SHARE',
+              [[...new Set(assets.map((a) => a.set_id))]],
+            );
+          else
+            await tx.query(
+              'SELECT id FROM app.test_assets WHERE id=ANY($1::uuid[]) ORDER BY id FOR SHARE',
+              [caseIds],
+            );
           const environment =
             await this.plans.configurations.executionSnapshotInTransaction(
               tx,
@@ -236,7 +264,8 @@ export class RetestService {
             if (
               asset.target_type !== 'case' ||
               asset.kind !== selected.kind ||
-              asset.requirement_version_id !== versionId
+              (selected.kind === 'UI' &&
+                asset.requirement_version_id !== versionId)
             )
               throw new DomainError(
                 'BUSINESS_CONFLICT',
@@ -244,35 +273,84 @@ export class RetestService {
                 409,
               );
             try {
-              const api =
-                selected.kind === 'API'
-                  ? await this.plans.analyseApiCaseInTransaction(
-                      tx,
-                      actor,
-                      projectId,
-                      { environment_id: selected.environmentId },
-                      asset.id,
-                    )
-                  : null;
-              if (api && !api.eligible) {
-                gap(
-                  'CASE_NOT_EXECUTABLE',
-                  `${asset.id}：${api.item.reasons.map((r) => r.message).join('；')}`,
+              if (selected.kind === 'API') {
+                const current = await getApiProjectCase(
+                  tx,
+                  projectId,
+                  asset.id,
                 );
+                if (
+                  current.requirementVersionId !== null &&
+                  current.requirementVersionId !== versionId
+                )
+                  throw new DomainError(
+                    'BUSINESS_CONFLICT',
+                    '接口用例已关联到其他需求版本。',
+                    409,
+                  );
+                const api = await this.plans.analyseApiCaseInTransaction(
+                  tx,
+                  actor,
+                  projectId,
+                  { environment_id: selected.environmentId },
+                  asset.id,
+                );
+                if (!api.eligible) {
+                  gap(
+                    'CASE_NOT_EXECUTABLE',
+                    `${asset.id}：${api.item.reasons.map((r) => r.message).join('；')}`,
+                  );
+                  continue;
+                }
+                const { approval, snapshot } = api.approved;
+                for (const row of api.rows) {
+                  const existing = group.scope.items.find(
+                    (item) =>
+                      item.caseId === asset.id &&
+                      item.approvalSnapshotId === approval.id &&
+                      item.dataRow?.id === row.dataRow?.id,
+                  );
+                  if (existing) {
+                    existing.issueIds = [
+                      ...new Set([...existing.issueIds, issue.id]),
+                    ];
+                    continue;
+                  }
+                  group.scope.items.push(
+                    scopeItemSchema.omit({ runItemId: true }).parse({
+                      caseId: asset.id,
+                      caseRevisionId: approval.caseRevisionId,
+                      ...(api.disabledNodeIds.length
+                        ? { disabledNodeIds: api.disabledNodeIds }
+                        : {}),
+                      approvalSnapshotId: approval.id,
+                      requirementVersionId: snapshot.case.requirementVersionId,
+                      setId: null,
+                      scenarioId: snapshot.scenario?.id ?? null,
+                      scenario: snapshot.scenario?.content ?? null,
+                      content: row.content,
+                      ordinal: group.scope.items.length,
+                      issueIds: [issue.id],
+                      ...(row.dataRow ? { dataRow: row.dataRow } : {}),
+                      ...(api.preparationSources.length
+                        ? { preparationSources: api.preparationSources }
+                        : {}),
+                    }),
+                  );
+                }
+                group.configurations.set(asset.id, api.configuration);
                 continue;
               }
-              const approved = api?.eligible
-                ? api.approved
-                : await this.plans.reviews.latestApprovedInTransaction(
-                    tx,
-                    projectId,
-                    asset.id,
-                    'UI',
-                  );
-              const content =
-                selected.kind === 'API'
-                  ? apiCaseContentSchema.parse(approved.snapshot.case.content)
-                  : uiCaseContentSchema.parse(approved.snapshot.case.content);
+              const approved =
+                await this.plans.reviews.latestApprovedInTransaction(
+                  tx,
+                  projectId,
+                  asset.id,
+                  'UI',
+                );
+              const content = uiCaseContentSchema.parse(
+                approved.snapshot.case.content,
+              );
               const existing = group.scope.items.find(
                 (i) =>
                   i.caseId === asset.id &&
@@ -298,8 +376,6 @@ export class RetestService {
                     issueIds: [issue.id],
                   }),
                 );
-              if (api?.eligible)
-                group.configurations.set(asset.id, api.configuration);
             } catch (error: unknown) {
               if (!(error instanceof DomainError)) throw error;
               gap('CASE_NOT_APPROVED', `${asset.id}：${error.message}`);

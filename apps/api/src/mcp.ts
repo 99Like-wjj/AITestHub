@@ -38,6 +38,8 @@ export const OFFICIAL_MCP_BASE_TOOLS = [
   'ath_requirement_membership',
   'ath_requirement_state',
   'ath_assets',
+  'ath_api_catalog',
+  'ath_api_automation',
   'ath_reviews',
   'ath_results',
   'ath_reports',

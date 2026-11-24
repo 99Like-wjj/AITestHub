@@ -13,9 +13,11 @@ basisRefSchema,
 caseContentSchema,
 scenarioContentSchema,
 reviewStateSchema,
+requirementAssetBasisSchema,
 preciseCommitInputSchema,
 approvalSnapshotSchema,
 } from './domain.js';
+import { requirementMaterialLockSchema } from './requirements.js';
 
 export const assetTargetTypeSchema = z.enum(['set', 'scenario', 'case']);
 export const setContentSchema = z.strictObject({
@@ -30,18 +32,21 @@ export const assetContentSchema = z.union([
 export const createSetInputSchema = z.strictObject({
   commandId: commandIdSchema,
   kind: kindSchema,
-  requirementVersionId: idSchema,
+  requirementVersionId: idSchema.optional(),
+  requirementId: idSchema.optional(),
   content: setContentSchema,
-});
+}).refine((input) => Boolean(input.requirementId || input.requirementVersionId), '请选择需求。');
 export const createScenarioInputSchema = z.strictObject({
   commandId: commandIdSchema,
   setId: idSchema,
   content: scenarioContentSchema,
+  basisRequirementVersionId: idSchema.optional(),
 });
 export const createCaseInputSchema = z.strictObject({
   commandId: commandIdSchema,
   scenarioId: idSchema,
   content: caseContentSchema,
+  basisRequirementVersionId: idSchema.optional(),
 });
 export const caseSupplementOriginSchema = z.strictObject({
   caseId: idSchema,
@@ -59,22 +64,33 @@ export const caseSupplementOriginResultSchema = z.strictObject({
   origin: caseSupplementOriginSchema.nullable(),
 });
 
+export const uiSceneFieldsSchema = scenarioContentSchema.omit({
+  kind: true,
+  requirementVersionId: true,
+  setId: true,
+});
+export const createScopedSceneInputSchema = z.strictObject({
+  commandId: commandIdSchema,
+  requirementId: idSchema,
+  requirementVersionId: idSchema.optional(),
+  content: uiSceneFieldsSchema,
+  setId: idSchema.optional(),
+});
 export const createScopedCaseInputSchema = z.strictObject({
   commandId: commandIdSchema,
   kind: kindSchema,
-  requirementVersionId: idSchema,
+  requirementVersionId: idSchema.optional(),
+  requirementId: idSchema.optional(),
   scenario: z.union([
     z.strictObject({ scenarioId: idSchema }),
-    scenarioContentSchema
-      .omit({ kind: true, requirementVersionId: true, setId: true })
-      .extend({ setId: idSchema.optional() }),
+    uiSceneFieldsSchema.extend({ setId: idSchema.optional() }),
   ]),
   content: z.record(z.string(), z.json()),
   supplementOrigin: caseSupplementOriginSchema.optional(),
   checkpoint: z
     .strictObject({ id: idSchema, rowVersion: persistedRowVersionSchema })
     .optional(),
-});
+}).refine((input) => Boolean(input.requirementId || input.requirementVersionId), '请选择需求。');
 
 export type CreateScopedCaseInput = z.infer<typeof createScopedCaseInputSchema>;
 
@@ -83,24 +99,41 @@ export const reviseAssetInputSchema = z.strictObject({
   baseRevisionId: idSchema,
   rowVersion: persistedRowVersionSchema,
   content: assetContentSchema,
+  basisRequirementVersionId: idSchema.optional(),
 });
 export const removeAssetInputSchema = z.strictObject({
   commandId: commandIdSchema,
   baseRevisionId: idSchema,
   rowVersion: persistedRowVersionSchema,
 });
+export const removeScopedSceneInputSchema = removeAssetInputSchema.extend({
+  caseIds: z.array(idSchema).refine(
+    (ids) => new Set(ids).size === ids.length,
+    '待移除用例不可重复。',
+  ),
+});
+export const scopedSceneRemovalPreviewSchema = z.strictObject({
+  sceneId: idSchema,
+  baseRevisionId: idSchema,
+  rowVersion: persistedRowVersionSchema,
+  caseCount: z.number().int().nonnegative(),
+  activePlanCount: z.number().int().nonnegative(),
+  caseIds: z.array(idSchema),
+});
 export const assetListQuerySchema = z.strictObject({
   kind: kindSchema,
   requirementVersionId: idSchema.optional(),
+  requirementId: idSchema.optional(),
   setId: idSchema.optional(),
   includeRemoved: z.boolean().default(false),
   includeArchivedRequirements: z.boolean().default(true),
-});
+}).refine((input) => !(input.requirementId && input.requirementVersionId), '请选择需求或固定历史范围。');
 export const assetSchema = z.strictObject({
   id: idSchema,
   projectId: idSchema,
   kind: kindSchema,
   requirementVersionId: idSchema,
+  requirementBasis: requirementAssetBasisSchema.optional(),
   setId: idSchema,
   targetType: assetTargetTypeSchema,
   parentId: idSchema.nullable(),
@@ -184,6 +217,8 @@ export const assetReceiptOperationSchema = z.enum([
   'assets.create-scenario',
   'assets.create-case',
   'assets.create-scoped-case',
+  'assets.create-scoped-scene',
+  'assets.remove-scoped-scene',
   'assets.revise',
   'assets.explicit-remove',
 ]);
@@ -200,6 +235,7 @@ export const assetDetailSchema = z.strictObject({
       id: idSchema,
       revisionNo: z.number().int().min(1),
       content: assetContentSchema,
+      requirementBasis: requirementAssetBasisSchema.optional(),
       createdAt: timestampSchema,
     }),
   ),
@@ -267,6 +303,8 @@ export const assetNavigationSchema = z.strictObject({
       id: idSchema,
       title: titleSchema,
       archived: z.boolean(),
+      currentVersionId: idSchema,
+      materialLock: requirementMaterialLockSchema.nullable(),
       scenarioCount: z.number().int().min(0),
       caseCount: z.number().int().min(0),
       versions: z.array(

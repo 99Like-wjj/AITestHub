@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import {
   apiCaseContentSchema,
+  apiFlowNodes,
   variableNameSchema,
+  type ApiFlowNode,
 } from '../../../packages/contracts/src/domain';
 import { apiAuthoringVariableIssues } from '../../../packages/contracts/src/api-variable-refs';
 
@@ -37,6 +39,7 @@ export const newRequest = (): DraftRequest => ({
   name: '请求',
   method: 'GET',
   url: '',
+  authMode: 'none',
   query: [],
   headers: [],
   body: { format: 'none' },
@@ -88,7 +91,8 @@ export function apiDraftFromContent(content: ApiCase): ApiDraft {
     },
   };
 }
-export function emptyApiDraft(scenarioId: string): ApiDraft {
+export function emptyApiDraft(scenarioId: string | null): ApiDraft {
+  const request = newRequest();
   return {
     base: {
       kind: 'API',
@@ -98,15 +102,78 @@ export function emptyApiDraft(scenarioId: string): ApiDraft {
       preconditions: [],
       expected: '',
       basisRefs: [],
-      dslVersion: 'ath.api-case.v1',
+      dslVersion: 'ath.api-case.v2',
       variables: {},
       steps: [],
+      flow: requestFlow([request]),
       cleanup: { mode: 'none' },
     },
-    requests: [newRequest()],
+    requests: [request],
     variableEntries: [],
     cleanupDraft: { mode: 'none', steps: [] },
   };
+}
+
+function requestFlow(
+  requests: readonly Pick<Request, 'stepId' | 'name'>[],
+): ApiFlowNode[] {
+  return requests.map(({ stepId, name }) => ({
+    type: 'request',
+    nodeId: stepId,
+    stepId,
+    name,
+  }));
+}
+
+export function composeDraftFlow(
+  flow: readonly ApiFlowNode[],
+  requests: readonly Pick<Request, 'stepId' | 'name'>[],
+): ApiFlowNode[] {
+  if (flow.every((node) => node.type === 'request')) {
+    const authored = new Map(flow.map((node) => [node.stepId, node]));
+    return requests.map(({ stepId, name }) => ({
+      type: 'request',
+      nodeId: stepId,
+      ...authored.get(stepId),
+      stepId,
+      name,
+    }));
+  }
+  const byId = new Map(requests.map((request) => [request.stepId, request]));
+  function retain(nodes: readonly ApiFlowNode[]): ApiFlowNode[] {
+    return nodes.flatMap((node): ApiFlowNode[] => {
+      switch (node.type) {
+        case 'request': {
+          const request = byId.get(node.stepId);
+          return request ? [{ ...node, name: request.name }] : [];
+        }
+        case 'group':
+        case 'forEach':
+        case 'repeat':
+          return [{ ...node, children: retain(node.children) }];
+        case 'if':
+          return [
+            {
+              ...node,
+              whenTrue: retain(node.whenTrue),
+              whenFalse: retain(node.whenFalse),
+            },
+          ];
+        default:
+          return [node];
+      }
+    });
+  }
+  const kept = retain(flow);
+  const existing = new Set(
+    apiFlowNodes(kept).flatMap((node) =>
+      node.type === 'request' ? [node.stepId] : [],
+    ),
+  );
+  return [
+    ...kept,
+    ...requestFlow(requests.filter((request) => !existing.has(request.stepId))),
+  ];
 }
 export function serializeRequest(
   request: DraftRequest,
@@ -193,6 +260,7 @@ export function apiDraftContent(draft: ApiDraft): ApiCase {
     steps: draft.requests.map((request, index) =>
       serializeRequest(request, `请求 ${index + 1}`),
     ),
+    flow: composeDraftFlow(draft.base.flow, draft.requests),
     cleanup,
   });
 }

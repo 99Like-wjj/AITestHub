@@ -40,18 +40,6 @@ export class ResultsController {
   private project(req: Request) {
     return idSchema.parse(req.params.projectId);
   }
-  @Post('ui-executions/claim')
-  async claim(@Req() req: Request, @Res() res: Response) {
-    return res
-      .status(201)
-      .json(
-        await this.ui.claim(
-          await this.actor(req, res),
-          this.project(req),
-          req.body,
-        ),
-      );
-  }
   @Get('ui-executions/:runId')
   async status(@Req() req: Request, @Res() res: Response) {
     return res.json(
@@ -59,40 +47,6 @@ export class ResultsController {
         await this.actor(req, res),
         this.project(req),
         idSchema.parse(req.params.runId),
-      ),
-    );
-  }
-  @Get('ui-executions/:runId/scope')
-  async scope(@Req() req: Request, @Res() res: Response) {
-    return res.json(
-      await this.ui.scope(
-        await this.actor(req, res),
-        this.project(req),
-        idSchema.parse(req.params.runId),
-      ),
-    );
-  }
-  @Post('ui-executions/:runId/progress')
-  async progress(@Req() req: Request, @Res() res: Response) {
-    const actor = await this.actor(req, res);
-    const body = z.record(z.string(), z.unknown()).parse(req.body);
-    const runId = idSchema.parse(req.params.runId);
-    if (body.runId !== runId)
-      throw new DomainError(
-        'VALIDATION_ERROR',
-        '路径与进度所属执行不一致。',
-        400,
-      );
-    return res.json(await this.ui.progress(actor, this.project(req), body));
-  }
-  @Post('ui-executions/:runId/close-progress')
-  async close(@Req() req: Request, @Res() res: Response) {
-    return res.json(
-      await this.ui.closeProgress(
-        await this.actor(req, res),
-        this.project(req),
-        idSchema.parse(req.params.runId),
-        req.body,
       ),
     );
   }
@@ -194,16 +148,6 @@ export class ResultsController {
   async prepareSubmission(@Req() req: Request, @Res() res: Response) {
     return this.retiredSubmission(req, res);
   }
-  @Get('result-submissions/missing-files/:runId')
-  async missingSubmissionFiles(@Req() req: Request, @Res() res: Response) {
-    return res.json(
-      await this.results.missingUiFiles(
-        await this.actor(req, res),
-        this.project(req),
-        idSchema.parse(req.params.runId),
-      ),
-    );
-  }
   @Get('result-submissions/:submissionId')
   async receipt(@Req() req: Request, @Res() res: Response) {
     return res.json(
@@ -290,12 +234,6 @@ export class ResultsController {
         ...body,
         resultId: id,
       }),
-    );
-  }
-  @Get('reports')
-  async listReports(@Req() req: Request, @Res() res: Response) {
-    return res.json(
-      await this.reports.list(await this.actor(req, res), this.project(req)),
     );
   }
   @Get('execution-records')

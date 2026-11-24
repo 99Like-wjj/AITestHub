@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { QueryResultRow } from 'pg';
 import {
   apiRegressionQualificationSchema,
@@ -8,7 +9,7 @@ import {
   saveApiRegressionInputSchema,
   withdrawApiRegressionInputSchema,
 } from '../../../contracts/src/api-execution.js';
-import { approvalContentSnapshotSchema } from '../../../contracts/src/assets.js';
+import { apiProjectQualificationSnapshotSchema } from '../../../contracts/src/api-automation.js';
 import {
   apiCaseContentSchema,
   approvalSnapshotSchema,
@@ -24,8 +25,11 @@ import { DomainError, stale } from '../errors.js';
 import { audit } from '../events.js';
 import { canonicalJson, OperationService } from '../operations/service.js';
 import { recordBusinessActivity } from '../requirements/service.js';
-import { assetDto, getAsset, lockSet, reviewContext } from './repository.js';
-import { AssetService } from './service.js';
+import {
+  getApiProjectAsset,
+  getApiProjectCase,
+  reviseApiProjectCase,
+} from './api-automation.js';
 
 const saveOperation = 'api-regression.save';
 const withdrawOperation = 'api-regression.withdraw';
@@ -36,8 +40,8 @@ interface RegressionRow extends QueryResultRow {
   case_id: string;
   case_revision_id: string;
   revision_no: number;
-  scenario_revision_id: string;
-  set_revision_id: string;
+  scenario_revision_id: string | null;
+  set_revision_id: null;
   opinion_context_digest: string;
   snapshot: unknown;
   approved_by: string;
@@ -51,8 +55,7 @@ interface DebugCandidateRow extends QueryResultRow {
   scope_snapshot: unknown;
   source_case_id: string | null;
   source_case_revision_id: string | null;
-  scenario_revision_id: string;
-  set_revision_id: string | null;
+  scenario_revision_id: string | null;
   draft_hash: string;
   authored_content: unknown;
   expires_at: Date;
@@ -65,7 +68,7 @@ const regressionSelect = `SELECT s.*,v.revision_no,q.debug_run_id,r.environment_
     JOIN app.asset_revisions v ON v.id=s.case_revision_id
     JOIN app.api_regression_qualifications q ON q.snapshot_id=s.id
     JOIN app.runs r ON r.id=q.debug_run_id
-    WHERE s.project_id=$1 AND s.kind='API' AND a.removed_at IS NULL
+    WHERE s.project_id=$1 AND s.kind='API' AND s.set_id IS NULL AND a.set_id IS NULL AND a.removed_at IS NULL
       AND NOT EXISTS(SELECT 1 FROM app.api_regression_withdrawals w WHERE w.snapshot_id=s.id)`;
 
 function qualification(row: RegressionRow) {
@@ -86,9 +89,7 @@ export async function latestApiRegressionInTransaction(
   projectId: string,
   caseId: string,
 ) {
-  const asset = await getAsset(tx, projectId, caseId);
-  if (asset.kind !== 'API' || asset.target_type !== 'case')
-    throw new DomainError('NOT_FOUND', '此项目没有该接口用例。', 404);
+  await getApiProjectCase(tx, projectId, caseId);
   const row = (
     await tx.query<RegressionRow>(
       `${regressionSelect} AND s.case_id=$2 ORDER BY s.approval_sequence DESC LIMIT 1`,
@@ -114,7 +115,7 @@ export async function latestApiRegressionInTransaction(
       approvedBy: row.approved_by,
       approvedAt: row.approved_at.toISOString(),
     }),
-    snapshot: approvalContentSnapshotSchema.parse(row.snapshot),
+    snapshot: apiProjectQualificationSnapshotSchema.parse(row.snapshot),
     qualification: qualification(row),
   };
 }
@@ -175,21 +176,14 @@ async function requireCompleteDebug(
       [projectId, runId, itemId],
     )
   ).rows;
-  const ids = new Set(steps.map((step) => step.step_id));
-  if (
-    steps.length !== content.steps.length ||
-    !steps.some((step) => step.has_assertions) ||
-    content.steps.some((step) => !ids.has(step.stepId))
-  )
+  if (!steps.some((step) => step.has_assertions))
     unavailable('调试回执未覆盖候选修订的全部业务步骤及有效断言。');
 }
 
 export class ApiRegressionService {
   readonly operations: OperationService;
-  readonly assets: AssetService;
   constructor(readonly db: Database) {
     this.operations = new OperationService(db);
-    this.assets = new AssetService(db);
   }
 
   async list(actor: ActorContext, projectId: string) {
@@ -218,27 +212,26 @@ export class ApiRegressionService {
         await requireProject(tx, actor, projectId, 'assets.write');
       },
       async (tx) => {
-        const initial = await getAsset(tx, projectId, input.caseId);
-        await lockSet(tx, projectId, initial.set_id);
-        const current = await getAsset(tx, projectId, input.caseId);
+        const current = await getApiProjectCase(tx, projectId, input.caseId, {
+          lock: true,
+        });
         if (
-          current.kind !== 'API' ||
-          current.target_type !== 'case' ||
-          !current.parent_id
-        )
-          throw new DomainError('NOT_FOUND', '此项目没有该接口用例。', 404);
-        if (
-          current.current_revision_id !== input.baseRevisionId ||
-          current.row_version !== input.rowVersion
+          current.revisionId !== input.baseRevisionId ||
+          current.rowVersion !== input.rowVersion
         )
           stale();
-        const scenario = await getAsset(tx, projectId, current.parent_id);
-        const set = await getAsset(tx, projectId, current.set_id);
+        const scenario = current.parentId
+          ? await getApiProjectAsset(tx, projectId, current.parentId, {
+              lock: true,
+            })
+          : null;
+        if (scenario && scenario.targetType !== 'scenario')
+          throw new DomainError('NOT_FOUND', '此项目没有对应接口场景。', 404);
         // The run and draft locks serialize promotion against temporary trace cleanup.
         const debug = (
           await tx.query<DebugCandidateRow>(
             `SELECT r.state,r.scope_snapshot,d.source_case_id,d.source_case_revision_id,
-                d.scenario_revision_id,d.content->'set'->>'revisionId' set_revision_id,
+                d.scenario_revision_id,
                 d.draft_hash,d.expires_at,d.content->'content' authored_content,q.snapshot_id saved_snapshot_id
               FROM app.api_debug_drafts d
               JOIN app.runs r ON r.id=d.run_id AND r.project_id=d.project_id
@@ -254,9 +247,8 @@ export class ApiRegressionService {
           unavailable('此调试回执已用于保存资格，请查阅原保存回执。');
         if (
           debug.source_case_id !== current.id ||
-          debug.source_case_revision_id !== current.current_revision_id ||
-          debug.scenario_revision_id !== scenario.current_revision_id ||
-          debug.set_revision_id !== set.current_revision_id ||
+          debug.source_case_revision_id !== current.revisionId ||
+          debug.scenario_revision_id !== (scenario?.revisionId ?? null) ||
           debug.draft_hash !== input.draftHash
         )
           stale();
@@ -265,13 +257,12 @@ export class ApiRegressionService {
           unavailable(
             '单步诊断只用于定位问题，须使用完整用例调试回执建立回归资格。',
           );
-        const item = scope.items[0];
-        if (!item || debug.state !== 'completed')
+        if (debug.state !== 'completed')
           unavailable('原调试尚未完整结束，请查看原轮次。');
         if (
-          item.caseId !== current.id ||
+          scope.items.some((item) => item.caseId !== current.id) ||
           scope.draftHash !== input.draftHash ||
-          input.content.scenarioId !== scenario.id ||
+          input.content.scenarioId !== (scenario?.id ?? null) ||
           canonicalJson(debug.authored_content) !== canonicalJson(input.content)
         )
           stale();
@@ -282,67 +273,74 @@ export class ApiRegressionService {
           scope.environmentRevisionId,
         );
         const content = apiCaseContentSchema.parse(debug.authored_content);
-        await requireCompleteDebug(
-          tx,
-          projectId,
-          scope.runId,
-          item.runItemId,
-          item.content,
-        );
+        for (const item of scope.items)
+          await requireCompleteDebug(
+            tx,
+            projectId,
+            scope.runId,
+            item.runItemId,
+            item.content,
+          );
+        const qualifiedDataRowIds = [
+          ...new Set(
+            scope.items.flatMap(({ dataRow }) => (dataRow ? [dataRow.id] : [])),
+          ),
+        ];
         const asset =
           canonicalJson(current.content) === canonicalJson(content)
             ? current
-            : await this.assets.reviseInTransaction(
+            : await reviseApiProjectCase(
                 tx,
                 actor,
                 projectId,
                 current.id,
                 {
-                  baseRevisionId: current.current_revision_id,
-                  rowVersion: current.row_version,
-                  content,
+                  baseRevisionId: current.revisionId,
+                  rowVersion: current.rowVersion,
                 },
+                content,
               );
         const existing = (
           await tx.query<RegressionRow>(
             `${regressionSelect} AND s.case_id=$2 AND s.case_revision_id=$3
-              AND s.scenario_revision_id=$4 AND s.set_revision_id=$5
+              AND s.scenario_revision_id IS NOT DISTINCT FROM $4::uuid
+              AND s.snapshot->'qualifiedDataRowIds'=$5::jsonb
               AND q.debug_run_id IS NOT NULL ORDER BY s.approval_sequence DESC LIMIT 1`,
             [
               projectId,
               asset.id,
-              asset.current_revision_id,
-              scenario.current_revision_id,
-              set.current_revision_id,
+              asset.revisionId,
+              scenario?.revisionId ?? null,
+              JSON.stringify(qualifiedDataRowIds),
             ],
           )
         ).rows[0];
         if (existing)
           return apiRegressionSaveReceiptSchema.parse({
-            asset: assetDto(asset),
+            asset,
             qualification: qualification(existing),
           });
-        const context = await reviewContext(tx, asset);
+        const snapshot = apiProjectQualificationSnapshotSchema.parse({
+          case: asset,
+          scenario,
+          qualifiedDataRowIds,
+        });
+        const contextDigest = createHash('sha256')
+          .update(canonicalJson(snapshot))
+          .digest('hex');
         const inserted = (
           await tx.query<{ id: string; approved_at: Date }>(
             `INSERT INTO app.approval_snapshots
                 (project_id,kind,set_id,case_id,case_revision_id,scenario_id,scenario_revision_id,set_revision_id,opinion_context_digest,snapshot,approved_by)
-              VALUES ($1,'API',$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id,approved_at`,
+              VALUES ($1,'API',NULL,$2,$3,$4,$5,NULL,$6,$7,$8) RETURNING id,approved_at`,
             [
               projectId,
-              set.id,
               asset.id,
-              asset.current_revision_id,
-              scenario.id,
-              scenario.current_revision_id,
-              set.current_revision_id,
-              context.digest,
-              JSON.stringify({
-                case: assetDto(asset),
-                scenario: assetDto(scenario),
-                set: assetDto(set),
-                opinions: [],
-              }),
+              asset.revisionId,
+              scenario?.id ?? null,
+              scenario?.revisionId ?? null,
+              contextDigest,
+              JSON.stringify(snapshot),
               actor.userId,
             ],
           )
@@ -353,23 +351,24 @@ export class ApiRegressionService {
           'INSERT INTO app.api_regression_qualifications(snapshot_id,project_id,debug_run_id) VALUES($1,$2,$3)',
           [inserted.id, projectId, scope.runId],
         );
-        await recordBusinessActivity(
-          tx,
-          projectId,
-          asset.requirement_version_id,
-        );
+        if (asset.requirementVersionId)
+          await recordBusinessActivity(
+            tx,
+            projectId,
+            asset.requirementVersionId,
+          );
         await audit(tx, actor, saveOperation, asset.id, projectId, {
           snapshotId: inserted.id,
-          revisionId: asset.current_revision_id,
+          revisionId: asset.revisionId,
           runId: scope.runId,
         });
         return apiRegressionSaveReceiptSchema.parse({
-          asset: assetDto(asset),
+          asset,
           qualification: {
             snapshotId: inserted.id,
             caseId: asset.id,
-            revisionId: asset.current_revision_id,
-            revisionNo: asset.revision_no,
+            revisionId: asset.revisionId,
+            revisionNo: asset.revisionNo,
             source: 'debugPassed',
             debugRunId: scope.runId,
             environmentId: scope.environmentId,
@@ -409,14 +408,17 @@ export class ApiRegressionService {
         ),
       async (tx) => {
         const row = (
-          await tx.query<{ case_id: string; set_id: string }>(
-            "SELECT case_id,set_id FROM app.approval_snapshots WHERE id=$1 AND project_id=$2 AND kind='API'",
+          await tx.query<{ case_id: string }>(
+            "SELECT case_id FROM app.approval_snapshots WHERE id=$1 AND project_id=$2 AND kind='API' AND set_id IS NULL",
             [input.snapshotId, projectId],
           )
         ).rows[0];
         if (!row)
           throw new DomainError('NOT_FOUND', '此项目没有该可回归快照。', 404);
-        await lockSet(tx, projectId, row.set_id);
+        await getApiProjectCase(tx, projectId, row.case_id, {
+          lock: true,
+          includeArchived: true,
+        });
         const stored = (
           await tx.query<{ withdrawn_at: Date }>(
             'INSERT INTO app.api_regression_withdrawals(snapshot_id,actor_id,reason) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING withdrawn_at',

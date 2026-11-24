@@ -4,7 +4,7 @@ export type {
   User,
   AdminUser,
   UserSummary,
-  Project,
+  WebProject as Project,
   ProjectMember,
   Me,
 } from '../../../packages/contracts/src/identity';

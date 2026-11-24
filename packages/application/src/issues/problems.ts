@@ -218,6 +218,7 @@ export async function ensureFailedProblemInTransaction(
   )
     return null;
   const item = scopeItemSchema.parse(source.snapshot);
+  if (source.kind === 'API' && item.requirementVersionId === null) return null; // Formal run remains readable; an explicit candidate can pick a real requirement.
   const version = (
     await tx.query<{ requirement_id: string }>(
       'SELECT requirement_id FROM app.requirement_versions WHERE project_id=$1 AND id=$2',
@@ -476,7 +477,11 @@ export class ProblemService {
           anchoredRevisionId = source.current_revision_id;
         } else if (reviewSource) {
           const item = scopeItemSchema.parse(reviewSource.snapshot);
-          if (item.requirementVersionId !== input.requirementVersionId)
+          if (
+            (item.content.kind !== 'API' ||
+              item.requirementVersionId !== null) &&
+            item.requirementVersionId !== input.requirementVersionId
+          )
             throw new DomainError(
               'BUSINESS_CONFLICT',
               '候选必须保留执行项的冻结需求版本。',

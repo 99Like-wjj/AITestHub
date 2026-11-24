@@ -46,6 +46,18 @@ export function registerRequirementQueryTools(
   registry.add(
     'ath_requirements',
     description,
+    'history',
+    z.strictObject({
+      op: z.literal('history'),
+      projectId: idSchema,
+      requirementId: idSchema,
+    }),
+    'read',
+    (a, i) => service.history(a, i.projectId, i.requirementId),
+  );
+  registry.add(
+    'ath_requirements',
+    description,
     'list-page',
     z.strictObject({
       op: z.literal('list-page'),

@@ -18,25 +18,27 @@ export function ResultFilters({
   children,
   summary,
 }: {
-  search: ResultSearch;
+  search?: ResultSearch;
   onReset: () => void;
   children?: ReactNode;
   summary?: ReactNode;
 }) {
   return (
     <div className="result-filters" role="group" aria-label="结果筛选">
-      <Input
-        className="result-filter-search"
-        aria-label={search.label}
-        placeholder={search.placeholder ?? search.label}
-        value={search.value}
-        prefix={search.prefix}
-        allowClear
-        maxLength={search.maxLength ?? 200}
-        onChange={(event) => search.onChange(event.target.value)}
-        onCompositionStart={() => search.onCompositionChange?.(true)}
-        onCompositionEnd={() => search.onCompositionChange?.(false)}
-      />
+      {search && (
+        <Input
+          className="result-filter-search"
+          aria-label={search.label}
+          placeholder={search.placeholder ?? search.label}
+          value={search.value}
+          prefix={search.prefix}
+          allowClear
+          maxLength={search.maxLength ?? 200}
+          onChange={(event) => search.onChange(event.target.value)}
+          onCompositionStart={() => search.onCompositionChange?.(true)}
+          onCompositionEnd={() => search.onCompositionChange?.(false)}
+        />
+      )}
       {children}
       <Button onClick={onReset}>清空结果筛选</Button>
       {summary !== undefined && (

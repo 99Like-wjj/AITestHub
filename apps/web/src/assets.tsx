@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   Descriptions,
+  Dropdown,
   Empty,
   Modal,
   Select,
@@ -12,20 +13,18 @@ import {
   Space,
   Table,
   Tag,
-  Tree,
+  Tooltip,
   Typography,
 } from 'antd';
-import type { TreeDataNode } from 'antd';
-import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
+import { ExplorerTree, type ExplorerNode } from './explorer-tree';
+import { EllipsisOutlined, PlusOutlined } from '@ant-design/icons';
 import { z } from 'zod';
 import {
   approvalCommitReceiptSchema,
   assetDetailSchema,
   assetListSchema,
   assetNavigationSchema,
-  assetReceiptSchema,
   latestApprovedResponseSchema,
-  removeAssetInputSchema,
 } from '../../../packages/contracts/src/assets';
 import type {
   Asset,
@@ -41,10 +40,7 @@ import { formatBeijingTime } from './beijing-time';
 import { DetailDrawer } from './detail-drawer';
 import type { CaseScope } from './requirements';
 import type { Project } from './types';
-import {
-  RequirementDirectory,
-  RequirementDirectoryLabel,
-} from './requirement-directory';
+import { RequirementDirectory } from './requirement-directory';
 import { UiCaseText } from './ui-case-reader';
 import { UiReviewWorkspace } from './ui-review-workspace';
 import type { UiCaseReviewDraft } from './ui-case-review-pane';
@@ -54,9 +50,15 @@ import {
   useUiCaseStages,
 } from './ui-case-workbench';
 import { StandaloneWorkbenchHeader } from './standalone-workbench-header';
-import { UiCaseActionDialog, type UiSupplementSource } from './ui-case-actions';
+import {
+  openUiScenarioDraft,
+  type UiSupplementSource,
+} from './ui-scenario-draft';
+import { UiCaseImportDialog } from './ui-case-import-dialog';
+import { UiAssetRemoval } from './ui-asset-removal';
 import { UiCoverageCheck } from './ui-coverage-check';
 import { UiCaseLibraryPane } from './ui-case-library-pane';
+import { canEditProjectAssets } from './project-access';
 import {
   assertApprovalReceipt,
   forgetApproval,
@@ -79,19 +81,25 @@ function caseWorkbenchRoute() {
   const ids = z
     .object({
       caseId: z.uuid().optional(),
+      sceneId: z.uuid().optional(),
       revisionId: z.uuid().optional(),
       meetingId: z.uuid().optional(),
     })
     .safeParse({
       caseId: query.get('caseId') ?? undefined,
+      sceneId: query.get('sceneId') ?? undefined,
       revisionId: query.get('assetRevisionId') ?? undefined,
       meetingId: query.get('meetingId') ?? undefined,
     });
   return {
+    projectId: z.uuid().safeParse(query.get('projectId')).data,
+    requirementId: z.uuid().safeParse(query.get('requirementId')).data,
     mode: view === 'meeting' || view === 'workbench' ? view : null,
     archived: query.get('archived') === '1',
     history: query.get('history') === '1',
+    snapshot: query.get('basis') === 'snapshot',
     caseId: ids.success ? ids.data.caseId : undefined,
+    sceneId: ids.success ? ids.data.sceneId : undefined,
     revisionId: ids.success ? ids.data.revisionId : undefined,
     meetingId: ids.success ? ids.data.meetingId : undefined,
     invalid:
@@ -154,36 +162,28 @@ function ContentView({ content }: { content: AssetContent }) {
 export function AssetsPage({
   project,
   userId,
-  scope,
-  onScopeChange,
+  scope: linkedScope,
 }: {
   project: Project | null;
   userId: string;
   scope: CaseScope | null;
-  onScopeChange: (scope: CaseScope | null) => void;
 }) {
-  const { modal, message } = App.useApp();
+  const { message } = App.useApp();
   const [coverage, setCoverage] = useState(false);
   const [caseRoute, setCaseRoute] = useState(caseWorkbenchRoute);
   const [reviewHistory, setReviewHistory] = useState(false);
   const [sceneScope, setSceneScope] = useState<{
     id: string;
-    versionId: string;
+    requirementId: string;
   }>();
-  const [expandedLibrary, setExpandedLibrary] = useState<string[]>([]);
-  const [caseAction, setCaseAction] = useState<{
-    kind: 'new' | 'import' | 'generate' | 'supplement';
-    scenarioId?: string;
-    source?: UiSupplementSource;
-    checkpoint?: CoverageCheckpoint;
-  }>();
+  const [importScope, setImportScope] = useState<CaseScope | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<Asset | null>(null);
   const recentCase = useRef(new Map<string, string>());
   const caseReviewDrafts = useRef(new Map<string, UiCaseReviewDraft>());
   const libraryScroll = useRef(0);
   const reviewWorkspace = caseRoute.mode === 'meeting';
   const readerWorkspace = caseRoute.mode === 'workbench';
   const kind = 'UI';
-  const immersive = Boolean(scope) && (reviewWorkspace || readerWorkspace);
   const [navigation, setNavigation] = useState<Navigation>({
     requirements: [],
   });
@@ -193,7 +193,6 @@ export function AssetsPage({
   const [search, setSearch] = useState('');
   const [directorySearch, setDirectorySearch] = useState('');
   const [reviewFilter, setReviewFilter] = useState<string>(reviewFromUrl);
-  const [includeRemoved, setIncludeRemoved] = useState(false);
   const [includeArchivedRequirements, setIncludeArchivedRequirements] =
     useState(() => caseWorkbenchRoute().archived);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
@@ -219,20 +218,46 @@ export function AssetsPage({
   const detailEpoch = useRef(0);
   const browseContext = useRef<string | null>(null);
   const tester = project?.roles.includes('tester') ?? false;
+  const canDraft = canEditProjectAssets(project);
   const sets = assets.filter((asset) => asset.targetType === 'set');
+  const requirementId =
+    caseRoute.projectId === project?.id ? caseRoute.requirementId : undefined;
   const selectedRequirement = navigation.requirements.find(
-    (requirement) => requirement.id === scope?.requirementId,
+    (requirement) => requirement.id === requirementId,
   );
+  const currentVersion = selectedRequirement?.versions.find(
+    (version) => version.id === selectedRequirement.currentVersionId,
+  );
+  const pinnedVersion =
+    linkedScope?.requirementId === requirementId &&
+    (caseRoute.snapshot || caseRoute.history || reviewWorkspace)
+      ? linkedScope
+      : null;
+  const currentScope =
+    project && selectedRequirement && currentVersion
+      ? ({
+          projectId: project.id,
+          requirementId: selectedRequirement.id,
+          requirementVersionId: currentVersion.id,
+          title: selectedRequirement.title,
+          versionNo: currentVersion.versionNo,
+          kind,
+        } as const)
+      : null;
+  const scope = pinnedVersion ?? currentScope;
+  const immersive =
+    Boolean(requirementId) && (reviewWorkspace || readerWorkspace);
   const sceneId =
-    sceneScope?.versionId === scope?.requirementVersionId
-      ? sceneScope?.id
-      : undefined;
-  const canWrite = tester && !selectedRequirement?.archived;
+    sceneScope?.requirementId === requirementId ? sceneScope?.id : undefined;
+  const writableScope =
+    !caseRoute.snapshot && !caseRoute.history && !selectedRequirement?.archived;
+  const canWrite = canDraft && writableScope;
+  const canReview = tester && writableScope;
   const scopeExists =
-    scope === null ||
+    requirementId === undefined ||
     Boolean(
       selectedRequirement?.versions.some(
-        (version) => version.id === scope.requirementVersionId,
+        (version) => version.id === scope?.requirementVersionId,
       ),
     );
   const scenarios = assets.filter(
@@ -240,7 +265,13 @@ export function AssetsPage({
       asset.targetType === 'scenario' && (!sceneId || asset.id === sceneId),
   );
   const scopeScenarios = assets.filter(
-    (asset) => asset.targetType === 'scenario',
+    (asset) => asset.targetType === 'scenario' && !asset.removedAt,
+  );
+  const oldBasisCases = assets.filter(
+    (asset) =>
+      asset.targetType === 'case' &&
+      !asset.removedAt &&
+      asset.requirementBasis?.warning,
   );
   const keyword = search.trim().toLocaleLowerCase();
   const libraryStage = useUiCaseStages(
@@ -279,10 +310,11 @@ export function AssetsPage({
     try {
       const query = new URLSearchParams({
         kind,
-        includeRemoved: String(includeRemoved),
         includeArchivedRequirements: String(includeArchivedRequirements),
       });
-      if (scope) query.set('requirementVersionId', scope.requirementVersionId);
+      if (pinnedVersion)
+        query.set('requirementVersionId', pinnedVersion.requirementVersionId);
+      else if (requirementId) query.set('requirementId', requirementId);
       const [map, data] = await Promise.all([
         api(
           `/projects/${project.id}/assets/navigation?kind=${kind}&includeArchivedRequirements=${includeArchivedRequirements}`,
@@ -360,7 +392,7 @@ export function AssetsPage({
   }, [approvalKey]);
   useEffect(() => {
     const controller = new AbortController();
-    const context = `${project?.id}:${kind}:${scope?.requirementVersionId}:${includeRemoved}`;
+    const context = `${project?.id}:${kind}:${requirementId}:${pinnedVersion?.requirementVersionId}`;
     const changedContext = browseContext.current !== context;
     browseContext.current = context;
     setAssets([]);
@@ -377,8 +409,8 @@ export function AssetsPage({
   }, [
     project?.id,
     kind,
-    scope?.requirementVersionId,
-    includeRemoved,
+    requirementId,
+    pinnedVersion?.requirementVersionId,
     includeArchivedRequirements,
   ]);
   useEffect(() => {
@@ -433,13 +465,6 @@ export function AssetsPage({
     return () => controller.abort();
   }, [project?.id, detail?.asset.id, detail?.asset.rowVersion, kind]);
 
-  useEffect(() => {
-    if (!scope) return;
-    const key = 'requirement:' + scope.requirementId;
-    setExpandedLibrary((before) =>
-      before.includes(key) ? before : [...before, key],
-    );
-  }, [kind, scope?.requirementId]);
   function libraryReview(value: string) {
     setReviewFilter(value);
     const query = new URLSearchParams(window.location.hash.split('?')[1]);
@@ -453,6 +478,10 @@ export function AssetsPage({
   }
   function openScopedWorkbench() {
     if (!scope) return;
+    if (sceneId) {
+      openWorkspace(scope, 'workbench', undefined, undefined, sceneId);
+      return;
+    }
     const previous = recentCase.current.get(scope.requirementVersionId);
     const inScene = assets.find(
       (row) =>
@@ -472,46 +501,20 @@ export function AssetsPage({
   }
   function selectRequirement(id: string) {
     if (!project) return;
-    if (id === 'all') {
-      changeScope(null);
-      return;
-    }
-    const requirement = navigation.requirements.find((item) => item.id === id);
-    const version = requirement
-      ? [...requirement.versions].sort((a, b) => b.versionNo - a.versionNo)[0]
-      : undefined;
-    if (requirement && version)
-      changeScope({
-        projectId: project.id,
-        requirementId: requirement.id,
-        title: requirement.title,
-        requirementVersionId: version.id,
-        versionNo: version.versionNo,
-        kind,
-      });
+    if (id === 'all' || navigation.requirements.some((item) => item.id === id))
+      changeScope(id === 'all' ? null : id);
   }
-  function selectVersion(id: string) {
-    if (!scope || !selectedRequirement) return;
-    const version = selectedRequirement.versions.find((item) => item.id === id);
-    if (version)
-      changeScope({
-        ...scope,
-        requirementVersionId: id,
-        versionNo: version.versionNo,
-      });
-  }
-  function changeScope(next: CaseScope | null) {
+  function changeScope(nextRequirementId: string | null) {
+    if (!project) return;
     setCoverage(false);
     setReviewHistory(false);
     setSceneScope(undefined);
-    onScopeChange(next);
-    const query = new URLSearchParams(window.location.hash.split('?')[1]);
-    query.set('kind', next?.kind ?? kind);
+    const query = new URLSearchParams({ projectId: project.id });
+    if (nextRequirementId) query.set('requirementId', nextRequirementId);
     if (reviewFilter !== 'all') query.set('review', reviewFilter);
-    else query.delete('review');
-    query.delete('assetId');
-    query.delete('assetRevisionId');
+    if (includeArchivedRequirements) query.set('archived', '1');
     window.location.hash = `cases?${query}`;
+    setCaseRoute(caseWorkbenchRoute());
   }
   function updateCaseLink(
     change: (query: URLSearchParams) => void,
@@ -529,13 +532,9 @@ export function AssetsPage({
     mode: 'workbench' | 'meeting',
     caseId?: string,
     meetingId?: string,
+    sceneId?: string,
   ) {
     if (!immersive) libraryScroll.current = window.scrollY;
-    if (
-      scope?.requirementVersionId !== next.requirementVersionId ||
-      scope.kind !== next.kind
-    )
-      onScopeChange(next);
     setSelectedId(null);
     setReviewHistory(false);
     updateCaseLink((query) => {
@@ -543,16 +542,24 @@ export function AssetsPage({
       query.delete('assetRevisionId');
       query.delete('meetingId');
       query.delete('caseId');
+      query.delete('sceneId');
       query.delete('history');
       query.set('view', mode);
-      query.set('kind', 'UI');
       query.set('projectId', next.projectId);
       query.set('requirementId', next.requirementId);
-      query.set('title', next.title);
-      query.set('versionId', next.requirementVersionId);
-      query.set('versionNo', String(next.versionNo));
+      if (next.historical || meetingId || mode === 'meeting') {
+        query.set('kind', 'UI');
+        query.set('title', next.title);
+        query.set('versionId', next.requirementVersionId);
+        query.set('versionNo', String(next.versionNo));
+        if (next.historical) query.set('basis', 'snapshot');
+      } else {
+        for (const name of ['kind', 'title', 'versionId', 'versionNo', 'basis'])
+          query.delete(name);
+      }
       if (includeArchivedRequirements) query.set('archived', '1');
       if (caseId) query.set('caseId', caseId);
+      if (sceneId) query.set('sceneId', sceneId);
       if (meetingId) {
         query.set('meetingId', meetingId);
         if (mode === 'workbench') query.set('history', '1');
@@ -565,34 +572,45 @@ export function AssetsPage({
       for (const name of [
         'view',
         'caseId',
+        'sceneId',
         'assetRevisionId',
         'meetingId',
         'history',
       ])
         query.delete(name);
+      if (!caseRoute.snapshot) {
+        for (const name of ['kind', 'title', 'versionId', 'versionNo', 'basis'])
+          query.delete(name);
+      }
     });
     requestAnimationFrame(() => window.scrollTo(0, libraryScroll.current));
   }
   function openTeamReview() {
-    if (scope) openWorkspace(scope, 'meeting');
+    const scene = scopeScenarios.find((asset) => asset.id === sceneId);
+    const cohort = scene ? scopeOf(scene, true) : scope;
+    if (cohort) openWorkspace(cohort, 'meeting');
   }
   function browseCase(id: string) {
     if (scope && !caseRoute.history)
       recentCase.current.set(scope.requirementVersionId, id);
     updateCaseLink((query) => {
       query.set('caseId', id);
+      query.delete('sceneId');
       query.delete('assetRevisionId');
     }, true);
   }
-  function scopeOf(asset: Asset): CaseScope | null {
+  function browseScene(id: string) {
+    updateCaseLink((query) => {
+      query.delete('caseId');
+      query.delete('assetRevisionId');
+      query.set('sceneId', id);
+    }, true);
+  }
+  function requirementScope(id: string, versionId?: string): CaseScope | null {
     if (!project) return null;
-    const requirement = navigation.requirements.find((item) =>
-      item.versions.some(
-        (version) => version.id === asset.requirementVersionId,
-      ),
-    );
+    const requirement = navigation.requirements.find((item) => item.id === id);
     const version = requirement?.versions.find(
-      (item) => item.id === asset.requirementVersionId,
+      (item) => item.id === (versionId ?? requirement.currentVersionId),
     );
     if (!requirement || !version) return null;
     return {
@@ -601,8 +619,22 @@ export function AssetsPage({
       requirementVersionId: version.id,
       title: requirement.title,
       versionNo: version.versionNo,
-      kind: asset.kind,
+      kind,
+      ...(caseRoute.snapshot && { historical: true }),
     };
+  }
+  function scopeOf(asset: Asset, exact = false): CaseScope | null {
+    const requirement = navigation.requirements.find((item) =>
+      item.versions.some(
+        (version) => version.id === asset.requirementVersionId,
+      ),
+    );
+    return requirement
+      ? requirementScope(
+          requirement.id,
+          exact || caseRoute.snapshot ? asset.requirementVersionId : undefined,
+        )
+      : null;
   }
   function openCase(asset: Asset) {
     if (asset.kind !== 'UI' || asset.targetType !== 'case' || asset.removedAt) {
@@ -624,9 +656,9 @@ export function AssetsPage({
     }
     const next = scopeOf(asset);
     if (!next) return;
-    if (scope?.requirementVersionId !== next.requirementVersionId)
-      changeScope(next);
-    setSceneScope({ id: asset.id, versionId: next.requirementVersionId });
+    if (scope?.requirementId !== next.requirementId)
+      changeScope(next.requirementId);
+    setSceneScope({ id: asset.id, requirementId: next.requirementId });
     setSelectedKeys([]);
   }
   function selectAsset(asset: Asset) {
@@ -643,73 +675,97 @@ export function AssetsPage({
     if (selectedId) await loadDetail(selectedId);
   }
   async function saved(asset: Asset) {
-    await load();
-    if (
-      readerWorkspace &&
-      asset.kind === 'UI' &&
-      asset.targetType === 'case' &&
-      asset.requirementVersionId === scope?.requirementVersionId
-    ) {
-      setSelectedId(null);
-      browseCase(asset.id);
-      return;
+    if (editor?.requirementId && editor.requirementId !== requirementId) {
+      changeScope(editor.requirementId);
+    } else {
+      await load();
     }
-    setSelectedId(asset.id);
-    if (selectedId === asset.id) await loadDetail(asset.id);
+    if (asset.targetType === 'scenario' && editor) {
+      setSceneScope({ id: asset.id, requirementId: editor.requirementId });
+    }
+    if (editor?.checkpoint) setCoverage(true);
+    void message.success(
+      asset.targetType === 'scenario' ? '已保存场景' : '已保存待评审用例',
+    );
   }
-  function addToScene(asset: Asset) {
+  function canEditAsset(asset: Asset) {
+    const owner = scopeOf(asset);
+    return (
+      canWrite &&
+      !asset.removedAt &&
+      asset.kind === 'UI' &&
+      asset.targetType !== 'set' &&
+      Boolean(owner) &&
+      !navigation.requirements.find((item) => item.id === owner?.requirementId)
+        ?.archived
+    );
+  }
+  function createScene(id: string) {
+    const target = requirementScope(id);
     if (
-      asset.kind !== 'UI' ||
-      asset.targetType !== 'scenario' ||
-      asset.removedAt ||
-      !scope ||
-      scope.requirementVersionId !== asset.requirementVersionId
+      !target ||
+      !canWrite ||
+      navigation.requirements.find((item) => item.id === id)?.archived
     )
       return;
-    setSelectedId(null);
-    setCaseAction({ kind: 'new', scenarioId: asset.id });
+    setEditor({
+      targetType: 'scenario',
+      requirementId: target.requirementId,
+      requirementVersionId: target.requirementVersionId,
+      requirementTitle: target.title,
+    });
+  }
+  function createCase(scene?: Asset, checkpoint?: CoverageCheckpoint) {
+    if (!canWrite || (scene && !canEditAsset(scene))) return;
+    const target = scene ? scopeOf(scene) : scope;
+    if (!target) return;
+    const choices = scopeScenarios.filter(
+      (item) =>
+        scopeOf(item)?.requirementId === target.requirementId &&
+        (!checkpoint ||
+          item.requirementVersionId === checkpoint.requirementVersionId),
+    );
+    if (scene && !choices.some((item) => item.id === scene.id))
+      choices.push(scene);
+    if (!choices.length) {
+      if (checkpoint) {
+        void message.info('此验收点暂无可用场景。请先在需求目录新增场景。');
+        return;
+      }
+      createScene(target.requirementId);
+      return;
+    }
+    setEditor({
+      targetType: 'case',
+      requirementId: target.requirementId,
+      requirementVersionId: target.requirementVersionId,
+      requirementTitle: target.title,
+      scenarios: choices,
+      ...((scene?.id || checkpoint?.scenarioId) && {
+        scenarioId: scene?.id ?? checkpoint?.scenarioId ?? '',
+      }),
+      ...(checkpoint && { checkpoint }),
+    });
   }
   function edit(asset: Asset) {
-    if (asset.kind !== 'UI') return;
+    if (asset.targetType === 'set' || !canEditAsset(asset)) return;
+    const target = scopeOf(asset);
+    if (!target) return;
     setEditor({
       targetType: asset.targetType,
-      kind: asset.kind,
-      requirementVersionId: asset.requirementVersionId,
-      setId: asset.setId,
-      scenarioId: asset.targetType === 'case' ? asset.parentId : null,
+      requirementId: target.requirementId,
+      requirementVersionId: target.requirementVersionId,
+      requirementTitle: target.title,
       asset,
     });
   }
   function remove(asset: Asset) {
-    if (!project) return;
-    const projectId = project.id;
-    modal.confirm({
-      title: `显式移除${targetTypeLabels[asset.targetType]}「${asset.title}」？`,
-      content:
-        '历史修订与既有引用保留。批次/场景仍有有效子项时服务会拒绝，不会级联删除子项。',
-      okText: '移除当前资产',
-      cancelText: '取消',
-      okButtonProps: { danger: true },
-      onOk: async () => {
-        try {
-          const body = removeAssetInputSchema.parse({
-            commandId: crypto.randomUUID(),
-            baseRevisionId: asset.revisionId,
-            rowVersion: asset.rowVersion,
-          });
-          await api(
-            `/projects/${projectId}/assets/${asset.id}`,
-            { method: 'DELETE', body },
-            assetReceiptSchema,
-          );
-          setSelectedId(null);
-          await load();
-        } catch (err) {
-          setError(describeError(err));
-          throw err;
-        }
-      },
-    });
+    if (tester && canEditAsset(asset)) setRemoveTarget(asset);
+  }
+  function generateFor(scene: Asset, source?: UiSupplementSource) {
+    if (!canEditAsset(scene)) return;
+    const target = scopeOf(scene);
+    if (target) openUiScenarioDraft({ scope: target, scene, userId, source });
   }
   async function startPreview(objectIds: string[]) {
     if (!project || !approvalKey || committing) return;
@@ -829,71 +885,48 @@ export function AssetsPage({
     }
   }
 
-  const tree = useMemo<TreeDataNode[]>(() => {
-    const keyword = directorySearch.trim().toLocaleLowerCase();
-    return navigation.requirements.flatMap((requirement) => {
-      const requirementMatches = `${requirement.title} ${requirement.id}`
-        .toLocaleLowerCase()
-        .includes(keyword);
-      const children = assets
-        .filter(
-          (asset) =>
-            asset.targetType === 'scenario' &&
-            requirement.versions.some(
-              (version) => version.id === asset.requirementVersionId,
-            ),
-        )
-        .flatMap((scenario) => {
-          const scenarioMatches =
-            requirementMatches ||
-            scenario.title.toLocaleLowerCase().includes(keyword);
-          const cases = assets.filter(
+  const tree = useMemo<ExplorerNode[]>(
+    () => [
+      {
+        id: 'all',
+        title: '全部需求',
+        kind: 'all',
+        count: `${navigation.requirements.reduce((sum, item) => sum + item.caseCount, 0)} 条用例`,
+      },
+      ...navigation.requirements.map((requirement) => ({
+        id: `requirement:${requirement.id}`,
+        title: requirement.title,
+        count: `${requirement.caseCount} 条用例`,
+        archived: requirement.archived,
+        children: assets
+          .filter(
             (asset) =>
-              asset.targetType === 'case' &&
-              asset.parentId === scenario.id &&
-              (scenarioMatches ||
-                (asset.title + ' ' + asset.id)
-                  .toLocaleLowerCase()
-                  .includes(keyword)),
-          );
-          if (!scenarioMatches && !cases.length) return [];
-          const version = requirement.versions.find(
-            (item) => item.id === scenario.requirementVersionId,
-          );
-          const detail = version ? 'v' + version.versionNo : undefined;
-          return [
-            {
-              key: `scenario:${scenario.id}`,
-              title: (
-                <RequirementDirectoryLabel
-                  title={scenario.title}
-                  {...(detail ? { detail } : {})}
-                />
+              asset.targetType === 'scenario' &&
+              requirement.versions.some(
+                (version) => version.id === asset.requirementVersionId,
               ),
-              children: cases.map((asset) => ({
-                key: `case:${asset.id}`,
-                title: <RequirementDirectoryLabel title={asset.title} />,
-                isLeaf: true,
-              })),
-            },
-          ];
-        });
-      if (!requirementMatches && !children.length) return [];
-      return [
-        {
-          key: `requirement:${requirement.id}`,
-          title: (
-            <RequirementDirectoryLabel
-              title={requirement.title}
-              count={`${requirement.caseCount} 条用例`}
-              archived={requirement.archived}
-            />
-          ),
-          children,
-        },
-      ];
-    });
-  }, [navigation, assets, directorySearch]);
+          )
+          .map((scenario) => {
+            return {
+              id: `scenario:${scenario.id}`,
+              title: scenario.title,
+              children: assets
+                .filter(
+                  (asset) =>
+                    asset.targetType === 'case' &&
+                    asset.parentId === scenario.id,
+                )
+                .map((asset) => ({
+                  id: `case:${asset.id}`,
+                  title: asset.title,
+                  kind: 'ui-case' as const,
+                })),
+            };
+          }),
+      })),
+    ],
+    [navigation, assets],
+  );
   if (!project)
     return (
       <Card>
@@ -902,6 +935,23 @@ export function AssetsPage({
     );
   return (
     <>
+      {immersive && !scope && (
+        <>
+          <StandaloneWorkbenchHeader
+            title="UI 用例工作台"
+            projectName={project.name}
+            backLabel="返回 UI 用例管理"
+            onBack={returnToLibrary}
+          />
+          <main className="ui-case-workbench-main">
+            {loading ? (
+              <Skeleton active />
+            ) : (
+              <Empty description={error ?? '未找到此需求。'} />
+            )}
+          </main>
+        </>
+      )}
       {readerWorkspace && scope && (
         <UiCaseWorkbench
           key={project.id + ':' + scope.requirementVersionId}
@@ -910,15 +960,18 @@ export function AssetsPage({
           userId={userId}
           assets={assets}
           requestedCase={caseRoute.caseId}
+          requestedScene={caseRoute.sceneId}
           requestedRevision={caseRoute.revisionId}
           meetingId={caseRoute.history ? caseRoute.meetingId : undefined}
           archived={Boolean(selectedRequirement?.archived)}
           available={scopeExists && !caseRoute.invalid}
           loading={loading}
           error={caseRoute.invalid ? '用例工作台链接无效。' : error}
-          tester={canWrite}
+          tester={canReview}
+          canEdit={canWrite}
           onBack={returnToLibrary}
           onCase={browseCase}
+          onScene={browseScene}
           onRevision={(id) =>
             updateCaseLink((query) => {
               if (id) query.set('assetRevisionId', id);
@@ -926,23 +979,26 @@ export function AssetsPage({
             }, true)
           }
           onApprove={startPreview}
-          onEdit={edit}
           onDetails={selectAsset}
-          onOpenTeam={(id) => openWorkspace(scope, 'meeting', undefined, id)}
-          onOpenHistory={(id, caseId) =>
-            openWorkspace(scope, 'workbench', caseId, id)
-          }
+          onOpenTeam={(id, asset) => {
+            const cohort = scopeOf(asset, true);
+            if (cohort) openWorkspace(cohort, 'meeting', undefined, id);
+          }}
+          onOpenHistory={(id, caseId) => {
+            const asset = assets.find((item) => item.id === caseId);
+            const cohort = asset ? scopeOf(asset, true) : scope;
+            if (cohort) openWorkspace(cohort, 'workbench', caseId, id);
+          }}
           onSupplement={(asset, origin) => {
-            setCaseAction({
-              kind: 'supplement',
-              source: {
+            const scene = scopeScenarios.find(
+              (item) => item.id === asset.parentId,
+            );
+            if (scene)
+              generateFor(scene, {
                 caseId: asset.id,
                 revisionId: asset.revisionId,
-                title: asset.title,
-                scenarioId: asset.parentId,
-                ...(origin ? { origin } : {}),
-              },
-            });
+                ...origin,
+              });
           }}
           onChanged={changed}
           reviewDrafts={caseReviewDrafts.current}
@@ -974,7 +1030,7 @@ export function AssetsPage({
                 new Map(scopeScenarios.map((asset) => [asset.id, asset.title]))
               }
               initialCases={selectedKeys}
-              tester={canWrite}
+              tester={canReview}
               onApprove={startPreview}
               updated={changed}
             />
@@ -984,24 +1040,42 @@ export function AssetsPage({
       {scope && (
         <>
           <UiReviewHistory
-            projectId={project.id}
-            requirementVersionId={scope.requirementVersionId}
-            title={
-              (selectedRequirement?.title ?? scope.title) +
-              ' · v' +
-              scope.versionNo
-            }
+            scope={scope}
+            title={selectedRequirement?.title ?? scope.title}
             open={reviewHistory}
             onClose={() => setReviewHistory(false)}
-            onSelect={(id) => openWorkspace(scope, 'workbench', undefined, id)}
+            onSelect={(id, requirementVersionId) => {
+              const version = selectedRequirement?.versions.find(
+                (item) => item.id === requirementVersionId,
+              );
+              if (version)
+                openWorkspace(
+                  {
+                    ...scope,
+                    requirementVersionId,
+                    versionNo: version.versionNo,
+                  },
+                  'workbench',
+                  undefined,
+                  id,
+                );
+            }}
           />
           <UiCoverageCheck
             scope={scope}
             userId={userId}
             assets={assets}
-            scenarioId={sceneId}
+            scenarioId={
+              scopeScenarios.some(
+                (item) =>
+                  item.id === sceneId &&
+                  item.requirementVersionId === scope.requirementVersionId,
+              )
+                ? sceneId
+                : undefined
+            }
             open={coverage}
-            tester={canWrite}
+            tester={canReview}
             onClose={() => setCoverage(false)}
             onCase={(asset) => {
               setCoverage(false);
@@ -1009,32 +1083,20 @@ export function AssetsPage({
             }}
             onSupplement={(checkpoint) => {
               setCoverage(false);
-              setCaseAction({ kind: 'new', checkpoint });
+              createCase(
+                scopeScenarios.find(
+                  (item) => item.id === checkpoint.scenarioId,
+                ),
+                checkpoint,
+              );
             }}
           />
-          {caseAction && canWrite && scopeExists && (
-            <UiCaseActionDialog
-              scope={scope}
-              userId={userId}
-              action={caseAction.kind}
-              assets={assets}
-              scenarioId={caseAction.scenarioId ?? sceneId}
-              source={caseAction.source}
-              checkpoint={caseAction.checkpoint}
-              onClose={() => setCaseAction(undefined)}
-              onChanged={async () => {
-                await changed();
-                setCaseAction(undefined);
-                if (caseAction.checkpoint) setCoverage(true);
-              }}
-            />
-          )}
         </>
       )}
       <div hidden={immersive} className="ui-case-library">
         <header className="ui-case-library-heading">
           <h1>UI 用例管理</h1>
-          <p>按需求、版本与场景维护用例，逐条评审和批准。</p>
+          <p>按需求和场景维护用例，逐条评审和批准。</p>
         </header>
         {error && (
           <Alert
@@ -1049,8 +1111,8 @@ export function AssetsPage({
           <Alert
             type="info"
             showIcon
-            title="当前需求版本不在本次浏览范围"
-            description="可在需求目录开启“显示已归档需求”，或重新选择浏览范围。"
+            title="当前需求不在本次浏览范围"
+            description="可在需求目录开启“显示已归档需求”，或重新选择需求。"
             className="section-alert"
           />
         )}
@@ -1078,40 +1140,85 @@ export function AssetsPage({
             onSearchChange={setDirectorySearch}
             searchPlaceholder="搜索需求、场景或用例"
           >
-            <button
-              type="button"
-              className={`tree-node requirement-directory-button ${scope ? '' : 'active'}`}
-              aria-pressed={!scope}
-              onClick={() => selectRequirement('all')}
-            >
-              <RequirementDirectoryLabel
-                title="全部需求"
-                count={`${navigation.requirements.reduce((n, r) => n + r.caseCount, 0)} 条用例`}
-              />
-            </button>
             {loading ? (
               <Skeleton active />
             ) : (
-              <Tree
-                key={scope?.requirementVersionId ?? 'all'}
-                treeData={tree}
-                expandedKeys={expandedLibrary}
-                onExpand={(keys) => setExpandedLibrary(keys.map(String))}
-                blockNode
-                selectedKeys={
+              <ExplorerTree
+                nodes={tree}
+                label="UI 用例目录"
+                search={directorySearch}
+                storageKey={`explorer:ui-cases:${userId}:${project.id}`}
+                renderAction={(node) => {
+                  if (
+                    node.id.startsWith('requirement:') &&
+                    canWrite &&
+                    !node.archived
+                  ) {
+                    return (
+                      <Tooltip title="新增场景">
+                        <Button
+                          size="small"
+                          type="text"
+                          icon={<PlusOutlined />}
+                          aria-label={`新增场景 · ${node.title}`}
+                          onClick={() => createScene(node.id.slice(12))}
+                        />
+                      </Tooltip>
+                    );
+                  }
+                  const scene = node.id.startsWith('scenario:')
+                    ? scopeScenarios.find(
+                        (item) => item.id === node.id.slice(9),
+                      )
+                    : undefined;
+                  if (!scene || !canEditAsset(scene)) return null;
+                  return (
+                    <Dropdown
+                      trigger={['click']}
+                      menu={{
+                        items: [
+                          { key: 'edit', label: '改名及编辑场景' },
+                          { key: 'add', label: '手动新增用例' },
+                          { key: 'generate', label: '按此场景生成用例' },
+                          ...(tester
+                            ? [
+                                {
+                                  key: 'remove',
+                                  label: '删除场景',
+                                  danger: true,
+                                },
+                              ]
+                            : []),
+                        ],
+                        onClick: ({ key }) => {
+                          if (key === 'edit') edit(scene);
+                          else if (key === 'add') createCase(scene);
+                          else if (key === 'generate') generateFor(scene);
+                          else if (key === 'remove') remove(scene);
+                        },
+                      }}
+                    >
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<EllipsisOutlined />}
+                        aria-label={`场景操作 · ${scene.title}`}
+                      />
+                    </Dropdown>
+                  );
+                }}
+                selected={
                   selectedId
-                    ? [
-                        `${assets.find((asset) => asset.id === selectedId)?.targetType ?? 'case'}:${selectedId}`,
-                      ]
+                    ? `${assets.find((asset) => asset.id === selectedId)?.targetType ?? 'case'}:${selectedId}`
                     : sceneId
-                      ? [`scenario:${sceneId}`]
+                      ? `scenario:${sceneId}`
                       : scope
-                        ? [`requirement:${scope.requirementId}`]
-                        : []
+                        ? `requirement:${scope.requirementId}`
+                        : 'all'
                 }
-                onSelect={([key]) => {
-                  if (typeof key !== 'string') return;
-                  if (key.startsWith('requirement:'))
+                onSelect={(key) => {
+                  if (key === 'all') selectRequirement(key);
+                  else if (key.startsWith('requirement:'))
                     selectRequirement(key.slice(12));
                   else {
                     const asset = assets.find(
@@ -1142,25 +1249,33 @@ export function AssetsPage({
             }
             search={search}
             review={reviewFilter}
-            includeRemoved={includeRemoved}
             selected={selectedKeys}
             canWrite={canWrite}
+            canReview={canReview}
+            oldBasisCases={oldBasisCases}
             stageOf={libraryStage}
             approving={previewLoading}
             onSearch={setSearch}
             onReview={libraryReview}
-            onVersion={selectVersion}
+            onCurrent={() => {
+              if (scope) selectRequirement(scope.requirementId);
+            }}
             onCoverage={() => setCoverage(true)}
             onHistory={() => setReviewHistory(true)}
             onOpen={openScopedWorkbench}
             onReviewTeam={openTeamReview}
-            onAction={(kind) => setCaseAction({ kind })}
+            onAdd={() =>
+              createCase(scopeScenarios.find((item) => item.id === sceneId))
+            }
+            onImport={() => setImportScope(scope)}
             onOpenCase={openCase}
-            onScenario={selectAsset}
-            onAddToScene={addToScene}
+            onAddToScene={createCase}
+            canEdit={canEditAsset}
+            canRemove={(asset) => tester && canEditAsset(asset)}
+            onEdit={edit}
+            onRemove={remove}
             onSelect={setSelectedKeys}
             onApprove={startPreview}
-            onIncludeRemoved={setIncludeRemoved}
           />
         </div>
       </div>
@@ -1218,14 +1333,6 @@ export function AssetsPage({
                     <Button onClick={() => setSelectedId(detail.asset.setId)}>
                       查看归属意见
                     </Button>
-                    {detail.asset.targetType === 'case' &&
-                      detail.asset.parentId && (
-                        <Button
-                          onClick={() => setSelectedId(detail.asset.parentId)}
-                        >
-                          查看场景意见
-                        </Button>
-                      )}
                   </Space>
                 }
               />
@@ -1236,48 +1343,48 @@ export function AssetsPage({
             >
               <ContentView content={revision.content} />
             </Card>
-            {canWrite && !detail.asset.removedAt && (
-              <Space wrap>
-                <Button
-                  icon={<EditOutlined />}
-                  onClick={() => edit(detail.asset)}
-                >
-                  编辑当前内容并建新修订
-                </Button>
-                {detail.asset.targetType === 'scenario' && scope && (
-                  <Button
-                    icon={<PlusOutlined />}
-                    onClick={() => addToScene(detail.asset)}
-                  >
-                    新增用例
-                  </Button>
-                )}
-                <Button
-                  loading={previewLoading}
-                  onClick={() => void startPreview([detail.asset.id])}
-                >
-                  预览通过此对象
-                </Button>
-                <Button
-                  danger
-                  icon={<DeleteOutlined />}
-                  onClick={() => remove(detail.asset)}
-                >
-                  显式移除
-                </Button>
-              </Space>
-            )}
             <AssetReviewPanel
               key={`${detail.asset.id}:${revision.id}`}
               projectId={project.id}
               asset={detail.asset}
               revisionId={revision.id}
-              tester={canWrite && !detail.asset.removedAt}
+              tester={false}
               onChanged={changed}
             />
           </Space>
         )}
       </DetailDrawer>
+      {importScope && (
+        <UiCaseImportDialog
+          key={importScope.requirementId}
+          scope={importScope}
+          userId={userId}
+          scenes={scopeScenarios}
+          onClose={() => setImportScope(null)}
+          onImported={async () => changed()}
+        />
+      )}
+      {removeTarget && (
+        <UiAssetRemoval
+          key={removeTarget.id}
+          asset={removeTarget}
+          userId={userId}
+          onClose={() => setRemoveTarget(null)}
+          onRemoved={async () => {
+            if (sceneId === removeTarget.id) setSceneScope(undefined);
+            setSelectedId(null);
+            setSelectedKeys((keys) =>
+              keys.filter((key) => key !== removeTarget.id),
+            );
+            await load();
+            void message.success(
+              removeTarget.targetType === 'scenario'
+                ? '场景已移除'
+                : '用例已移除',
+            );
+          }}
+        />
+      )}
       <AssetEditor
         userId={userId}
         projectId={project.id}

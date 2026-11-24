@@ -17,6 +17,7 @@ import {
 } from '../../../packages/contracts/src/assets';
 import type { CaseScope } from './requirements';
 import { UiCaseStageBadge, uiStageForReviewState } from './ui-case-workbench';
+import { UiRequirementBasis } from './ui-requirement-basis';
 
 type Requirement = z.infer<
   typeof assetNavigationSchema
@@ -34,25 +35,29 @@ export function UiCaseLibraryPane({
   sceneCount,
   search,
   review,
-  includeRemoved,
   selected,
   canWrite,
+  canReview,
+  oldBasisCases,
   stageOf,
   approving,
   onSearch,
   onReview,
-  onVersion,
+  onCurrent,
   onCoverage,
   onHistory,
   onOpen,
   onReviewTeam,
-  onAction,
+  onAdd,
+  onImport,
   onOpenCase,
-  onScenario,
   onAddToScene,
+  canEdit,
+  canRemove,
+  onEdit,
+  onRemove,
   onSelect,
   onApprove,
-  onIncludeRemoved,
 }: {
   scope: CaseScope | null;
   requirement: Requirement | undefined;
@@ -65,40 +70,37 @@ export function UiCaseLibraryPane({
   sceneCount: number | undefined;
   search: string;
   review: string;
-  includeRemoved: boolean;
   selected: string[];
   canWrite: boolean;
+  canReview: boolean;
+  oldBasisCases: Asset[];
   stageOf: (asset: Asset) => ReturnType<typeof uiStageForReviewState>;
   approving: boolean;
   onSearch: (value: string) => void;
   onReview: (value: string) => void;
-  onVersion: (id: string) => void;
+  onCurrent: () => void;
   onCoverage: () => void;
   onHistory: () => void;
   onOpen: () => void;
   onReviewTeam: () => void;
-  onAction: (kind: 'new' | 'import' | 'generate') => void;
+  onAdd: () => void;
+  onImport: () => void;
   onOpenCase: (asset: Asset) => void;
-  onScenario: (asset: Asset) => void;
   onAddToScene: (asset: Asset) => void;
+  canEdit: (asset: Asset) => boolean;
+  canRemove: (asset: Asset) => boolean;
+  onEdit: (asset: Asset) => void;
+  onRemove: (asset: Asset) => void;
   onSelect: (ids: string[]) => void;
   onApprove: (ids: string[]) => Promise<void>;
-  onIncludeRemoved: (include: boolean) => void;
 }) {
   const [bulk, setBulk] = useState(false);
   const [closed, setClosed] = useState<Set<string>>(new Set());
-  const latest = Math.max(
-    ...(requirement?.versions.map((version) => version.versionNo) ?? []),
-  );
   const canUseScope = Boolean(scope) && available && !loading;
   const currentVersion = requirement?.versions.find(
     (version) => version.id === scope?.requirementVersionId,
   );
   const currentScene = scenarios.find((scene) => scene.id === sceneId);
-  const versionLabels = (requirement?.versions ?? []).map((version) => ({
-    value: version.id,
-    label: `v${version.versionNo}（${version.versionNo === latest ? '当前' : '历史'}）`,
-  }));
   const rows = new Map<string | null, Asset[]>();
   for (const asset of cases) {
     const group = rows.get(asset.parentId) ?? [];
@@ -114,20 +116,13 @@ export function UiCaseLibraryPane({
   );
   const actions: MenuProps = {
     items: [
-      ...(canUseScope ? [{ key: 'team', label: '团队评审' }] : []),
-      ...(canUseScope && canWrite
+      ...(canUseScope && canReview ? [{ key: 'team', label: '团队评审' }] : []),
+      ...(canUseScope && canReview
         ? [{ key: 'batch', label: bulk ? '结束选择用例' : '批量批准' }]
         : []),
-      ...(currentScene ? [{ key: 'scenario', label: '场景意见' }] : []),
-      {
-        key: 'removed',
-        label: includeRemoved ? '隐藏已移除历史' : '包含已移除历史',
-      },
     ],
     onClick: ({ key }) => {
       if (key === 'team') onReviewTeam();
-      if (key === 'scenario' && currentScene) onScenario(currentScene);
-      if (key === 'removed') onIncludeRemoved(!includeRemoved);
       if (key === 'batch') {
         setBulk(!bulk);
         if (bulk) onSelect([]);
@@ -136,20 +131,18 @@ export function UiCaseLibraryPane({
   };
   const scopeMeta = scope
     ? [
-        requirement?.versions.length
-          ? 'v' +
-            scope.versionNo +
-            '（' +
-            (scope.versionNo === latest ? '当前' : '历史') +
-            '）'
-          : 'v' + scope.versionNo,
+        scope.historical ? `资料快照 v${scope.versionNo} · 只读` : '',
         requirement?.archived ? '已归档需求' : '',
         currentScene?.title ?? '',
-        (sceneCount ?? currentVersion?.caseCount ?? cases.length) + ' 条用例',
+        (sceneCount ??
+          (scope.historical
+            ? currentVersion?.caseCount
+            : requirement?.caseCount) ??
+          cases.length) + ' 条用例',
       ]
         .filter(Boolean)
         .join(' · ')
-    : '选择左侧需求与需求版本，浏览该版本的场景及用例。';
+    : '选择左侧需求，浏览该需求的场景及用例。';
 
   function toggle(id: string) {
     setClosed((previous) => {
@@ -164,24 +157,21 @@ export function UiCaseLibraryPane({
     <section className="ui-case-library-pane" aria-label="用例列表">
       <div className="ui-case-library-scope">
         <div>
-          <h2>{requirement?.title ?? scope?.title ?? '全部需求'}</h2>
+          <div className="row wrap">
+            <h2>{requirement?.title ?? scope?.title ?? '全部需求'}</h2>
+            {scope && (
+              <UiRequirementBasis scope={scope} cases={oldBasisCases} />
+            )}
+          </div>
           <p className="caption">{scopeMeta}</p>
         </div>
         {scope && (
           <div className="ui-case-library-scope-controls">
-            <div className="ui-case-library-version">
-              <label htmlFor="ui-case-requirement-version">需求版本</label>
-              <Select
-                id="ui-case-requirement-version"
-                size="small"
-                aria-label="需求版本"
-                value={available ? scope.requirementVersionId : null}
-                placeholder="选择版本"
-                disabled={!requirement}
-                options={versionLabels}
-                onChange={onVersion}
-              />
-            </div>
+            {scope.historical && (
+              <Button size="small" onClick={onCurrent}>
+                返回需求用例
+              </Button>
+            )}
             <Button size="small" disabled={!canUseScope} onClick={onCoverage}>
               用例覆盖检查
             </Button>
@@ -191,7 +181,12 @@ export function UiCaseLibraryPane({
             <Button
               size="small"
               type="primary"
-              disabled={!canUseScope || !currentVersion?.caseCount}
+              disabled={
+                !canUseScope ||
+                !(scope.historical
+                  ? currentVersion?.scenarioCount
+                  : requirement?.scenarioCount)
+              }
               onClick={onOpen}
             >
               打开工作台
@@ -200,34 +195,28 @@ export function UiCaseLibraryPane({
         )}
       </div>
       <div className="ui-case-library-list">
-        {canUseScope && canWrite && (
+        {canUseScope && (canWrite || canReview) && (
           <div className="ui-case-library-actions">
-            <Button size="small" onClick={() => onAction('new')}>
-              新增用例
-            </Button>
-            <Button size="small" onClick={() => onAction('import')}>
-              导入用例
-            </Button>
-            <Button size="small" onClick={() => onAction('generate')}>
-              生成用例
-            </Button>
-            <Dropdown trigger={['click']} menu={actions}>
-              <Button
-                size="small"
-                icon={<EllipsisOutlined />}
-                aria-label="更多用例操作"
-              />
-            </Dropdown>
-            {includeRemoved && (
-              <Button
-                size="small"
-                type="text"
-                onClick={() => onIncludeRemoved(false)}
-              >
-                已显示移除历史
+            {canWrite && (
+              <Button size="small" onClick={onAdd}>
+                新增用例
               </Button>
             )}
-            {bulk && (
+            {canWrite && (
+              <Button size="small" onClick={onImport}>
+                导入用例
+              </Button>
+            )}
+            {canReview && (
+              <Dropdown trigger={['click']} menu={actions}>
+                <Button
+                  size="small"
+                  icon={<EllipsisOutlined />}
+                  aria-label="更多用例操作"
+                />
+              </Dropdown>
+            )}
+            {bulk && canReview && (
               <Button
                 size="small"
                 type="primary"
@@ -266,22 +255,13 @@ export function UiCaseLibraryPane({
                 { value: 'approved', label: '已批准' },
               ]}
             />
-            {(!canUseScope || !canWrite) && (
-              <Dropdown trigger={['click']} menu={actions}>
-                <Button
-                  size="small"
-                  icon={<EllipsisOutlined />}
-                  aria-label="更多用例操作"
-                />
-              </Dropdown>
-            )}
           </div>
         </div>
         <div className="ui-case-library-scenes">
           {loading ? (
             <Skeleton active />
           ) : !available ? (
-            <Empty description="当前需求版本不在所选范围。" />
+            <Empty description="当前需求不在所选范围。" />
           ) : visibleScenarios.length ? (
             visibleScenarios.map((scene) => {
               const group = rows.get(scene.id) ?? [];
@@ -293,9 +273,6 @@ export function UiCaseLibraryPane({
                     ),
                   )
                 : undefined;
-              const version = owner?.versions.find(
-                (row) => row.id === scene.requirementVersionId,
-              );
               return (
                 <section className="ui-case-library-scene" key={scene.id}>
                   <header>
@@ -308,20 +285,8 @@ export function UiCaseLibraryPane({
                       {scene.title}
                     </button>
                     <span>
-                      {group.length} 条
-                      {owner && version
-                        ? ` · ${owner.title} v${version.versionNo}`
-                        : ''}
+                      {group.length} 条{owner ? ` · ${owner.title}` : ''}
                     </span>
-                    {(bulk || scene.removedAt) && (
-                      <Button
-                        size="small"
-                        type="text"
-                        onClick={() => onScenario(scene)}
-                      >
-                        场景意见
-                      </Button>
-                    )}
                   </header>
                   {open &&
                     group.map((asset) => (
@@ -333,7 +298,7 @@ export function UiCaseLibraryPane({
                         {bulk && (
                           <Checkbox
                             aria-label={`选择${asset.title}`}
-                            disabled={!canWrite || Boolean(asset.removedAt)}
+                            disabled={!canReview || Boolean(asset.removedAt)}
                             checked={selected.includes(asset.id)}
                             onChange={(event) =>
                               onSelect(
@@ -352,15 +317,51 @@ export function UiCaseLibraryPane({
                           </span>
                         </div>
                         <UiCaseStageBadge stage={stageOf(asset)} />
-                        <Button size="small" onClick={() => onOpenCase(asset)}>
-                          {asset.removedAt ? '查看' : '打开用例'}{' '}
-                          <span aria-hidden="true">›</span>
-                        </Button>
+                        <div className="row">
+                          <Button
+                            size="small"
+                            onClick={() => onOpenCase(asset)}
+                          >
+                            {asset.removedAt ? '查看历史' : '打开用例'}{' '}
+                            <span aria-hidden="true">›</span>
+                          </Button>
+                          {canEdit(asset) && (
+                            <Dropdown
+                              trigger={['click']}
+                              menu={{
+                                items: [
+                                  { key: 'edit', label: '编辑用例' },
+                                  ...(canRemove(asset)
+                                    ? [
+                                        {
+                                          key: 'remove',
+                                          label: '删除用例',
+                                          danger: true,
+                                        },
+                                      ]
+                                    : []),
+                                ],
+                                onClick: ({ key }) =>
+                                  key === 'edit'
+                                    ? onEdit(asset)
+                                    : onRemove(asset),
+                              }}
+                            >
+                              <Button
+                                size="small"
+                                icon={<EllipsisOutlined />}
+                                aria-label={`用例操作 · ${asset.title}`}
+                              />
+                            </Dropdown>
+                          )}
+                        </div>
                       </div>
                     ))}
                   {open && group.length === 0 && (
                     <p className="caption ui-case-library-no-rows">
-                      此场景暂无匹配用例。
+                      {search.trim() || review !== 'all'
+                        ? '此场景暂无匹配用例。'
+                        : '该场景暂无用例。'}
                       {canUseScope && canWrite && !scene.removedAt && (
                         <Button
                           size="small"
@@ -380,7 +381,9 @@ export function UiCaseLibraryPane({
               description={
                 scenarios.length
                   ? '没有匹配用例。可调整搜索条件或评审状态。'
-                  : '当前范围没有用例。'
+                  : scope && canWrite
+                    ? '该需求暂无场景。可点击左侧需求旁的加号新增场景。'
+                    : '当前范围没有用例。'
               }
             />
           )}

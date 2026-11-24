@@ -35,6 +35,12 @@ export const multipartRequestBodySchema = z.strictObject({
     .max(multipartMaxParts),
 });
 
+export const apiBinaryRequestBodySchema = z.strictObject({
+  format: z.literal('binary'),
+  fileResourceId: idSchema,
+  mediaType: z.string().regex(/^[\w!#$&^.+-]+\/[\w!#$&^.+-]+$/).max(128),
+});
+
 export const multipartAttachmentSchema = z.strictObject({
   fileResourceId: idSchema,
   filename: z.string().min(1).max(240).regex(/^[^\x00-\x1F\x7F]+$/),

@@ -47,6 +47,73 @@ export async function requirePlatformAdmin(
   if (actor.entrypoint !== 'web' || !user.is_platform_admin) forbidden();
 }
 
+function inheritsPlatformAdmin(
+  actor: ActorContext,
+  user: Awaited<ReturnType<typeof currentUser>>,
+) {
+  return (
+    user.is_platform_admin &&
+    !actor.keyId &&
+    (actor.entrypoint === 'web' || actor.entrypoint === 'internal-ai')
+  );
+}
+
+interface ProjectAccessRow {
+  id: string;
+  name: string;
+  row_version: number;
+  is_admin: boolean | null;
+  roles: ProjectRole[] | null;
+  member_version: number | null;
+}
+
+const projectAccessRows = `
+  SELECT p.id,p.name,p.row_version,m.is_admin,m.roles,m.member_version
+  FROM app.projects p
+  LEFT JOIN LATERAL (
+    SELECT pm.is_admin,pm.roles,pm.row_version AS member_version
+    FROM app.project_members pm
+    WHERE pm.project_id=p.id AND pm.user_id=$1 AND pm.active
+    FOR SHARE OF pm
+  ) m ON true
+  WHERE p.active`;
+
+export async function listProjectAccess(sql: SqlExecutor, actor: ActorContext) {
+  const user = await currentUser(sql, actor);
+  if (
+    actor.allowedCapabilities &&
+    !actor.allowedCapabilities.includes('project.read')
+  )
+    forbidden();
+  const inherited = inheritsPlatformAdmin(actor, user);
+  const { rows } = await sql.query<ProjectAccessRow>(
+    `${projectAccessRows}
+     AND (m.member_version IS NOT NULL OR $2) ORDER BY p.created_at,p.id
+     FOR SHARE OF p`,
+    [actor.userId, inherited],
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    rowVersion: row.row_version,
+    isAdmin: inherited || Boolean(row.is_admin),
+    roles: row.roles ?? [],
+    inheritsPlatformAdmin: inherited,
+    memberVersion: row.member_version,
+  }));
+}
+
+type DraftWriteCapability = 'requirements.write' | 'assets.write';
+
+export function requireProjectDraftWrite(
+  sql: SqlExecutor,
+  actor: ActorContext,
+  projectId: string,
+  capability: DraftWriteCapability,
+) {
+  return authorizeProject(sql, actor, projectId, capability, true);
+}
+
 const testerActions = new Set<Capability>([
   'requirements.write',
   'assets.write',
@@ -66,12 +133,32 @@ const memberActions = new Set<Capability>([
   'database-connections.metadata.read',
   'knowledge.write',
 ]);
+const inheritedAdminActions = new Set<Capability>([
+  'project.read',
+  'project.members.manage',
+  'requirements.participants.write',
+  'files.transfer',
+  'test-configuration.read',
+  'test-configuration.write',
+  'database-connections.metadata.read',
+  'database-connections.write',
+]);
 
-export async function requireProject(
+export function requireProject(
   sql: SqlExecutor,
   actor: ActorContext,
   projectId: string,
   capability: Capability,
+): Promise<{ isAdmin: boolean; roles: ProjectRole[] }> {
+  return authorizeProject(sql, actor, projectId, capability, false);
+}
+
+async function authorizeProject(
+  sql: SqlExecutor,
+  actor: ActorContext,
+  projectId: string,
+  capability: Capability,
+  draftWrite: boolean,
 ): Promise<{ isAdmin: boolean; roles: ProjectRole[] }> {
   const user = await currentUser(sql, actor);
   if (
@@ -79,19 +166,24 @@ export async function requireProject(
     !actor.allowedCapabilities.includes(capability)
   )
     forbidden();
+  if (
+    inheritsPlatformAdmin(actor, user) &&
+    (draftWrite || inheritedAdminActions.has(capability))
+  ) {
+    const result = await sql.query<ProjectAccessRow>(
+      `${projectAccessRows} AND p.id=$2 FOR SHARE OF p`,
+      [actor.userId, projectId],
+    );
+    const project = result.rows[0];
+    if (!project) forbidden();
+    return { isAdmin: true, roles: project.roles ?? [] };
+  }
   const result = await sql.query<{ is_admin: boolean; roles: ProjectRole[] }>(
     `SELECT m.is_admin,m.roles FROM app.project_members m JOIN app.projects p ON p.id=m.project_id
      WHERE m.project_id=$1 AND m.user_id=$2 AND m.active AND p.active FOR SHARE OF m,p`,
     [projectId, actor.userId],
   );
   const member = result.rows[0];
-  if (
-    capability === 'project.members.manage' &&
-    (actor.entrypoint === 'web' || actor.entrypoint === 'internal-ai') &&
-    user.is_platform_admin
-  ) {
-    return { isAdmin: member?.is_admin ?? false, roles: member?.roles ?? [] };
-  }
   if (!member) forbidden();
   const tester = member.roles.includes('tester');
   const developer = member.roles.includes('developer');

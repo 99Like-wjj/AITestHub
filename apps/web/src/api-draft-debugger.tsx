@@ -5,6 +5,7 @@ import {
   Collapse,
   Form,
   Input,
+  InputNumber,
   Modal,
   Select,
   Space,
@@ -22,13 +23,22 @@ import {
   apiRegressionSaveReceiptSchema,
   apiRegressionSaveStatusSchema,
 } from '../../../packages/contracts/src/api-execution';
-import type { ApiCaseContent } from '../../../packages/contracts/src/domain';
-import type { Asset } from '../../../packages/contracts/src/assets';
+import {
+  apiFlowNodes,
+  type ApiCaseContent,
+} from '../../../packages/contracts/src/domain';
+import { resolveApiRequestInstance } from '../../../packages/contracts/src/api-flow-instance';
+import type { ApiProjectCase } from '../../../packages/contracts/src/api-automation';
 import { testConfigurationListSchema } from '../../../packages/contracts/src/test-configuration';
 import type { TestConfigurationView } from '../../../packages/contracts/src/test-configuration';
 import { api, ApiError, describeError } from './api';
 import { idSchema } from '../../../packages/contracts/src/base';
 import { apiAuthoringVariableIssues } from '../../../packages/contracts/src/api-variable-refs';
+import {
+  bindDiagnosticStep,
+  diagnosticInputBindingSchema,
+  diagnosticReferences,
+} from '../../../packages/contracts/src/api-diagnostic-inputs';
 import { configuredEnvironment } from './api-variable-fields';
 import type { Project } from './types';
 import { uiLayers } from './ui-layers';
@@ -39,6 +49,14 @@ import { RecoveryBlock, RecoveryQueryForm } from './recovery-block';
 type DebugReceipt = z.infer<typeof debugStartReceiptSchema>;
 type DebugTrace = z.infer<typeof debugTraceSchema>;
 type Attempt = z.infer<typeof apiAttemptDetailSchema>['attempt'];
+interface DiagnosticFormValues {
+  environmentId: string;
+  dataRowId?: string;
+  dataRowIds?: string[];
+  productBuild: string;
+  repeatCount?: number;
+  bindingSources?: Record<string, string>;
+}
 export interface DiagnosticDraft {
   content: ApiCaseContent;
   sourceCaseId: string | null;
@@ -97,7 +115,7 @@ export function ApiDraftDebugger({
   draft: DiagnosticDraft | null;
   restoration?: DiagnosticRestoration | null;
   userId?: string;
-  onQualified?: (asset: Asset) => Promise<void> | void;
+  onQualified?: (asset: ApiProjectCase) => Promise<void> | void;
   onClose: () => void;
   candidateCurrent?: boolean;
   expectedCaseId?: string;
@@ -115,16 +133,16 @@ export function ApiDraftDebugger({
   const [trace, setTrace] = useState<DebugTrace | null>(null);
   const [restoredRunId, setRestoredRunId] = useState<string | null>(null);
   const [attempt, setAttempt] = useState<Attempt | null>(null);
+  const [runItemId, setRunItemId] = useState<string>();
   const firstAttempt = useRef<string | undefined>(undefined);
   const [attemptLoading, setAttemptLoading] = useState(false);
   const [receiptStatus, setReceiptStatus] = useState<string>();
   const [qualificationCommand, setQualificationCommand] = useState<string>();
   const [savingQualification, setSavingQualification] = useState(false);
-  const [form] = Form.useForm<{
-    environmentId: string;
-    dataRowId?: string;
-    productBuild: string;
-  }>();
+  const [form] = Form.useForm<DiagnosticFormValues>();
+  const selectedSingleRow = Form.useWatch('dataRowId', form);
+  const selectedFullRows = Form.useWatch('dataRowIds', form);
+  const repetitions = Form.useWatch('repeatCount', form) ?? 1;
   useEffect(() => {
     onBusyChange?.(pending || savingQualification);
     return () => onBusyChange?.(false);
@@ -190,6 +208,7 @@ export function ApiDraftDebugger({
     setTrace(null);
     setRestoredRunId(restoration?.kind === 'run' ? restoration.id : null);
     setAttempt(null);
+    setRunItemId(undefined);
     firstAttempt.current = undefined;
     setReceiptStatus(undefined);
     setUncertain(Boolean(originalLocator));
@@ -324,11 +343,7 @@ export function ApiDraftDebugger({
     firstAttempt.current = trace.runId;
     void readAttempt(selected.id);
   }, [trace?.runId, trace?.steps.length]);
-  async function start(values: {
-    environmentId: string;
-    dataRowId?: string;
-    productBuild: string;
-  }) {
+  async function start(values: DiagnosticFormValues) {
     if (!draft || pending || receipt || uncertain) return;
     const generation = epoch.current;
     setPending(true);
@@ -338,12 +353,45 @@ export function ApiDraftDebugger({
       const selected = environments.find(
         (entry) => entry.id === values.environmentId,
       );
-      const configurationCandidate = draft.stepId
+      const bindings = Object.entries(values.bindingSources ?? {}).flatMap(
+        ([reference, locator]) => {
+          if (!locator) return [];
+          const [source, variable] = locator.split(':');
+          return [
+            diagnosticInputBindingSchema.parse({ reference, source, variable }),
+          ];
+        },
+      );
+      const requestedStep = draft.content.steps.find(
+        (step) => step.stepId === draft.stepId,
+      );
+      const selectedRow = draft.content.dataRows?.find(
+        (row) =>
+          row.enabled !== false &&
+          (!values.dataRowId || row.id === values.dataRowId),
+      );
+      const binding = requestedStep
+        ? bindDiagnosticStep(
+            requestedStep,
+            draft.content.variables,
+            selectedRow,
+            bindings,
+          )
+        : undefined;
+      const configurationCandidate = binding
         ? {
             ...draft.content,
-            steps: draft.content.steps.filter(
-              (step) => step.stepId === draft.stepId,
-            ),
+            steps: [binding.step],
+            variables: binding.variables,
+            dataRows: selectedRow ? [selectedRow] : undefined,
+            flow: [
+              {
+                type: 'request' as const,
+                nodeId: binding.step.stepId,
+                stepId: binding.step.stepId,
+                name: binding.step.name,
+              },
+            ],
             preparations: undefined,
             cleanup: { mode: 'none' as const },
           }
@@ -358,10 +406,17 @@ export function ApiDraftDebugger({
         commandId: commandId.current,
         environmentId: values.environmentId,
         ...(values.dataRowId ? { dataRowId: values.dataRowId } : {}),
+        ...(values.dataRowIds?.length ? { dataRowIds: values.dataRowIds } : {}),
         productBuild: values.productBuild?.trim() || null,
         sourceCaseId: draft.sourceCaseId,
         sourceCaseRevisionId: draft.sourceCaseRevisionId,
         ...(draft.stepId ? { stepId: draft.stepId } : {}),
+        ...(!draft.stepId && values.repeatCount && values.repeatCount > 1
+          ? { repeatCount: values.repeatCount }
+          : {}),
+        ...(draft.stepId && bindings.length
+          ? { diagnosticBindings: bindings }
+          : {}),
         content: draft.content,
       });
       if (diagnosticRecoveryKey) {
@@ -401,6 +456,29 @@ export function ApiDraftDebugger({
     draft?.content.cleanup.mode === 'none' ? 'notConfigured' : 'succeeded';
   const singleStep =
     draft?.stepId ?? trace?.scope.diagnosticStepId ?? receipt?.diagnosticStepId;
+  const enabledRows =
+    draft?.content.dataRows?.filter((row) => row.enabled !== false) ?? [];
+  const boundRow =
+    enabledRows.find((row) => row.id === selectedSingleRow) ?? enabledRows[0];
+  const stepForInputs = draft?.content.steps.find(
+    (step) => step.stepId === draft.stepId,
+  );
+  const bindingOptions = [
+    ...Object.keys(draft?.content.variables ?? {}).map((variable) => ({
+      value: 'case:' + variable,
+      label: '用例变量 · ' + variable,
+    })),
+    ...Object.keys(boundRow?.values ?? {}).map((variable) => ({
+      value: 'row:' + variable,
+      label: '所选数据行 · ' + variable,
+    })),
+  ];
+  const diagnosticInputReferences = stepForInputs
+    ? diagnosticReferences(stepForInputs)
+    : [];
+  const selectedRowsCount = singleStep
+    ? 1
+    : selectedFullRows?.length || enabledRows.length || 1;
   const eligible =
     singleStep === undefined &&
     !restoredFromLocator &&
@@ -416,10 +494,13 @@ export function ApiDraftDebugger({
     trace?.state === 'completed' &&
     trace.qualificationEnvironment === true &&
     trace.scope.items[0]?.caseId === draft?.sourceCaseId &&
-    trace.facts.length === 1 &&
-    trace.facts[0]?.originalOutcome === 'passed' &&
-    trace.facts[0].cleanupState === expectedCleanup &&
-    trace.facts[0].sideEffectCertainty !== 'unknown';
+    trace.facts.length === trace.scope.items.length &&
+    trace.facts.every(
+      (fact) =>
+        fact.originalOutcome === 'passed' &&
+        fact.cleanupState === expectedCleanup &&
+        fact.sideEffectCertainty !== 'unknown',
+    );
   function clearQualificationRecovery() {
     setQualificationCommand(undefined);
     if (qualificationRecoveryKey) {
@@ -558,7 +639,7 @@ export function ApiDraftDebugger({
         }
         description={
           singleStep
-            ? '只执行所选步骤，按项目配置处理必要认证。不会执行准备、前序步骤和清理。需要的前序变量无法解析时不发送请求，单步结果不能用于回归资格。'
+            ? '只发送所选步骤，按项目配置处理必要认证。前序输入可选择用例变量或所选数据行。单步结果用于定位问题。'
             : '当前候选已固定。所选环境认可且完整调试通过后可保存为可回归。业务请求和清理遵循当前执行策略。'
         }
       />
@@ -591,22 +672,76 @@ export function ApiDraftDebugger({
               placeholder="请选择已确认的隔离目标"
             />
           </Form.Item>
-          {draft.content.dataRows?.length ? (
+          {enabledRows.length && draft.stepId ? (
             <Form.Item
               name="dataRowId"
               label="本轮调试数据行"
-              initialValue={draft.content.dataRows[0]?.id}
+              initialValue={enabledRows[0]?.id}
               rules={[{ required: true }]}
             >
               <Select
                 disabled={pending || Boolean(receipt) || uncertain}
-                options={draft.content.dataRows.map((row) => ({
+                options={enabledRows.map((row) => ({
                   value: row.id,
                   label: `${row.name} · ${row.id}`,
                 }))}
               />
             </Form.Item>
+          ) : enabledRows.length ? (
+            <Form.Item
+              name="dataRowIds"
+              label="本轮调试数据行（留空则运行全部）"
+            >
+              <Select
+                mode="multiple"
+                disabled={pending || Boolean(receipt) || uncertain}
+                options={enabledRows.map((row) => ({
+                  value: row.id,
+                  label: row.name,
+                }))}
+              />
+            </Form.Item>
           ) : null}
+          {!singleStep && (
+            <Form.Item name="repeatCount" initialValue={1} label="每行执行次数">
+              <InputNumber
+                min={1}
+                max={10}
+                precision={0}
+                disabled={pending || Boolean(receipt) || uncertain}
+              />
+            </Form.Item>
+          )}
+          {singleStep &&
+            diagnosticInputReferences.length > 0 &&
+            bindingOptions.length > 0 && (
+              <Collapse
+                items={[
+                  {
+                    key: 'bind-inputs',
+                    label: '选择本次单步输入来源',
+                    children: diagnosticInputReferences.map((reference) => (
+                      <Form.Item
+                        key={reference}
+                        name={['bindingSources', reference]}
+                        label={reference}
+                      >
+                        <Select
+                          allowClear
+                          options={bindingOptions}
+                          placeholder="按当前变量解析"
+                          disabled={pending || Boolean(receipt) || uncertain}
+                        />
+                      </Form.Item>
+                    )),
+                  },
+                ]}
+              />
+            )}
+          <div className="muted">
+            串行执行 {selectedRowsCount} 行 × {singleStep ? 1 : repetitions}{' '}
+            次。业务失败后停止当前执行项的后续步骤，保留各步骤可见证据。
+          </div>
           <Form.Item name="productBuild" label="被测版本/构建标识（可留空）">
             <Input
               maxLength={200}
@@ -647,12 +782,17 @@ export function ApiDraftDebugger({
     </Space>
   );
   const selecting = Boolean(draft && !receipt && !restoredRunId && !uncertain);
-  const fact = trace?.facts[0];
+  const scopeItem =
+    trace?.scope.items.find((item) => item.runItemId === runItemId) ??
+    trace?.scope.items[0];
+  const rowSteps =
+    trace?.steps.filter((step) => step.runItemId === scopeItem?.runItemId) ??
+    [];
+  const fact = trace?.facts.find(
+    (item) => item.runItemId === scopeItem?.runItemId,
+  );
   const names = new Map(
-    trace?.scope.items[0]?.content.steps.map((step) => [
-      step.stepId,
-      step.name,
-    ]),
+    scopeItem?.content.steps.map((step) => [step.stepId, step.name]),
   );
   const runId = receipt?.runId ?? restoredRunId;
   const cleanupBody: ReactNode = fact ? (
@@ -665,7 +805,7 @@ export function ApiDraftDebugger({
         副作用确定性{' '}
         {certaintyLabels[fact.sideEffectCertainty] ?? fact.sideEffectCertainty}
       </p>
-      {trace?.steps
+      {rowSteps
         .filter(
           (step) => step.phase === 'cleanupHttp' || step.phase === 'cleanupSql',
         )
@@ -685,9 +825,51 @@ export function ApiDraftDebugger({
   );
   const logBody = trace ? (
     <div className="stack">
+      {scopeItem && fact?.flowTrace && fact.flowTrace.length > 0 && (
+        <details open>
+          <summary>执行流程 · {fact.flowTrace.length} 次访问</summary>
+          <ol>
+            {fact.flowTrace.map((visit, index) => {
+              const node = apiFlowNodes(scopeItem.content.flow).find(
+                (item) => item.nodeId === visit.nodeId,
+              );
+              return (
+                <li key={index}>
+                  {node?.name ?? visit.nodeId}
+                  {visit.decision !== undefined &&
+                    (visit.decision === 'true'
+                      ? ' · 进入满足分支'
+                      : ' · 进入否则分支')}
+                  {visit.count !== undefined && ` · ${visit.count} 次`}
+                  {visit.iterations.length > 0 &&
+                    ` · 迭代 ${visit.iterations.map((row) => row + 1).join('.')}`}
+                  {visit.stageSource && (
+                    <span>
+                      {' · '}
+                      {visit.stageSource.phase === 'pre'
+                        ? '前置'
+                        : '后置'} · {visit.stageSource.title}
+                    </span>
+                  )}
+                  {visit.sharedScriptSource && (
+                    <dl className="api-proof-metadata">
+                      <dt>公共脚本</dt>
+                      <dd>{visit.sharedScriptSource.title}</dd>
+                      <dt>脚本修订 ID</dt>
+                      <dd>
+                        <code>{visit.sharedScriptSource.scriptRevisionId}</code>
+                      </dd>
+                    </dl>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        </details>
+      )}
       <pre className="message-code">
         {JSON.stringify(
-          trace.steps.map(({ id, phase, stepId, state, reason }) => ({
+          rowSteps.map(({ id, phase, stepId, state, reason }) => ({
             id,
             phase,
             stepId,
@@ -819,9 +1001,33 @@ export function ApiDraftDebugger({
             )}
           </div>
         )}
-        {trace && trace.steps.length > 0 && (
+        {trace && trace.scope.items.length > 1 && (
+          <div className="api-proto-proof-toolbar">
+            <Select
+              aria-label="数据行证据"
+              value={scopeItem?.runItemId ?? null}
+              options={trace.scope.items.map((item) => ({
+                value: item.runItemId,
+                label:
+                  (item.dataRow?.name ?? '默认数据') +
+                  (item.repetition ? ` · 第 ${item.repetition} 次` : ''),
+              }))}
+              onChange={(value: string) => {
+                setRunItemId(value);
+                const next =
+                  trace.steps.find(
+                    (step) =>
+                      step.runItemId === value && step.phase === 'business',
+                  ) ?? trace.steps.find((step) => step.runItemId === value);
+                if (next) void readAttempt(next.id);
+                else setAttempt(null);
+              }}
+            />
+          </div>
+        )}
+        {rowSteps.length > 0 && (
           <div className="api-proto-attempts">
-            {trace.steps.map((step, index) => (
+            {rowSteps.map((step, index) => (
               <button
                 key={step.id}
                 type="button"
@@ -900,10 +1106,30 @@ export function ApiDraftDebugger({
               attempt={attempt}
               cleanup={cleanupBody}
               logs={logBody}
-              {...(onRule
+              {...(runId &&
+                attempt.phase === 'business' &&
+                attempt.state === 'completed' &&
+                attempt.send_intent_at && {
+                  catalogDraftHref:
+                    '#api-catalog?' +
+                    new URLSearchParams({
+                      projectId,
+                      diagnosticRunId: runId,
+                      diagnosticAttemptId: attempt.id,
+                    }),
+                })}
+              {...(onRule && receipt && !restoration && !restoredFromLocator
                 ? {
                     onRule: (rule: ResponseRule) =>
-                      onRule(attempt.step_id, rule),
+                      onRule(
+                        (scopeItem &&
+                          resolveApiRequestInstance(
+                            scopeItem.content.flow,
+                            attempt.step_id,
+                          )?.node.stepId) ??
+                          attempt.step_id,
+                        rule,
+                      ),
                   }
                 : {})}
             />

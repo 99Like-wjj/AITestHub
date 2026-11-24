@@ -20,7 +20,11 @@ import type {
   Database,
   SqlExecutor,
 } from '../../../persistence/src/database.js';
-import { currentUser, requirePlatformAdmin } from '../access/policy.js';
+import {
+  currentUser,
+  listProjectAccess,
+  requirePlatformAdmin,
+} from '../access/policy.js';
 import { audit } from '../events.js';
 import { DomainError, stale } from '../errors.js';
 import {
@@ -172,33 +176,16 @@ export class IdentityService {
 
   async me(actor: ActorContext) {
     return this.db.transaction(async (tx) => {
-      await currentUser(tx, actor);
+      const projects = await listProjectAccess(tx, actor);
       const user = (
         await tx.query<UserRow>('SELECT * FROM app.users WHERE id=$1', [
           actor.userId,
         ])
       ).rows[0];
       if (!user) throw new DomainError('UNAUTHENTICATED', '账号无效。', 401);
-      const projects = await tx.query<{
-        id: string;
-        name: string;
-        is_admin: boolean;
-        roles: ('tester' | 'developer' | 'product')[];
-        row_version: number;
-      }>(
-        `SELECT p.id,p.name,m.is_admin,m.roles,p.row_version FROM app.projects p JOIN app.project_members m
-         ON p.id=m.project_id WHERE m.user_id=$1 AND m.active AND p.active ORDER BY p.created_at,p.id`,
-        [actor.userId],
-      );
       return {
         user: userDto(user),
-        projects: projects.rows.map((p) => ({
-          id: p.id,
-          name: p.name,
-          isAdmin: p.is_admin,
-          roles: p.roles,
-          rowVersion: p.row_version,
-        })),
+        projects: projects.map(({ memberVersion: _memberVersion, ...p }) => p),
       };
     });
   }

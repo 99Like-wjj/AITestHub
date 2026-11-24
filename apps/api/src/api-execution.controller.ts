@@ -91,13 +91,11 @@ export class ApiExecutionController {
       (!authorization.startsWith('Bearer ') || authorization.length > 512)
     )
       throw new DomainError('UNAUTHENTICATED', '认证格式无效。', 401);
-    const authenticate = () =>
-      this.identity.authenticate(
-        session,
-        authorization?.slice(7),
-        String(res.locals.requestId),
-      );
-    const actor = await authenticate();
+    const actor = await this.identity.authenticate(
+      session,
+      authorization?.slice(7),
+      String(res.locals.requestId),
+    );
     if (actor.entrypoint !== 'web')
       throw new DomainError('FORBIDDEN', '个人Key请使用官方MCP。', 403);
     if (path === 'debug-history' && req.method === 'GET')
@@ -144,7 +142,7 @@ export class ApiExecutionController {
         ),
       );
     const route =
-      /^([^/]+)(?:\/(events|stream|stop|attempts|debug-result|trace)(?:\/([^/]+))?)?$/.exec(
+      /^([^/]+)\/(events|stop|attempts|debug-result|trace)(?:\/([^/]+))?$/.exec(
         path,
       );
     const stopReceipt = /^([^/]+)\/stop-receipts\/([^/]+)$/.exec(path);
@@ -159,8 +157,6 @@ export class ApiExecutionController {
       );
     if (route?.[1]) {
       const runId = idSchema.parse(route[1]);
-      if (!route[2] && req.method === 'GET')
-        return res.json(await this.service.status(actor, projectId, runId));
       if (route[2] === 'debug-result' && req.method === 'GET')
         return res.json(
           await this.service.debug.trace(actor, projectId, runId),
@@ -201,57 +197,6 @@ export class ApiExecutionController {
               .parse(req.query.after ?? 0),
           ),
         );
-      if (route[2] === 'stream' && req.method === 'GET') {
-        let after = z.coerce
-          .number()
-          .int()
-          .min(0)
-          .max(Number.MAX_SAFE_INTEGER)
-          .parse(req.header('last-event-id') ?? req.query.after ?? 0);
-        await this.service.events(actor, projectId, runId, after);
-        res.status(200).set({
-          'content-type': 'text/event-stream',
-          'cache-control': 'no-store',
-          connection: 'keep-alive',
-        });
-        res.flushHeaders();
-        let busy = false;
-        let ticks = 0;
-        const poll = async () => {
-          if (busy) return;
-          busy = true;
-          try {
-            const current = await authenticate();
-            const result = await this.service.events(
-              current,
-              projectId,
-              runId,
-              after,
-            );
-            for (const event of result.events) {
-              after = Number(event.sequence);
-              res.write(
-                `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-              );
-            }
-            if (++ticks % 15 === 0) res.write(': heartbeat\n\n');
-          } catch {
-            clearInterval(timer);
-            res.write(
-              'event: access-ended\ndata: {"code":"ACCESS_CHANGED"}\n\n',
-            );
-            res.end();
-          } finally {
-            busy = false;
-          }
-        };
-        const timer = setInterval(() => {
-          void poll();
-        }, 1000);
-        res.once('close', () => clearInterval(timer));
-        void poll();
-        return;
-      }
     }
     throw new DomainError('NOT_FOUND', '没有此接口执行操作。', 404);
   }

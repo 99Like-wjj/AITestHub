@@ -7,7 +7,10 @@ import {
   type RuntimeVariables,
   type SafeResponse,
 } from '../../../packages/contracts/src/api-execution.js';
-import { multipartTransportSchema } from '../../../packages/contracts/src/api-multipart.js';
+import {
+  multipartAttachmentSchema,
+  multipartTransportSchema,
+} from '../../../packages/contracts/src/api-multipart.js';
 import {
   apiRequestStepSchema,
   assertionSchema,
@@ -18,12 +21,14 @@ import {
   extractVariables,
   nonEmpty,
   readPath,
+  readAssertionObservation,
   type RawObservation,
 } from '../../../packages/application/src/api-execution/expressions.js';
 import {
   isSensitiveName,
   redact,
   redactExtraction,
+  redactResponse,
   redactWithPaths,
   validSensitiveExtraction,
 } from '../../../packages/application/src/api-execution/redaction.js';
@@ -31,6 +36,13 @@ import { runIsolatedScript, ScriptExecutionError } from './script-runtime.js';
 import { evaluateRegex } from './regex-runtime.js';
 import { performTransport, type RawTransportResponse } from './transport.js';
 import { WorkerClient, WorkerProtocolError } from './client.js';
+import { executeApiFlow } from './flow-runtime.js';
+import { apiInterfaceResponseContractSchema } from '../../../packages/contracts/src/api-catalog.js';
+import {
+  apiDatabaseReadPrefix,
+  apiRequestInstanceId,
+  type ApiFlowVisit,
+} from '../../../packages/contracts/src/api-flow-instance.js';
 
 const permitSchema = z.discriminatedUnion('send', [
   z.object({
@@ -40,6 +52,7 @@ const permitSchema = z.discriminatedUnion('send', [
     protectedValues: z.array(z.string()),
     responseMetadataOnly: z.boolean().optional(),
     assertions: z.array(assertionSchema).optional(),
+    responseContract: apiInterfaceResponseContractSchema.optional(),
     authExtractor: z
       .strictObject({
         source: z.enum(['json', 'header', 'body']),
@@ -60,10 +73,12 @@ const httpSchema = z.strictObject({
   headers: z.record(z.string(), z.string()),
   body: z.string().nullable(),
   multipart: multipartTransportSchema.optional(),
+  binary: multipartAttachmentSchema.optional(),
   timeoutMs: z.number().int().min(1).max(120000),
 });
 const sqlSchema = z.strictObject({
   type: z.literal('sql'),
+  mode: z.literal('read').optional(),
   driver: z.enum(['postgresql', 'mysql']),
   host: z.string(),
   port: z.number().int(),
@@ -126,17 +141,25 @@ function safeResponse(
   const parsed = z
     .strictObject({ headers: z.record(z.string(), z.string()), body: z.json() })
     .parse(filtered);
-  return {
-    status: raw.status,
-    headers: parsed.headers,
-    body: parsed.body,
-    elapsedMs: raw.elapsedMs,
-    ...(raw.receivedBytes === undefined
-      ? {}
-      : { receivedBytes: raw.receivedBytes }),
-    errorCode: raw.errorCode,
-    redactionVersion: 'ath.api-redaction.v1',
-  };
+  return redactResponse(
+    {
+      status: raw.status,
+      headers: parsed.headers,
+      body: parsed.body,
+      ...(raw.rawBody !== undefined &&
+      JSON.stringify(parsed.body) === JSON.stringify(raw.body)
+        ? { rawBody: raw.rawBody }
+        : {}),
+      ...(raw.cookieSummary ? { cookieSummary: raw.cookieSummary } : {}),
+      elapsedMs: raw.elapsedMs,
+      ...(raw.receivedBytes === undefined
+        ? {}
+        : { receivedBytes: raw.receivedBytes }),
+      errorCode: raw.errorCode,
+      redactionVersion: 'ath.api-redaction.v1',
+    },
+    values,
+  );
 }
 function scriptRequest(step: z.infer<typeof apiRequestStepSchema>): JsonValue {
   return {
@@ -156,23 +179,21 @@ type EvaluatedAssertion = {
   passed: boolean;
   message: string;
   check?: Assertion;
+  contractObservation?: boolean;
 };
 function comparisonFor(
   check: Assertion,
   safe: SafeResponse,
   secrets: readonly string[],
   passed: boolean,
+  contractObservation?: boolean,
 ): AssertionEvidence['comparison'] {
   if (check.source === 'variable') return undefined;
   const path = check.path ?? '';
   const observed =
-    check.source === 'status'
-      ? safe.status
-      : check.source === 'json'
-        ? readPath(safe.body, path)
-        : check.source === 'header'
-          ? safe.headers[path.toLowerCase()]
-          : safe.body;
+    check.source === 'contract'
+      ? contractObservation
+      : readAssertionObservation(check, safe, { case: {}, extract: {} });
   const preview = (value: unknown) => {
     if (isSensitiveName(path)) return '[REDACTED]';
     if (value === undefined) return '未读取到';
@@ -190,7 +211,15 @@ function comparisonFor(
     id: String(redact(check.id, secrets)).slice(0, 200),
     field: String(
       redact(
-        path || (check.source === 'status' ? 'HTTP 状态' : '响应正文'),
+        path ||
+          (
+            {
+              status: 'HTTP 状态',
+              elapsedMs: '响应耗时（毫秒）',
+              contract: '响应契约',
+            } as Partial<Record<string, string>>
+          )[check.source] ||
+          '响应正文',
         secrets,
       ),
     ).slice(0, 2000),
@@ -214,26 +243,24 @@ async function assertionsFor(
     if (assertion.operator !== 'matches') {
       results.push(
         ...evaluateAssertions([assertion], response, variables).map(
-          (result) => ({ ...result, check: assertion }),
+          (result) => {
+            const actual =
+              assertion.source === 'contract'
+                ? readAssertionObservation(assertion, response, variables)
+                : undefined;
+            return {
+              ...result,
+              check: assertion,
+              ...(typeof actual === 'boolean'
+                ? { contractObservation: actual }
+                : {}),
+            };
+          },
         ),
       );
       continue;
     }
-    let actual: unknown;
-    if (assertion.source === 'status') actual = response.status;
-    else if (assertion.source === 'body')
-      actual =
-        typeof response.body === 'string'
-          ? response.body
-          : JSON.stringify(response.body);
-    else if (assertion.source === 'header')
-      actual = response.headers[(assertion.path ?? '').toLowerCase()];
-    else if (assertion.source === 'variable')
-      actual = readPath(
-        { case: variables.case, extract: variables.extract },
-        assertion.path ?? '',
-      );
-    else actual = readPath(response.body, assertion.path ?? '');
+    const actual = readAssertionObservation(assertion, response, variables);
     const passed =
       typeof actual === 'string' &&
       typeof assertion.expected === 'string' &&
@@ -308,11 +335,14 @@ export async function runAssigned(
         extract: {},
       };
       const rawExtracts: Record<string, JsonValue> = {};
+      const stepOutputs: Record<string, JsonValue> = Object.create(null);
+      const flowTrace: ApiFlowVisit[] = [];
       const protectedValues = new Set<string>();
       const extractPaths = new Map<string, string[]>();
       let businessFailed = false;
       let responseAssertionCount = 0;
       let businessReason = '已审业务断言满足。';
+      let flowOutcome: 'passed' | 'failed' | undefined;
       const mergeVariables = (patch: Record<string, JsonValue>) => {
         for (const [name, value] of Object.entries(patch)) {
           if (['__proto__', 'constructor', 'prototype'].includes(name))
@@ -337,6 +367,7 @@ export async function runAssigned(
           env: entry.environment,
           case: variables.case,
           extract: extractionShadow,
+          steps: stepOutputs,
           request: scriptRequest(step),
           ...(response
             ? {
@@ -368,8 +399,9 @@ export async function runAssigned(
       const ensureAuth = async (
         phase: 'business' | 'cleanupHttp',
         stepId: string,
+        definitionStepId = stepId,
       ) => {
-        const authentication = entry.auth[`${phase}:${stepId}`];
+        const authentication = entry.auth[`${phase}:${definitionStepId}`];
         if (authentication?.mode !== 'login') return true;
         const permit = permitSchema.parse(
           await client.authorize(grant, {
@@ -379,6 +411,8 @@ export async function runAssigned(
             forPhase: phase,
             forStepId: stepId,
             variables,
+            flowTrace,
+            ...(flowOutcome ? { flowOutcome } : {}),
           }),
         );
         if (!permit.send) return permit.state === 'completed';
@@ -445,6 +479,7 @@ export async function runAssigned(
             !(await ensureAuth(
               phase === 'business' ? 'business' : 'cleanupHttp',
               stepId,
+              phase === 'business' ? step.stepId : stepId,
             ))
           )
             throw new WorkerProtocolError('AUTHENTICATION_FAILED');
@@ -455,6 +490,8 @@ export async function runAssigned(
             phase,
             stepId,
             variables,
+            flowTrace,
+            ...(flowOutcome ? { flowOutcome } : {}),
           }),
         );
         if (!permit.send) {
@@ -505,10 +542,16 @@ export async function runAssigned(
           try {
             assertions = await assertionsFor(
               permit.assertions ?? step.assertions,
-              raw,
+              {
+                ...raw,
+                ...(permit.responseContract
+                  ? { responseContract: permit.responseContract }
+                  : {}),
+              },
               {
                 case: variables.case,
                 extract: rawExtracts,
+                steps: stepOutputs,
               },
             );
             if (assertions.some((assertion) => !assertion.passed)) {
@@ -600,6 +643,7 @@ export async function runAssigned(
                   response,
                   secrets,
                   assertion.passed,
+                  assertion.contractObservation,
                 )
               : undefined;
             return {
@@ -622,45 +666,122 @@ export async function runAssigned(
           }),
         );
         Object.assign(variables.extract, receipt.extractions);
+        if (phase === 'business' && step && passed) {
+          stepOutputs[step.stepId] = {
+            response: {
+              status: response.status,
+              headers: response.headers,
+              body: response.body,
+              elapsedMs: response.elapsedMs,
+            },
+          };
+        }
         for (const value of receipt.protectedValues ?? [])
           protectedValues.add(value);
-        return { passed, skipped: false };
+        return { passed, skipped: false, response };
       };
-      for (const step of content.steps) {
-        try {
-          const result = await execute('business', step.stepId, step);
-          if (!result.passed) {
-            businessFailed = true;
-            businessReason = '业务请求/提取/断言未满足；后续业务步骤未发送。';
-            break;
-          }
-        } catch (error: unknown) {
-          if (
-            error instanceof WorkerProtocolError &&
-            [
-              'CONTROL_UNAVAILABLE',
-              'CONTROL_RESPONSE_INVALID',
-              'WORKER_OWNERSHIP_UNCERTAIN',
-              'SEND_PERMIT_ALREADY_CONSUMED',
-            ].includes(error.code)
-          )
-            throw error;
-          businessFailed = true;
-          businessReason = stableCode(error);
-          await client.localFailure(grant, {
-            runItemId: entry.scopeItem.runItemId,
-            phase: 'business',
-            stepId: step.stepId,
-            code: businessReason,
-            reason: businessReason,
-          });
-          break;
-        }
+      const fatalWorkerError = (error: unknown) =>
+        error instanceof WorkerProtocolError &&
+        [
+          'CONTROL_UNAVAILABLE',
+          'CONTROL_RESPONSE_INVALID',
+          'WORKER_OWNERSHIP_UNCERTAIN',
+          'SEND_PERMIT_ALREADY_CONSUMED',
+        ].includes(error.code);
+      try {
+        businessFailed = !(await executeApiFlow(content.flow, {
+          variables: variables.case,
+          context: () => ({
+            env: entry.environment,
+            ...variables,
+            steps: stepOutputs,
+          }),
+          assertLive,
+          visit: (entry) => flowTrace.push(entry),
+          ...(options.signal ? { signal: options.signal } : {}),
+          request: async (id, instanceId) => {
+            const step = content.steps.find((step) => step.stepId === id);
+            if (!step) throw new WorkerProtocolError('FLOW_REQUEST_NOT_FROZEN');
+            try {
+              const result = await execute('business', instanceId, step);
+              if (!result.passed)
+                businessReason =
+                  '业务请求/提取/断言未满足；后续业务步骤未发送。';
+              return result.passed;
+            } catch (error: unknown) {
+              if (fatalWorkerError(error)) throw error;
+              businessReason = stableCode(error);
+              await client.localFailure(grant, {
+                runItemId: entry.scopeItem.runItemId,
+                phase: 'business',
+                stepId: instanceId,
+                code: businessReason,
+                reason: businessReason,
+              });
+              return false;
+            }
+          },
+          script: async (node) => {
+            const stepId = node.stageSource?.requestStepId;
+            const request = stepId
+              ? content.steps.find((step) => step.stepId === stepId)
+              : undefined;
+            const response =
+              stepId && node.stageSource?.phase === 'post'
+                ? readPath(stepOutputs[stepId], 'response')
+                : undefined;
+            const safe = redactWithPaths(
+              {
+                env: entry.environment,
+                ...variables,
+                steps: stepOutputs,
+                ...(request ? { request: scriptRequest(request) } : {}),
+                ...(response === undefined
+                  ? {}
+                  : { response: z.json().parse(response) }),
+              },
+              [...protectedValues],
+            );
+            const inherited = [...extractPaths].flatMap(([name, paths]) =>
+              paths.map((path) => `/extract/${pointer(name)}${path}`),
+            );
+            const script = await runIsolatedScript(node.script, safe.value, {
+              protectedPaths: [
+                ...new Set([...safe.protectedPaths, ...inherited]),
+              ],
+              ...(options.signal ? { signal: options.signal } : {}),
+            });
+            mergeVariables(script.variables);
+            if (script.assertions.some((assertion) => !assertion.passed)) {
+              businessReason = `${node.name}：编排脚本断言未满足。`;
+              return false;
+            }
+            return true;
+          },
+          databaseRead: async (node, iterations) => {
+            const instanceId = apiRequestInstanceId(
+              apiDatabaseReadPrefix + node.nodeId,
+              iterations,
+            );
+            const result = await execute('business', instanceId);
+            if (!result.passed || !result.response) {
+              businessReason = '已登记数据库查询未取得结果。';
+              return false;
+            }
+            variables.case[node.resultVariable] = result.response.body;
+            return true;
+          },
+        }));
+      } catch (error: unknown) {
+        if (fatalWorkerError(error)) throw error;
+        businessFailed = true;
+        businessReason = stableCode(error);
       }
       if (!businessFailed && responseAssertionCount === 0) {
         businessFailed = true;
         businessReason = 'ASSERTION_MISSING';
       }
+      flowOutcome = businessFailed ? 'failed' : 'passed';
       if (
         content.cleanup.mode !== 'none' &&
         (content.cleanup.mode === 'always' || !businessFailed)
@@ -676,6 +797,7 @@ export async function runAssigned(
                         env: entry.environment,
                         case: variables.case,
                         extract: variables.extract,
+                        steps: stepOutputs,
                       },
                       path,
                     ),
@@ -723,6 +845,7 @@ export async function runAssigned(
         runItemId: entry.scopeItem.runItemId,
         outcome: businessFailed ? 'failed' : 'passed',
         reason: businessReason,
+        flowTrace,
       });
     }
     return await client.finish(grant);

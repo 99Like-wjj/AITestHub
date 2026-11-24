@@ -83,12 +83,15 @@ export class AssetsController {
         await this.assets.list(
           actor,
           projectId,
-          assetListQuerySchema
-            .extend({
-              includeRemoved: booleanQueryValue(false),
-              includeArchivedRequirements: booleanQueryValue(true),
-            })
-            .parse(req.query),
+          assetListQuerySchema.parse({
+            ...req.query,
+            includeRemoved: booleanQueryValue(false).parse(
+              req.query.includeRemoved,
+            ),
+            includeArchivedRequirements: booleanQueryValue(true).parse(
+              req.query.includeArchivedRequirements,
+            ),
+          }),
         ),
       );
     if (path === 'navigation' && req.method === 'GET') {
@@ -118,10 +121,49 @@ export class AssetsController {
       return res
         .status(201)
         .json(await this.assets.createScenario(actor, projectId, req.body));
+    if (path === 'scoped-scenes' && req.method === 'POST')
+      return res
+        .status(201)
+        .json(await this.assets.createScopedScene(actor, projectId, req.body));
+    const scopedScene = /^([^/]+)\/scoped-scene$/.exec(path)?.[1];
+    if (scopedScene && req.method === 'GET')
+      return res.json(
+        await this.assets.scopedSceneRemovalPreview(
+          actor,
+          projectId,
+          idSchema.parse(scopedScene),
+        ),
+      );
+    if (scopedScene && req.method === 'DELETE')
+      return res.json(
+        await this.assets.removeScopedScene(
+          actor,
+          projectId,
+          idSchema.parse(scopedScene),
+          req.body,
+        ),
+      );
     if (path === 'scoped-cases' && req.method === 'POST')
       return res
         .status(201)
         .json(await this.assets.createScopedCase(actor, projectId, req.body));
+    if (path === 'ui-import-previews' && req.method === 'POST')
+      return res.json(
+        await this.assets.previewUiCaseImport(actor, projectId, req.body),
+      );
+    if (path === 'ui-imports' && req.method === 'POST')
+      return res.json(
+        await this.assets.importUiCases(actor, projectId, req.body),
+      );
+    const importReceipt = /^ui-imports\/receipts\/([^/]+)$/.exec(path)?.[1];
+    if (importReceipt && req.method === 'GET')
+      return res.json(
+        await this.assets.uiCaseImportReceipt(
+          actor,
+          projectId,
+          commandIdSchema.parse(decodeURIComponent(importReceipt)),
+        ),
+      );
     if (path === 'submissions' && req.method === 'POST')
       return res.json(await this.assets.submit(actor, projectId, req.body));
     if (path === 'approval-previews' && req.method === 'POST')
@@ -141,24 +183,35 @@ export class AssetsController {
     }
     if (path === 'approve' && req.method === 'POST')
       return res.json(await this.reviews.commit(actor, projectId, req.body));
-    if (path === 'ui-case-review-stages' && req.method === 'GET')
+    if (
+      (path === 'ui-case-review-stages' || path === 'ui-review-meetings') &&
+      req.method === 'GET'
+    ) {
+      const requirementId = idSchema.optional().parse(req.query.requirementId);
+      const versionId =
+        idSchema.optional().parse(req.query.requirementVersionId) ?? null;
+      if (Boolean(requirementId) === Boolean(versionId))
+        throw new DomainError(
+          'VALIDATION_ERROR',
+          '请选择需求或固定历史范围。',
+          400,
+        );
+      const review = new UiReviewService(this.assets.db);
+      if (path === 'ui-case-review-stages')
+        return res.json(
+          await review.stages(actor, projectId, versionId, requirementId),
+        );
       return res.json(
-        await new UiReviewService(this.assets.db).stages(
+        await review.list(
           actor,
           projectId,
-          idSchema.parse(req.query.requirementVersionId),
-        ),
-      );
-    if (path === 'ui-review-meetings' && req.method === 'GET')
-      return res.json(
-        await new UiReviewService(this.assets.db).list(
-          actor,
-          projectId,
-          idSchema.parse(req.query.requirementVersionId),
+          versionId,
           idSchema.optional().parse(req.query.caseId),
           booleanQueryValue(false).parse(req.query.archived),
+          requirementId,
         ),
       );
+    }
     if (path === 'ui-review-meetings' && req.method === 'POST')
       return res
         .status(201)

@@ -38,6 +38,8 @@ import { TestConfigurationController } from './test-configuration.controller.js'
 import { AssetService } from '../../../packages/application/src/assets/service.js';
 import { ReviewService } from '../../../packages/application/src/assets/reviews.js';
 import { AssetsController } from './assets.controller.js';
+import { ApiAssetsController } from './api-assets.controller.js';
+import { BusinessToolRegistry } from '../../../packages/application/src/tool-registry/registry.js';
 import { PlanService } from '../../../packages/application/src/plans/service.js';
 import { PlansController } from './plans.controller.js';
 import { UiExecutionService } from '../../../packages/application/src/ui-executions/service.js';
@@ -460,6 +462,7 @@ export async function createApp(db: Database) {
       ConfigurationController,
       TestConfigurationController,
       AssetsController,
+      ApiAssetsController,
       PlansController,
       ResultsController,
       UiDeliveryController,
@@ -507,6 +510,7 @@ export async function createApp(db: Database) {
         useValue: testConfiguration,
       },
       { provide: AssetService, useValue: new AssetService(db) },
+      { provide: BusinessToolRegistry, useValue: businessRegistry },
       { provide: ReviewService, useValue: new ReviewService(db) },
       { provide: PlanService, useValue: plans },
       {

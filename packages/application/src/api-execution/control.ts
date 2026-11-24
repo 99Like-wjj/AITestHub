@@ -9,7 +9,14 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { multipartFileInputSchema } from '../../../contracts/src/api-multipart.js';
 import type { ApiMultipartFiles } from '../files/api-multipart.js';
-import { apiRequestVariableReferences } from '../../../contracts/src/api-variable-refs.js';
+import {
+  apiRequestVariableReferences,
+  apiTemplateReferences,
+} from '../../../contracts/src/api-variable-refs.js';
+import {
+  apiDatabaseReadPrefix,
+  inspectApiFlowTrace,
+} from '../../../contracts/src/api-flow-instance.js';
 import {
   apiCaseCompletionInputSchema,
   apiExecutionStatusSchema,
@@ -18,6 +25,7 @@ import {
   apiStopInputSchema,
   apiStopStatusSchema,
   attemptReceiptInputSchema,
+  safeResponseSchema,
   localStepFailureInputSchema,
   workerActionInputSchema,
   workerInstanceInputSchema,
@@ -30,6 +38,7 @@ import {
 } from '../../../contracts/src/api-execution.js';
 import {
   apiCaseContentSchema,
+  apiFlowNodes,
   resultItemSchema,
   type ResultItem,
 } from '../../../contracts/src/domain.js';
@@ -65,6 +74,8 @@ import {
   validSensitiveExtraction,
 } from './redaction.js';
 import { ApiDebugService } from './debug.js';
+import { getApprovedApiDatabaseRead } from './database-reads.js';
+import { requireApiInterfaceRevision } from '../api-catalog/service.js';
 import { ApiRegressionService } from '../assets/api-regression.js';
 import { assertNewWorkAllowed } from '../recovery/maintenance.js';
 import { hasDispatchFence, recordDispatchFence } from '../recovery/fences.js';
@@ -108,6 +119,21 @@ interface AttemptRow {
 const hash = (value: string) =>
   createHash('sha256').update(value).digest('hex');
 const runSelect = `SELECT r.*,COALESCE(r.origin_key_id,q.origin_key_id) origin_key_id FROM app.runs r LEFT JOIN app.api_execution_requests q ON q.run_id=r.id`;
+const currentApiScope = `CASE WHEN jsonb_typeof(r.scope_snapshot->'items')='array' THEN
+  jsonb_array_length(r.scope_snapshot->'items')>0 AND NOT EXISTS(
+    SELECT 1 FROM jsonb_array_elements(r.scope_snapshot->'items') item
+    WHERE item->'content'->>'dslVersion' IS DISTINCT FROM 'ath.api-case.v2'
+  ) ELSE false END`;
+function requestFilesFor(
+  body: z.infer<typeof apiCaseContentSchema>['steps'][number]['body'],
+) {
+  if (body.format === 'binary') return [body.fileResourceId];
+  return body.format === 'multipart'
+    ? body.parts.flatMap((part) =>
+        part.kind === 'file' ? [part.fileResourceId] : [],
+      )
+    : [];
+}
 const protectedBinding = (itemId: string) => ({
   ownerScope: 'project' as const,
   ownerId: itemId,
@@ -548,6 +574,40 @@ export class ApiExecutionControlService {
         extracts,
         z.record(z.string(), z.json()).parse(attempt.extractions_safe),
       );
+    const steps: Record<string, JsonValue> = Object.create(null);
+    const requestedDefinitions = [
+      ...new Set(
+        requiredReferences.flatMap((reference) => {
+          const id = /^steps\.([A-Za-z0-9_-]+)\.response(?:\.|$)/.exec(
+            reference,
+          )?.[1];
+          return id ? [id] : [];
+        }),
+      ),
+    ];
+    if (requestedDefinitions.length) {
+      const observed = await transaction.query<{
+        definition_id: string;
+        response_safe: unknown;
+      }>(
+        `SELECT DISTINCT ON (split_part(step_id,'~',1)) split_part(step_id,'~',1) definition_id,response_safe
+         FROM app.api_step_attempts WHERE run_item_id=$1 AND state='completed' AND phase='business'
+           AND outcome='passed' AND split_part(step_id,'~',1)=ANY($2::text[])
+         ORDER BY split_part(step_id,'~',1),created_at DESC,id DESC`,
+        [itemId, requestedDefinitions],
+      );
+      for (const attempt of observed.rows) {
+        const response = safeResponseSchema.parse(attempt.response_safe);
+        steps[attempt.definition_id] = {
+          response: {
+            status: response.status,
+            headers: response.headers,
+            body: response.body,
+            elapsedMs: response.elapsedMs,
+          },
+        };
+      }
+    }
     const protectedVariables = await transaction.query<{
       name: string;
       secret_ref: string;
@@ -640,7 +700,7 @@ export class ApiExecutionControlService {
           400,
         );
     return {
-      variables: { case: input.case, extract: extracts },
+      variables: { case: input.case, extract: extracts, steps },
       fromMultipartFile,
     };
   }
@@ -665,6 +725,7 @@ export class ApiExecutionControlService {
       let run = (
         await transaction.query<ExecutionRunRow>(
           `${runSelect} WHERE r.kind='API' AND r.state='prepared' AND ($1::uuid IS NULL OR r.id=$1) AND $2::uuid IS NULL
+        AND ${currentApiScope}
         AND NOT EXISTS(SELECT 1 FROM app.api_worker_grants g WHERE g.run_id=r.id) ORDER BY r.created_at,r.id LIMIT 1 FOR UPDATE OF r SKIP LOCKED`,
           [input.desiredRunId ?? null, input.desiredRequestId ?? null],
         )
@@ -892,7 +953,12 @@ export class ApiExecutionControlService {
     if (row?.state !== 'running')
       throw new DomainError('BUSINESS_CONFLICT', '此用例不是当前活动项。', 409);
   }
-  private async cleanupAllowed(transaction: SqlExecutor, item: ScopeItem) {
+  private async cleanupAllowed(
+    transaction: SqlExecutor,
+    item: ScopeItem,
+    trace: ReturnType<typeof inspectApiFlowTrace>,
+    flowOutcome: 'passed' | 'failed' | undefined,
+  ) {
     const content = apiCaseContentSchema.parse(item.content);
     if (content.cleanup.mode === 'none') return false;
     const attempts = await this.attempts(transaction, item.runItemId);
@@ -913,12 +979,17 @@ export class ApiExecutionControlService {
       attempts.some(
         (entry) => entry.phase === 'auth' && entry.outcome === 'failed',
       );
-    const allPassed = content.steps.every((step) =>
-      business.some(
-        (entry) => entry.step_id === step.stepId && entry.outcome === 'passed',
-      ),
-    );
-    if (!failed && !allPassed)
+    const allPassed =
+      trace?.complete === true &&
+      trace.requests.length === business.length &&
+      business.every(
+        (entry, index) =>
+          entry.step_id === trace.requests[index] && entry.outcome === 'passed',
+      );
+    if (
+      !flowOutcome ||
+      (!allPassed && !(flowOutcome === 'failed' && (business.length || failed)))
+    )
       throw new DomainError(
         'BUSINESS_CONFLICT',
         '业务步骤尚未完成，不能提前清理。',
@@ -931,7 +1002,7 @@ export class ApiExecutionControlService {
     );
     return (
       content.cleanup.mode === 'always' ||
-      (allPassed && !failed && assertionCount > 0)
+      (allPassed && !failed && flowOutcome === 'passed' && assertionCount > 0)
     );
   }
   private async insertLocal(
@@ -1052,14 +1123,7 @@ export class ApiExecutionControlService {
           attempt.phase,
           attempt.step_id,
         );
-        if (
-          body.format !== 'multipart' ||
-          !body.parts.some(
-            (part) =>
-              part.kind === 'file' &&
-              part.fileResourceId === input.fileResourceId,
-          )
-        )
+        if (!requestFilesFor(body).includes(input.fileResourceId))
           throw new DomainError('NOT_FOUND', '原步骤未授权读取请求文件。', 404);
         return files.describe(
           transaction,
@@ -1140,6 +1204,13 @@ export class ApiExecutionControlService {
         );
       const configuration = configurationFor(run, item.caseId);
       const content = apiCaseContentSchema.parse(item.content);
+      const trace = inspectApiFlowTrace(content.flow, input.flowTrace);
+      if (!trace)
+        throw new DomainError(
+          'VALIDATION_ERROR',
+          '编排轨迹不属于本轮冻结范围。',
+          422,
+        );
       const relatedPhase =
         input.phase === 'auth' ? input.forPhase : input.phase;
       const relatedId = input.phase === 'auth' ? input.forStepId : input.stepId;
@@ -1188,29 +1259,33 @@ export class ApiExecutionControlService {
               403,
             );
         }
-        if (isCleanup && !(await this.cleanupAllowed(transaction, item)))
+        if (
+          isCleanup &&
+          !(await this.cleanupAllowed(
+            transaction,
+            item,
+            trace,
+            input.flowOutcome,
+          ))
+        )
           return {
             send: false,
             state: 'skipped',
             reason: '本轮原清理策略不适用。',
           };
         if (relatedPhase === 'business') {
-          const index = content.steps.findIndex(
-            (step) => step.stepId === relatedId,
+          const preceding = trace.requests.slice(0, -1);
+          const priorBusiness = attempts.filter(
+            (entry) => entry.phase === 'business',
           );
           if (
-            index < 0 ||
-            content.steps
-              .slice(0, index)
-              .some(
-                (step) =>
-                  !attempts.some(
-                    (entry) =>
-                      entry.phase === 'business' &&
-                      entry.step_id === step.stepId &&
-                      entry.outcome === 'passed',
-                  ),
-              )
+            trace.requests.at(-1) !== relatedId ||
+            priorBusiness.length !== preceding.length ||
+            priorBusiness.some(
+              (entry, index) =>
+                entry.step_id !== preceding[index] ||
+                entry.outcome !== 'passed',
+            )
           )
             throw new DomainError(
               'PRECONDITIONS_MISSING',
@@ -1224,20 +1299,49 @@ export class ApiExecutionControlService {
                 (step) => step.cleanupStepId === relatedId,
               )
             : undefined;
+        const databaseNodeId =
+          relatedPhase === 'business' &&
+          relatedId.startsWith(apiDatabaseReadPrefix)
+            ? relatedId.slice(apiDatabaseReadPrefix.length).split('~', 1)[0]
+            : undefined;
+        const databaseAction =
+          databaseNodeId &&
+          apiFlowNodes(content.flow).find(
+            (node) =>
+              node.type === 'databaseRead' && node.nodeId === databaseNodeId,
+          );
+        const databaseRead =
+          databaseAction && databaseAction.type === 'databaseRead'
+            ? {
+                node: databaseAction,
+                definition: (
+                  await getApprovedApiDatabaseRead(
+                    transaction,
+                    run.project_id,
+                    databaseAction.queryId,
+                  )
+                ).definition,
+              }
+            : undefined;
         const currentRequest =
-          relatedPhase === 'business' || relatedPhase === 'cleanupHttp'
+          (!databaseRead && relatedPhase === 'business') ||
+          relatedPhase === 'cleanupHttp'
             ? requestFor(content, relatedPhase, relatedId)
             : undefined;
         const actionConfiguration = this.gateway.actionConfiguration(
           configuration,
           currentRequest,
-          cleanupStep?.type === 'sql' ? cleanupStep.connectionId : undefined,
+          databaseRead?.definition.connectionId ??
+            (cleanupStep?.type === 'sql'
+              ? cleanupStep.connectionId
+              : undefined),
         );
         const requestReferences = apiRequestVariableReferences(
           currentRequest,
-        ).filter((reference) => /^(env|case|extract)\./.test(reference));
+        ).filter((reference) => /^(env|case|extract|steps)\./.test(reference));
         const requiredReferences = [
           ...requestReferences,
+          ...apiTemplateReferences(databaseRead?.node.parameters),
           ...(cleanupStep?.type === 'sql'
             ? cleanupStep.parameters.map((parameter) => parameter.valueRef)
             : []),
@@ -1305,6 +1409,7 @@ export class ApiExecutionControlService {
           );
         let transport: WorkerTransport;
         let runtimeAssertions: SendPermit['assertions'];
+        let responseContract: SendPermit['responseContract'];
         let authExtractor: SendPermit['authExtractor'];
         if (input.phase === 'auth') {
           if (relatedPhase !== 'business' && relatedPhase !== 'cleanupHttp')
@@ -1314,16 +1419,13 @@ export class ApiExecutionControlService {
               400,
             );
           const step = requestFor(content, relatedPhase, relatedId);
-          if (step.body.format === 'multipart') {
-            for (const part of step.body.parts)
-              if (part.kind === 'file')
-                await this.requestFiles().describe(
-                  transaction,
-                  runActor(run),
-                  run.project_id,
-                  part.fileResourceId,
-                );
-          }
+          for (const fileId of requestFilesFor(step.body))
+            await this.requestFiles().describe(
+              transaction,
+              runActor(run),
+              run.project_id,
+              fileId,
+            );
           const selected = profileFor(configuration, step);
           if (!selected.cacheKey || selected.cacheKey !== input.stepId)
             throw new DomainError(
@@ -1338,6 +1440,14 @@ export class ApiExecutionControlService {
           );
           transport = login.transport;
           authExtractor = login.extractor;
+        } else if (input.phase === 'business' && databaseRead) {
+          transport = await this.gateway.observeDatabase(
+            actionConfiguration,
+            databaseRead.definition,
+            databaseRead.node.parameters,
+            variables,
+            transaction,
+          );
         } else if (input.phase === 'cleanupSql') {
           if (!cleanupStep || cleanupStep.type !== 'sql')
             throw new DomainError('NOT_FOUND', '没有该SQL清理步骤。', 404);
@@ -1349,6 +1459,32 @@ export class ApiExecutionControlService {
           );
         } else {
           const step = requestFor(content, input.phase, input.stepId);
+          if (
+            step.assertions.some((assertion) => assertion.source === 'contract')
+          ) {
+            if (!step.source)
+              throw new DomainError(
+                'PRECONDITIONS_MISSING',
+                '契约断言需要明确的接口定义修订。',
+                422,
+              );
+            await requireProject(
+              transaction,
+              runActor(run),
+              step.source.projectId,
+              'project.read',
+            );
+            const revision = await requireApiInterfaceRevision(
+              transaction,
+              step.source.projectId,
+              step.source.interfaceId,
+              step.source.revisionId,
+            );
+            responseContract = {
+              responses: revision.definition.responses,
+              models: revision.definition.models,
+            };
+          }
           const selected = profileFor(configuration, step);
           let authToken: string | undefined;
           if (
@@ -1408,8 +1544,10 @@ export class ApiExecutionControlService {
         const responseMetadataOnly =
           fromMultipartFile ||
           (transport.type === 'http' &&
-            transport.multipart?.parts.some((part) => part.kind === 'file') ===
-              true);
+            Boolean(
+              transport.binary ||
+              transport.multipart?.parts.some((part) => part.kind === 'file'),
+            ));
         let requestSafe: JsonValue;
         if (fromMultipartFile) {
           requestSafe = {
@@ -1434,15 +1572,21 @@ export class ApiExecutionControlService {
                     'content-type': 'multipart/form-data',
                   }
                 : transport.headers,
-              body: transport.multipart
+              body: transport.binary
                 ? {
-                    format: 'multipart',
-                    partCount: transport.multipart.parts.length,
-                    fileCount: transport.multipart.parts.filter(
-                      (part) => part.kind === 'file',
-                    ).length,
+                    format: 'binary',
+                    bytes: transport.binary.bytes,
+                    mediaType: transport.headers['content-type'],
                   }
-                : body,
+                : transport.multipart
+                  ? {
+                      format: 'multipart',
+                      partCount: transport.multipart.parts.length,
+                      fileCount: transport.multipart.parts.filter(
+                        (part) => part.kind === 'file',
+                      ).length,
+                    }
+                  : body,
               ...(responseMetadataOnly ? { responseMetadataOnly: true } : {}),
             },
             values,
@@ -1498,6 +1642,7 @@ export class ApiExecutionControlService {
           protectedValues: values,
           ...(responseMetadataOnly ? { responseMetadataOnly: true } : {}),
           ...(runtimeAssertions ? { assertions: runtimeAssertions } : {}),
+          ...(responseContract ? { responseContract } : {}),
           ...(authExtractor ? { authExtractor } : {}),
         };
       } catch (error: unknown) {
@@ -1561,11 +1706,20 @@ export class ApiExecutionControlService {
           '发送结果已进入未知恢复状态，不接受覆盖原事实。',
           409,
         );
+      const databaseObservation =
+        attempt.phase === 'business' &&
+        attempt.step_id.startsWith(apiDatabaseReadPrefix);
       let passed =
         input.passed &&
         input.response.errorCode === null &&
         input.assertions.every((assertion) => assertion.passed) &&
-        (attempt.phase === 'cleanupSql' || input.response.status !== null);
+        (databaseObservation
+          ? input.response.status === null &&
+            input.sideEffectCertainty === 'notApplicable' &&
+            z
+              .object({ rows: z.array(z.json()).max(50) })
+              .safeParse(input.response.body).success
+          : attempt.phase === 'cleanupSql' || input.response.status !== null);
       const content = apiCaseContentSchema.parse(item.content);
       if (attempt.phase === 'auth') {
         passed =
@@ -1626,7 +1780,9 @@ export class ApiExecutionControlService {
         'responseMetadataOnly' in requestProof &&
         requestProof.responseMetadataOnly === true;
       const step =
-        attempt.phase === 'business' || attempt.phase === 'cleanupHttp'
+        (attempt.phase === 'business' &&
+          !attempt.step_id.startsWith(apiDatabaseReadPrefix)) ||
+        attempt.phase === 'cleanupHttp'
           ? requestFor(content, attempt.phase, attempt.step_id)
           : null;
       for (const [name, value] of Object.entries(input.extractions)) {
@@ -1710,6 +1866,14 @@ export class ApiExecutionControlService {
       }
       protectedValues = await this.protection(transaction, item.runItemId);
       let response = redactResponse(input.response, protectedValues);
+      if (attempt.phase === 'auth' || responseMetadataOnly) {
+        const {
+          rawBody: _rawBody,
+          cookieSummary: _cookieSummary,
+          ...protectedResponse
+        } = response;
+        response = protectedResponse;
+      }
       if (attempt.phase === 'auth')
         response = {
           ...response,
@@ -1827,12 +1991,21 @@ export class ApiExecutionControlService {
       const business = attempts.filter(
         (attempt) => attempt.phase === 'business',
       );
-      const allPassed = content.steps.every((step) =>
-        business.some(
-          (attempt) =>
-            attempt.step_id === step.stepId && attempt.outcome === 'passed',
-        ),
-      );
+      const trace = inspectApiFlowTrace(content.flow, input.flowTrace);
+      if (!trace)
+        throw new DomainError(
+          'VALIDATION_ERROR',
+          '编排完成轨迹不属于本轮。',
+          422,
+        );
+      const allPassed =
+        trace.complete &&
+        business.length === trace.requests.length &&
+        business.every(
+          (attempt, index) =>
+            attempt.step_id === trace.requests[index] &&
+            attempt.outcome === 'passed',
+        );
       const assertionCount = business.reduce(
         (count, attempt) =>
           count + z.array(z.unknown()).parse(attempt.assertions_safe).length,
@@ -1897,6 +2070,7 @@ export class ApiExecutionControlService {
         actualObservations: JSON.stringify({
           redactionVersion: 'ath.api-redaction.v1',
           recordedStepCount: attempts.length,
+          flowNodeVisits: input.flowTrace.length,
           summaryItemLimit: 50,
           fullSafeFactsPath: `/api/v1/projects/${run.project_id}/api-executions/${run.id}/events`,
           steps: attempts.slice(0, 50).map((attempt) => ({
@@ -1911,6 +2085,7 @@ export class ApiExecutionControlService {
         }),
         actualActions: attempts
           .filter((attempt) => attempt.send_intent_at !== null)
+          .slice(0, 1000)
           .map((attempt) => `${attempt.phase}:${attempt.step_id}`),
         reason,
         sideEffectCertainty: sideEffect,
@@ -1939,6 +2114,7 @@ export class ApiExecutionControlService {
         outcome: archivedOutcome,
         cleanupState,
         sideEffectCertainty: sideEffect,
+        flowTrace: input.flowTrace,
       });
       await this.revokeItemSecrets(transaction, item.runItemId);
       return { recorded: true, outcome: archivedOutcome, cleanupState };
@@ -2160,7 +2336,8 @@ export class ApiExecutionControlService {
         ExecutionRunRow & { grant_id: string }
       >(`SELECT r.*,COALESCE(r.origin_key_id,q.origin_key_id) origin_key_id,g.id grant_id FROM app.runs r
         LEFT JOIN app.api_execution_requests q ON q.run_id=r.id JOIN app.api_worker_grants g ON g.run_id=r.id
-        WHERE g.revoked_at IS NULL AND g.expires_at<=clock_timestamp() AND r.state IN ('prepared','running','stopping') FOR UPDATE OF r,g SKIP LOCKED`);
+        WHERE g.revoked_at IS NULL AND g.expires_at<=clock_timestamp() AND r.state IN ('prepared','running','stopping')
+          AND ${currentApiScope} FOR UPDATE OF r,g SKIP LOCKED`);
       for (const run of abandoned.rows) {
         await transaction.query(
           'UPDATE app.api_worker_grants SET revoked_at=clock_timestamp() WHERE id=$1',
@@ -2382,6 +2559,9 @@ export class ApiExecutionControlService {
       const businessNames = new Map(
         content.steps.map(({ stepId, name }) => [stepId, name]),
       );
+      for (const node of apiFlowNodes(content.flow))
+        if (node.type === 'databaseRead')
+          businessNames.set(apiDatabaseReadPrefix + node.nodeId, node.name);
       const cleanupNames = new Map(
         content.cleanup.mode === 'none'
           ? []
@@ -2407,7 +2587,7 @@ export class ApiExecutionControlService {
           ...attempt,
           step_name:
             (attempt.phase === 'business'
-              ? businessNames.get(attempt.step_id)
+              ? businessNames.get(attempt.step_id.split('~', 1)[0] ?? '')
               : attempt.phase === 'cleanupHttp'
                 ? cleanupNames.get(attempt.step_id)
                 : null) ?? null,
