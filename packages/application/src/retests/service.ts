@@ -13,6 +13,7 @@ import {
   scenarioContentSchema,
   uiCaseContentSchema,
 } from '../../../contracts/src/domain.js';
+import { reportScopeItemSchema } from '../../../contracts/src/ui-archives.js';
 import type {
   Database,
   SqlExecutor,
@@ -89,7 +90,7 @@ export class RetestService {
           ).rows;
           const sourceItems = sources
             .map((s) => ({
-              item: scopeItemSchema.parse(s.snapshot),
+              item: reportScopeItemSchema.parse(s.snapshot),
               runId: s.run_id,
             }))
             .filter((s) => s.item.content.kind === selected.kind);
@@ -140,7 +141,9 @@ export class RetestService {
             const scenarioIds = selected.scenarioIds ?? [
               ...new Set(
                 related.flatMap((s) =>
-                  s.item.scenarioId ? [s.item.scenarioId] : [],
+                  'scenarioId' in s.item && s.item.scenarioId
+                    ? [s.item.scenarioId]
+                    : [],
                 ),
               ),
             ];
@@ -193,7 +196,9 @@ export class RetestService {
                 400,
               );
             caseIds = selected.caseIds ?? [
-              ...new Set(related.map((s) => s.item.caseId)),
+              ...new Set(
+                related.flatMap((s) => (s.item.caseId ? [s.item.caseId] : [])),
+              ),
             ];
           }
           if (!caseIds.length) {

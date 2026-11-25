@@ -691,12 +691,20 @@ export function createAiBusinessTools(
               });
               return JSON.stringify({
                 status: pending.status,
-                actionIntent: pending,
-                statusPath: `/api/v1/me/conversations/${options.conversationId}/action-intents/${pending.id}`,
+                actionIntent: {
+                  id: pending.id,
+                  title: pending.title,
+                  summary: pending.summary,
+                  projectName: pending.projectName,
+                  targets: pending.targets,
+                  changes: pending.changes,
+                  details: pending.details,
+                  result: pending.resultPresentation,
+                },
                 humanActionRequired: waiting,
                 interaction: 'conversation-reply',
                 instruction: waiting
-                  ? '展示变更范围，要求用户在本对话回复执行或取消确认。'
+                  ? '原对话已生成确认卡。说明变更对象与动作，并请用户在卡片确认或取消。'
                   : '读取原卡状态，不重新执行。',
               });
             }
@@ -752,6 +760,15 @@ export function createAiBusinessTools(
               state: 'completed',
               ...(sourceRefs.length ? { sourceRefs } : {}),
             });
+            if (
+              entry.name === 'ath_reviews' &&
+              prepared.op === 'preview-approve'
+            )
+              return JSON.stringify({
+                preview: result,
+                instruction:
+                  '预览供工具固定对象。用户要求批准时，请在本轮继续调用 ath_reviews approve 生成对话确认卡，再请人确认。向用户说明对象名称和动作，内部 ID 与摘要仅作工具参数。',
+              });
             return JSON.stringify(result);
           } catch (error: unknown) {
             const failure =

@@ -200,6 +200,7 @@ export function actionIntentDisplay(data: {
   const details = stored.details.flatMap((detail) => {
     const value = labels(memberLabel(detail.value), 2000);
     if (!value || detail.label === '项目' || targets.includes(value)) return [];
+    if (selected.length && detail.label === '相关对象') return [];
     if (detail.label === '所选对象数量') {
       if (countShown || targets.length) return [];
       countShown = true;

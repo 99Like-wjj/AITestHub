@@ -93,7 +93,7 @@ export function ActionIntentCardView({
           ))}
         </ul>
       )}
-      {!showingResult && targets.length > 0 && (
+      {(!showingResult || !result.items.length) && targets.length > 0 && (
         <ul className="conversation-action-items" aria-label="本次变更对象">
           {targets.map((label, index) => (
             <li key={index}>
@@ -103,7 +103,8 @@ export function ActionIntentCardView({
         </ul>
       )}
       {intent.changes.length > 0 &&
-        (!showingResult || !result.items.length) && (
+        (!showingResult ||
+          (displayStatus === 'completed' && !result.items.length)) && (
           <dl className="conversation-action-changes">
             {intent.changes.map((change, index) => (
               <div key={index}>
