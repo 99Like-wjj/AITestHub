@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Alert, Button, Empty, Select, Space, Tabs, Tag } from 'antd';
 import type { AssetContent } from '../../../packages/contracts/src/assets';
 
@@ -20,7 +20,7 @@ export function UiCaseText({ content }: { content: AssetContent }) {
   const value = uiCase(content);
   if (!value) return null;
   return (
-    <dl className="ui-review-case-text">
+    <dl className="ui-case-body-fields">
       <div>
         <dt>测试点</dt>
         <dd>{value.testPoint}</dd>
@@ -237,7 +237,7 @@ function RevisionCompare({
             <strong>
               {label} · {a && b ? '已修改' : b ? '新增' : '已删除'}
             </strong>
-            <div className="ui-review-compare">
+            <div className="ui-case-compare">
               <div>
                 <b>基准</b>
                 <pre>{a || '该修订未记录'}</pre>
@@ -253,7 +253,7 @@ function RevisionCompare({
         <p className="caption">所选修订未发现字段差异。</p>
       )}
       {!!unchanged.length && (
-        <details className="ui-review-diff">
+        <details className="ui-case-diff">
           <summary>查看未变字段 · {unchanged.length} 项</summary>
           {unchanged.map(([label, value]) => (
             <div key={label}>
@@ -273,34 +273,23 @@ export function UiCaseReader({
   revisionId,
   onRevision,
   timeline,
-  frozen,
-  comparison,
 }: {
   revisions: UiCaseRevision[];
   currentRevisionId: string;
   revisionId: string;
   onRevision: (id: string) => void;
   timeline?: ReactNode;
-  frozen: boolean;
-  comparison?: { from: string; to: string; key: string } | undefined;
 }) {
   const [tab, setTab] = useState('body');
-  useEffect(() => {
-    if (comparison) setTab('diff');
-  }, [comparison]);
   const current = revisions.find((entry) => entry.id === currentRevisionId);
   const selected = revisions.find((entry) => entry.id === revisionId);
   if (!current || !selected)
     return <Empty description="未读取到所选用例修订。" />;
   const historical = selected.id !== currentRevisionId;
-  const baseline =
-    revisions.find((entry) => entry.id === comparison?.from) ??
-    (historical
-      ? selected
-      : (revisions.find((entry) => entry.revisionNo < current.revisionNo) ??
-        current));
-  const target =
-    revisions.find((entry) => entry.id === comparison?.to) ?? current;
+  const baseline = historical
+    ? selected
+    : (revisions.find((entry) => entry.revisionNo < current.revisionNo) ??
+      current);
   return (
     <>
       <Space wrap className="ui-case-revision-controls">
@@ -312,14 +301,14 @@ export function UiCaseReader({
           value={selected.id}
           options={revisions.map((entry) => ({
             value: entry.id,
-            label: `r${entry.revisionNo}（${entry.id === currentRevisionId ? (frozen ? '会话保存' : '当前') : '历史修订'}）`,
+            label: `r${entry.revisionNo}（${entry.id === currentRevisionId ? '当前' : '历史修订'}）`,
           }))}
           onChange={(id) => {
             onRevision(id);
             setTab('body');
           }}
         />
-        {(frozen || historical) && <Tag>只读</Tag>}
+        {historical && <Tag>只读</Tag>}
         {historical && (
           <Button
             size="small"
@@ -328,7 +317,7 @@ export function UiCaseReader({
               setTab('body');
             }}
           >
-            {frozen ? '返回会话保存修订' : '返回当前修订'}
+            返回当前修订
           </Button>
         )}
       </Space>
@@ -346,12 +335,10 @@ export function UiCaseReader({
             label: '修订对比',
             children: (
               <RevisionCompare
-                key={
-                  baseline.id + ':' + target.id + ':' + (comparison?.key ?? '')
-                }
+                key={baseline.id + ':' + current.id}
                 revisions={revisions}
                 defaultFrom={baseline.id}
-                defaultTo={target.id}
+                defaultTo={current.id}
               />
             ),
           },

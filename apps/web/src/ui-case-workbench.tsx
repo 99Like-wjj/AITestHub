@@ -1,44 +1,40 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
   Checkbox,
-  Dropdown,
   Empty,
   Input,
   Modal,
   Skeleton,
   Space,
   Tag,
+  Typography,
 } from 'antd';
 import {
   AimOutlined,
   CalendarOutlined,
-  EllipsisOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
 import { z } from 'zod';
 import {
+  approvalCommitReceiptSchema,
   assetDetailSchema,
   caseSupplementOriginResultSchema,
   type Asset,
 } from '../../../packages/contracts/src/assets';
 import {
   uiCaseReviewStageListSchema,
-  uiReviewMeetingDetailSchema,
-  uiReviewMeetingListSchema,
+  uiCaseReviewDetailSchema,
 } from '../../../packages/contracts/src/ui-reviews';
 import { uiPlanEligibilitySchema } from '../../../packages/contracts/src/plans';
-import { api, describeError } from './api';
+import { precisePreviewSchema } from '../../../packages/contracts/src/domain';
+import { api, describeError, isUncertainMutationError } from './api';
 import { formatBeijingTime } from './beijing-time';
 import { StandaloneWorkbenchHeader } from './standalone-workbench-header';
 import { AppIcon } from './app-icon';
 import { UiCaseReader } from './ui-case-reader';
-import {
-  UiCaseReviewPane,
-  assessmentLabels,
-  type UiCaseReviewDraft,
-} from './ui-case-review-pane';
+import { UiCaseReviewPane } from './ui-case-review-pane';
 import type { CaseScope } from './requirements';
 import { UiRequirementBasis } from './ui-requirement-basis';
 import { AssetReviewPanel } from './asset-review-panel';
@@ -47,9 +43,18 @@ import {
   uiPlanHandoffHash,
   type UiPlanEligibility,
 } from './ui-case-plan-handoff';
+import {
+  assertApprovalReceipt,
+  forgetApproval,
+  readApprovalRecovery,
+  recoveredApprovalSchema,
+  rememberApproval,
+  type ApprovalRecovery,
+} from './ui-case-approval';
 import './ui-case-workbench.css';
 
-type Meeting = z.infer<typeof uiReviewMeetingDetailSchema>;
+type CaseReview = z.infer<typeof uiCaseReviewDetailSchema>;
+type ApprovalReceipt = z.infer<typeof approvalCommitReceiptSchema>;
 type Detail = z.infer<typeof assetDetailSchema>;
 type SavedOrigin = z.infer<typeof caseSupplementOriginResultSchema>['origin'];
 type CaseStage = z.infer<typeof uiCaseReviewStageListSchema>['items'][number];
@@ -57,9 +62,9 @@ type Filter = 'all' | CaseStage['stage'];
 const filters: Record<Filter, string> = {
   all: '全部用例',
   pending: '待评审',
-  needsOptimization: '待 AI 修改',
+  needsOptimization: '待修改',
   waitingHuman: '待人工复审',
-  approved: '已批准',
+  approved: '已通过',
 };
 
 export function uiStageForReviewState(
@@ -74,6 +79,7 @@ export function useUiCaseStages(
   enabled: boolean,
 ) {
   const [stages, setStages] = useState<CaseStage[]>([]);
+  const [error, setError] = useState<string>();
   const projectId = scope?.projectId;
   const basisId = scope?.historical
     ? scope.requirementVersionId
@@ -90,6 +96,7 @@ export function useUiCaseStages(
     )
       return;
     const controller = new AbortController();
+    setError(undefined);
     const query = new URLSearchParams({ [basisField]: basisId });
     void api(
       '/projects/' + projectId + '/assets/ui-case-review-stages?' + query,
@@ -99,8 +106,11 @@ export function useUiCaseStages(
       .then(({ items }) => {
         if (!controller.signal.aborted) setStages(items);
       })
-      .catch(() => {
-        if (!controller.signal.aborted) setStages([]);
+      .catch((failure: unknown) => {
+        if (!controller.signal.aborted) {
+          setStages([]);
+          setError(describeError(failure));
+        }
       });
     return () => controller.abort();
   }, [projectId, basisField, basisId, enabled, assets]);
@@ -108,11 +118,18 @@ export function useUiCaseStages(
     () => new Map(stages.map((item) => [item.caseId, item])),
     [stages],
   );
-  return (asset: Asset): CaseStage['stage'] => {
-    const authoritative = enabled ? stageByCase.get(asset.id) : undefined;
-    return authoritative?.revisionId === asset.revisionId
-      ? authoritative.stage
-      : uiStageForReviewState(asset.reviewState);
+  function statusOf(asset: Asset) {
+    const entry = enabled ? stageByCase.get(asset.id) : undefined;
+    return entry?.revisionId === asset.revisionId &&
+      entry.rowVersion === asset.rowVersion
+      ? entry
+      : undefined;
+  }
+  return {
+    statusOf,
+    error,
+    stageOf: (asset: Asset) =>
+      statusOf(asset)?.stage ?? uiStageForReviewState(asset.reviewState),
   };
 }
 
@@ -125,87 +142,6 @@ export function UiCaseStageBadge({ stage }: { stage: CaseStage['stage'] }) {
   );
 }
 
-export function UiReviewHistory({
-  scope,
-  title,
-  open,
-  onClose,
-  onSelect,
-}: {
-  scope: CaseScope;
-  title: string;
-  open: boolean;
-  onClose: () => void;
-  onSelect: (meetingId: string, requirementVersionId: string) => void;
-}) {
-  const [rows, setRows] =
-    useState<z.infer<typeof uiReviewMeetingListSchema>['meetings']>();
-  const [error, setError] = useState<string>();
-  const { projectId, requirementId, requirementVersionId, historical } = scope;
-  useEffect(() => {
-    if (!open) return;
-    const controller = new AbortController();
-    setRows(undefined);
-    setError(undefined);
-    const query = new URLSearchParams({
-      archived: 'true',
-      ...(historical ? { requirementVersionId } : { requirementId }),
-    });
-    void api(
-      `/projects/${projectId}/assets/ui-review-meetings?${query}`,
-      { signal: controller.signal },
-      uiReviewMeetingListSchema,
-    )
-      .then(({ meetings }) => {
-        if (!controller.signal.aborted) setRows(meetings);
-      })
-      .catch((failure: unknown) => {
-        if (!controller.signal.aborted) setError(describeError(failure));
-      });
-    return () => controller.abort();
-  }, [projectId, requirementId, requirementVersionId, historical, open]);
-  return (
-    <Modal
-      title="评审历史"
-      open={open}
-      onCancel={onClose}
-      footer={<Button onClick={onClose}>关闭</Button>}
-    >
-      <p className="caption">{title}</p>
-      {error ? (
-        <Alert type="error" showIcon title={error} />
-      ) : !rows ? (
-        <Skeleton active />
-      ) : rows.length ? (
-        <div className="ui-case-history-list">
-          {rows.map((meeting) => (
-            <article key={meeting.id}>
-              <div>
-                <strong>评审会议 {meeting.id.slice(0, 8)}</strong>
-                <p className="caption">
-                  {meeting.finalized ? '意见已定稿' : '记录中'} ·{' '}
-                  {meeting.caseCount} 条用例 ·{' '}
-                  {formatBeijingTime(meeting.createdAt, true)}
-                </p>
-              </div>
-              <Button
-                size="small"
-                onClick={() =>
-                  onSelect(meeting.id, meeting.requirementVersionId)
-                }
-              >
-                查看快照
-              </Button>
-            </article>
-          ))}
-        </div>
-      ) : (
-        <Empty description="当前需求暂无已定稿评审会话。" />
-      )}
-    </Modal>
-  );
-}
-
 export function UiCaseWorkbench({
   scope,
   projectName,
@@ -214,24 +150,16 @@ export function UiCaseWorkbench({
   requestedCase,
   requestedScene,
   requestedRevision,
-  meetingId,
   archived,
   available,
   loading,
   error,
   tester,
-  canEdit,
   onBack,
   onCase,
   onScene,
   onRevision,
-  onApprove,
-  onDetails,
-  onOpenTeam,
-  onOpenHistory,
-  onSupplement,
   onChanged,
-  reviewDrafts,
 }: {
   scope: CaseScope;
   projectName: string;
@@ -240,34 +168,41 @@ export function UiCaseWorkbench({
   requestedCase: string | undefined;
   requestedScene: string | undefined;
   requestedRevision: string | undefined;
-  meetingId: string | undefined;
   archived: boolean;
   available: boolean;
   loading: boolean;
   error: string | undefined;
   tester: boolean;
-  canEdit: boolean;
   onBack: () => void;
   onCase: (caseId: string) => void;
   onScene: (sceneId: string) => void;
   onRevision: (revisionId?: string) => void;
-  onApprove: (ids: string[]) => Promise<void>;
-  onDetails: (asset: Asset) => void;
-  onOpenTeam: (meetingId: string, asset: Asset) => void;
-  onOpenHistory: (meetingId: string, caseId: string) => void;
-  onSupplement: (
-    asset: Asset,
-    origin?: { meetingId: string; opinionId: string; round: number },
-  ) => void;
   onChanged: () => Promise<void>;
-  reviewDrafts: Map<string, UiCaseReviewDraft>;
 }) {
   const [filter, setFilter] = useState<Filter>('all');
   const [search, setSearch] = useState('');
-  const [snapshot, setSnapshot] = useState<Meeting>();
   const [detail, setDetail] = useState<Detail>();
   const [removedLink, setRemovedLink] = useState<Detail>();
-  const [liveReview, setLiveReview] = useState<Meeting>();
+  const [caseReviewRecord, setCaseReviewRecord] = useState<{
+    data: CaseReview;
+    rowVersion: number;
+  }>();
+  const [selectedCases, setSelectedCases] = useState<string[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [approving, setApproving] = useState(false);
+  const approvalInFlight = useRef(false);
+  const approvalKey =
+    'aitesthub:asset-approval:' + userId + ':' + scope.projectId + ':UI';
+  const [recovery, setRecovery] = useState<ApprovalRecovery>();
+  const [approvalError, setApprovalError] = useState<string>();
+  const [receipt, setReceipt] = useState<ApprovalReceipt>();
+  useEffect(() => {
+    try {
+      setRecovery(readApprovalRecovery(approvalKey) ?? undefined);
+    } catch (failure: unknown) {
+      setApprovalError(describeError(failure));
+    }
+  }, [approvalKey]);
   const [originRecord, setOriginRecord] = useState<{
     assetId: string;
     origin: SavedOrigin;
@@ -275,12 +210,6 @@ export function UiCaseWorkbench({
   const [originError, setOriginError] = useState<{
     assetId: string;
     message: string;
-  }>();
-  const [comparison, setComparison] = useState<{
-    assetId: string;
-    from: string;
-    to: string;
-    key: string;
   }>();
   const [readError, setReadError] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -291,11 +220,8 @@ export function UiCaseWorkbench({
   const linkedRemoved =
     removedLink?.asset.id === requestedCase ? removedLink : undefined;
   const readonly =
-    Boolean(meetingId) ||
-    archived ||
-    Boolean(scope.historical) ||
-    Boolean(linkedRemoved);
-  const currentCases = useMemo(
+    archived || Boolean(scope.historical) || Boolean(linkedRemoved);
+  const cases = useMemo(
     () =>
       assets.filter(
         (asset) =>
@@ -315,10 +241,8 @@ export function UiCaseWorkbench({
   const scenarios = new Map(
     sceneAssets.map((asset) => [asset.id, asset.title]),
   );
-  const cases = meetingId ? (snapshot?.cases ?? []) : currentCases;
   const needsLinkedRead = Boolean(
     requestedCase &&
-    !meetingId &&
     !cases.some((item) => item.id === requestedCase) &&
     available &&
     !loading,
@@ -358,18 +282,16 @@ export function UiCaseWorkbench({
     scope.requirementVersionId,
     scope.historical,
   ]);
-  const caseStage = useUiCaseStages(
-    scope,
-    currentCases,
-    !meetingId && available,
-  );
-  const activeScene = meetingId
-    ? undefined
-    : requestedScene
-      ? sceneAssets.find((asset) => asset.id === requestedScene)
-      : !requestedCase && !cases.length
-        ? sceneAssets[0]
-        : undefined;
+  const {
+    stageOf: caseStage,
+    statusOf,
+    error: stageError,
+  } = useUiCaseStages(scope, cases, available);
+  const activeScene = requestedScene
+    ? sceneAssets.find((asset) => asset.id === requestedScene)
+    : !requestedCase && !cases.length
+      ? sceneAssets[0]
+      : undefined;
   const active = activeScene
     ? undefined
     : requestedCase
@@ -381,18 +303,15 @@ export function UiCaseWorkbench({
     activeScene?.requirementVersionId ??
     scope.requirementVersionId;
   const planCases = useMemo(
-    () =>
-      currentCases.filter(
-        (asset) => asset.requirementVersionId === planVersionId,
-      ),
-    [currentCases, planVersionId],
+    () => cases.filter((asset) => asset.requirementVersionId === planVersionId),
+    [cases, planVersionId],
   );
   const activeId = active?.id;
   const activeRevision = active?.revisionId;
   const activeRowVersion = active?.rowVersion;
   const displayedRows = cases.filter(
     (asset) =>
-      (meetingId || filter === 'all' || caseStage(asset) === filter) &&
+      (filter === 'all' || caseStage(asset) === filter) &&
       [asset.title, asset.id, scenarios.get(asset.parentId ?? '') ?? ''].some(
         (value) =>
           value.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()),
@@ -400,7 +319,7 @@ export function UiCaseWorkbench({
   );
   const position = displayedRows.findIndex((asset) => asset.id === activeId);
   const visibleSceneIds = new Set(displayedRows.map((asset) => asset.parentId));
-  if (!meetingId && filter === 'all') {
+  if (filter === 'all') {
     for (const scene of sceneAssets) {
       if (
         scene.title
@@ -410,10 +329,6 @@ export function UiCaseWorkbench({
         visibleSceneIds.add(scene.id);
     }
   }
-  useEffect(() => {
-    setFilter('all');
-    setSearch('');
-  }, [meetingId]);
   useEffect(() => {
     if (requestedScene) setReadError(undefined);
   }, [requestedScene]);
@@ -442,52 +357,24 @@ export function UiCaseWorkbench({
   }, [scope.projectId, activeId, available]);
 
   useEffect(() => {
-    if (!meetingId || !available) return;
+    if (!activeId || activeRowVersion === undefined || !available) return;
     const controller = new AbortController();
-    const params = new URLSearchParams({ archived: 'true' });
-    if (requestedCase) params.set('caseId', requestedCase);
-    setReadError(undefined);
-    setSnapshot((current) =>
-      current?.meeting.id === meetingId
-        ? { ...current, revisions: [] }
-        : undefined,
-    );
     void api(
-      `/projects/${scope.projectId}/assets/ui-review-meetings/${meetingId}?${params}`,
+      `/projects/${scope.projectId}/assets/${activeId}/case-review`,
       { signal: controller.signal },
-      uiReviewMeetingDetailSchema,
+      uiCaseReviewDetailSchema,
     )
-      .then((response) => {
-        if (controller.signal.aborted) return;
-        if (
-          response.meeting.requirementVersionId !== scope.requirementVersionId
-        ) {
-          setReadError('评审会话不属于当前需求版本。');
-          return;
-        }
-        setSnapshot(response);
-        if (!requestedCase && response.cases[0]) onCase(response.cases[0].id);
+      .then((data) => {
+        if (!controller.signal.aborted)
+          setCaseReviewRecord({ data, rowVersion: activeRowVersion });
       })
       .catch((failure: unknown) => {
         if (!controller.signal.aborted) setReadError(describeError(failure));
       });
     return () => controller.abort();
-  }, [
-    meetingId,
-    available,
-    requestedCase,
-    scope.projectId,
-    scope.requirementVersionId,
-  ]);
+  }, [activeId, activeRowVersion, available, scope.projectId]);
   useEffect(() => {
-    if (
-      meetingId ||
-      linkedRemoved ||
-      !activeId ||
-      !activeRevision ||
-      !available
-    )
-      return;
+    if (linkedRemoved || !activeId || !activeRevision || !available) return;
     const controller = new AbortController();
     setReadError(undefined);
     setDetail((entry) =>
@@ -519,7 +406,6 @@ export function UiCaseWorkbench({
       });
     return () => controller.abort();
   }, [
-    meetingId,
     linkedRemoved,
     activeId,
     activeRevision,
@@ -575,17 +461,40 @@ export function UiCaseWorkbench({
       activeRead = false;
     };
   }, [activeId, activeRowVersion, currentRowVersion]);
-  const revisions =
-    (meetingId ? snapshot?.revisions : focusedDetail?.revisions) ?? [];
-  const latestRevision = meetingId
-    ? activeRevision
-    : focusedDetail?.asset.revisionId;
+  const revisions = focusedDetail?.revisions ?? [];
+  const latestRevision = focusedDetail?.asset.revisionId;
   const revisionId = requestedRevision ?? latestRevision;
   const earlier = Boolean(
     latestRevision && revisionId && latestRevision !== revisionId,
   );
   const writable = tester && !readonly && !earlier && !currentAsset?.removedAt;
-  const editable = canEdit && !readonly && !earlier && !currentAsset?.removedAt;
+  const displayedReview =
+    caseReviewRecord?.data.caseId === activeId &&
+    caseReviewRecord?.data.revisionId === currentAsset?.revisionId &&
+    caseReviewRecord?.rowVersion === activeRowVersion
+      ? caseReviewRecord?.data
+      : undefined;
+  const draftKey = (asset: Asset) => asset.id + ':' + asset.revisionId;
+  const eligibleForReview = writable
+    ? cases.filter(
+        (asset) =>
+          statusOf(asset)?.reasons.length === 0 &&
+          !drafts[draftKey(asset)]?.trim(),
+      )
+    : [];
+  const eligibleIds = new Set(eligibleForReview.map((asset) => asset.id));
+  const selected = eligibleForReview.filter((asset) =>
+    selectedCases.includes(asset.id),
+  );
+  const selectedSet = new Set(selected.map((asset) => asset.id));
+  const allSelected =
+    eligibleForReview.length > 0 &&
+    selected.length === eligibleForReview.length;
+  const selectedOutsideFilter = selected.filter(
+    (asset) => !displayedRows.some((row) => row.id === asset.id),
+  ).length;
+  const approvedCount =
+    receipt?.results.filter((row) => row.status === 'approved').length ?? 0;
   const eligibility = new Map(planItems?.map((item) => [item.caseId, item]));
   const eligible = planCases.flatMap((asset) => {
     const approvalSnapshotId = matchingApproval(
@@ -602,23 +511,6 @@ export function UiCaseWorkbench({
     planCases.filter(
       (asset) => !matchingApproval(asset, eligibility.get(asset.id)),
     );
-  const review = meetingId ? snapshot : liveReview;
-  const texts = review?.state.items.filter(
-    (item) => item.basis.caseId === activeId,
-  );
-  const opinions = review?.state.opinions.filter(
-    (opinion) => activeId && opinion.caseIds.includes(activeId),
-  );
-  const assessments = review?.state.assessments?.filter(
-    (item) => item.caseId === activeId,
-  );
-  const caseRound = review?.cases.some((row) => row.id === activeId)
-    ? Math.max(
-        review.state.caseWorkbenchRound ?? 1,
-        ...(texts ?? []).map((item) => item.round),
-        ...(assessments ?? []).map((item) => item.round),
-      )
-    : null;
   const [eligibleCount, setEligibleCount] = useState<number>();
   useEffect(() => {
     if (readonly || !available || !tester || !planCases.length) {
@@ -654,8 +546,115 @@ export function UiCaseWorkbench({
   const previousCandidate = displayedRows[position - 1];
 
   function select(id: string) {
-    if (!busy) onCase(id);
+    if (!busy && !approving) onCase(id);
   }
+  async function acceptReceipt(
+    record: ApprovalRecovery,
+    result: ApprovalReceipt,
+  ) {
+    assertApprovalReceipt(record, result);
+    forgetApproval(approvalKey);
+    setRecovery(undefined);
+    setReceipt(result);
+    setSelectedCases([]);
+    await onChanged();
+  }
+
+  async function approveCases(targets: Asset[]) {
+    if (
+      approvalInFlight.current ||
+      !writable ||
+      busy ||
+      recovery ||
+      !targets.length
+    )
+      return;
+    approvalInFlight.current = true;
+    setApproving(true);
+    setApprovalError(undefined);
+    setReceipt(undefined);
+    try {
+      const pending = readApprovalRecovery(approvalKey);
+      if (pending) {
+        setRecovery(pending);
+        return;
+      }
+      const objectIds = targets.map((asset) => asset.id);
+      const basis = targets.map((asset) => ({
+        id: asset.id,
+        revisionId: asset.revisionId,
+        rowVersion: asset.rowVersion,
+      }));
+      const preview = await api(
+        `/projects/${scope.projectId}/assets/approval-previews`,
+        {
+          method: 'POST',
+          body: {
+            commandId: crypto.randomUUID(),
+            kind: 'UI',
+            objectIds,
+            baselines: basis,
+          },
+        },
+        precisePreviewSchema,
+      );
+      const record = {
+        commandId: crypto.randomUUID(),
+        scopeDigest: preview.scopeDigest,
+        objectIds,
+      };
+      rememberApproval(approvalKey, userId, record);
+      let result;
+      try {
+        result = await api(
+          `/projects/${scope.projectId}/assets/approve`,
+          {
+            method: 'POST',
+            body: { ...record, previewId: preview.previewId },
+          },
+          approvalCommitReceiptSchema,
+        );
+      } catch (failure: unknown) {
+        if (isUncertainMutationError(failure)) setRecovery(record);
+        else forgetApproval(approvalKey);
+        throw failure;
+      }
+      setRecovery(record);
+      await acceptReceipt(record, result);
+    } catch (failure: unknown) {
+      setApprovalError(describeError(failure));
+    } finally {
+      approvalInFlight.current = false;
+      setApproving(false);
+    }
+  }
+
+  async function recoverApproval() {
+    if (!recovery || approvalInFlight.current) return;
+    approvalInFlight.current = true;
+    setApproving(true);
+    try {
+      const result = await api(
+        `/projects/${scope.projectId}/assets/approval-receipts/${recovery.commandId}`,
+        {},
+        recoveredApprovalSchema,
+      );
+      if (result.status === 'completed' && result.response) {
+        setApprovalError(undefined);
+        await acceptReceipt(recovery, result.response);
+      } else if (result.status === 'failed') {
+        forgetApproval(approvalKey);
+        setRecovery(undefined);
+        setApprovalError('原审批未完成，请刷新用例后重新选择。');
+      } else setApprovalError('原审批结果暂未返回，请稍后核对。');
+    } catch (failure: unknown) {
+      setApprovalError(describeError(failure));
+    } finally {
+      approvalInFlight.current = false;
+      setApproving(false);
+    }
+  }
+
   function locate() {
     setFilter('all');
     setSearch('');
@@ -677,22 +676,18 @@ export function UiCaseWorkbench({
         projectName={projectName}
         backLabel="返回 UI 用例管理"
         onBack={onBack}
-        backDisabled={busy}
+        backDisabled={busy || approving}
       />
       <div className="ui-case-workbench-main">
         <header className="ui-case-workbench-heading">
           <div>
             <div className="row wrap">
               <h1>{scope.title}</h1>
-              <UiRequirementBasis scope={scope} cases={currentCases} />
+              <UiRequirementBasis scope={scope} cases={cases} />
             </div>
             <p className="caption">
               {scope.historical && `资料快照 v${scope.versionNo} · `}
-              {meetingId
-                ? new Set(cases.map((asset) => asset.parentId)).size
-                : sceneAssets.length}{' '}
-              个场景 · {cases.length} 条 UI 用例
-              {meetingId && ' · 评审会话快照'}
+              {sceneAssets.length} 个场景 · {cases.length} 条 UI 用例
               {readonly && ' · 只读'}
             </p>
           </div>
@@ -700,15 +695,123 @@ export function UiCaseWorkbench({
             type="primary"
             icon={<CalendarOutlined />}
             aria-label="预览执行范围"
-            disabled={!tester || readonly || earlier || busy || !cases.length}
+            disabled={
+              !tester ||
+              readonly ||
+              earlier ||
+              busy ||
+              approving ||
+              !cases.length
+            }
             onClick={() => setScopePlan(true)}
           >
             预览执行范围
-            {meetingId || eligibleCount === undefined
-              ? ''
-              : ' · ' + eligibleCount}
+            {eligibleCount === undefined ? '' : ' · ' + eligibleCount}
           </Button>
         </header>
+        {writable && !loading && available && (
+          <div className="ui-case-batch-actions" aria-label="批量审批">
+            <Checkbox
+              checked={allSelected}
+              indeterminate={selected.length > 0 && !allSelected}
+              disabled={
+                !eligibleForReview.length ||
+                busy ||
+                approving ||
+                Boolean(recovery)
+              }
+              onChange={(event) =>
+                setSelectedCases(
+                  event.target.checked
+                    ? eligibleForReview.map((asset) => asset.id)
+                    : [],
+                )
+              }
+            >
+              全选本需求可审批用例
+            </Checkbox>
+            <span role="status" className="caption">
+              已选 {selected.length} / 可审批 {eligibleForReview.length}
+              {selectedOutsideFilter > 0 &&
+                ' · ' + selectedOutsideFilter + ' 条在当前筛选外'}
+            </span>
+            {selected.length > 0 && (
+              <details className="ui-case-selected-list">
+                <summary>查看已选名单</summary>
+                <ul>
+                  {selected.map((asset) => (
+                    <li key={asset.id}>{asset.title}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            <Button
+              type="primary"
+              size="small"
+              loading={approving}
+              disabled={!selected.length || busy || Boolean(recovery)}
+              onClick={() => void approveCases(selected)}
+            >
+              批量审批（{selected.length}）
+            </Button>
+          </div>
+        )}
+        {stageError && (
+          <Alert
+            type="error"
+            showIcon
+            title={'审批资格读取失败。' + stageError}
+          />
+        )}
+        {(approvalError || recovery) && (
+          <Alert
+            type={recovery ? 'warning' : 'error'}
+            showIcon
+            title={approvalError ?? '请核对原审批结果。'}
+            action={
+              recovery ? (
+                <Button
+                  size="small"
+                  loading={approving}
+                  onClick={() => void recoverApproval()}
+                >
+                  查询原结果
+                </Button>
+              ) : undefined
+            }
+          />
+        )}
+        {receipt && (
+          <Alert
+            type={
+              approvedCount === receipt.results.length ? 'success' : 'warning'
+            }
+            showIcon
+            closable
+            onClose={() => setReceipt(undefined)}
+            title={`已审批通过 ${approvedCount} 条${approvedCount !== receipt.results.length ? '，跳过 ' + (receipt.results.length - approvedCount) + ' 条' : ''}`}
+            description={
+              receipt.results.some((row) => row.status !== 'approved') ? (
+                <ul className="ui-case-approval-skips">
+                  {receipt.results
+                    .filter((row) => row.status !== 'approved')
+                    .map((row) => (
+                      <li key={row.id}>
+                        {cases.find((asset) => asset.id === row.id)?.title ??
+                          '已退出当前列表的用例'}{' '}
+                        ·{' '}
+                        {row.status === 'conflict'
+                          ? '用例内容或评审信息已更新。'
+                          : row.status === 'skipped'
+                            ? row.reasons.join(' ')
+                            : ''}
+                      </li>
+                    ))}
+                </ul>
+              ) : undefined
+            }
+          />
+        )}
         {(error || readError) && (
           <Alert type="error" showIcon title={error ?? readError} />
         )}
@@ -720,37 +823,34 @@ export function UiCaseWorkbench({
             description="返回 UI 用例管理，确认当前项目和归档筛选。"
           />
         )}
-        {(loading && !cases.length) ||
-        (meetingId && available && !snapshot && !readError) ? (
+        {loading && !cases.length ? (
           <Skeleton active />
         ) : (
           available && (
             <>
-              {!meetingId && (
-                <div className="ui-case-metrics">
-                  {(Object.entries(filters) as [Filter, string][]).map(
-                    ([key, label]) => (
-                      <button
-                        type="button"
-                        key={key}
-                        aria-pressed={filter === key}
-                        onClick={() => setFilter(key)}
-                      >
-                        <span className="ui-case-measure" data-stage={key}>
-                          <i aria-hidden="true" />
-                          {label}
-                        </span>
-                        <strong>
-                          {key === 'all'
-                            ? cases.length
-                            : cases.filter((asset) => caseStage(asset) === key)
-                                .length}
-                        </strong>
-                      </button>
-                    ),
-                  )}
-                </div>
-              )}
+              <div className="ui-case-metrics">
+                {(Object.entries(filters) as [Filter, string][]).map(
+                  ([key, label]) => (
+                    <button
+                      type="button"
+                      key={key}
+                      aria-pressed={filter === key}
+                      onClick={() => setFilter(key)}
+                    >
+                      <span className="ui-case-measure" data-stage={key}>
+                        <i aria-hidden="true" />
+                        {label}
+                      </span>
+                      <strong>
+                        {key === 'all'
+                          ? cases.length
+                          : cases.filter((asset) => caseStage(asset) === key)
+                              .length}
+                      </strong>
+                    </button>
+                  ),
+                )}
+              </div>
               <div className="ui-case-workbench-grid">
                 <aside
                   className="ui-case-workbench-column ui-case-directory"
@@ -789,7 +889,7 @@ export function UiCaseWorkbench({
                         <details key={parentId ?? 'unknown'} open>
                           <summary>
                             <AppIcon name="folder-closed" />
-                            {parentId && !meetingId ? (
+                            {parentId ? (
                               <button
                                 type="button"
                                 className="ui-case-directory-scene"
@@ -808,32 +908,48 @@ export function UiCaseWorkbench({
                             <small>{group.length}</small>
                           </summary>
                           {group.map((asset) => (
-                            <button
+                            <div
+                              className="ui-case-directory-entry"
                               key={asset.id}
-                              type="button"
-                              className="ui-case-directory-case"
-                              aria-current={asset.id === activeId}
-                              disabled={busy}
-                              onClick={() => select(asset.id)}
                             >
-                              <strong>{asset.title}</strong>
-                              <span className="ui-case-directory-revision">
-                                r{asset.revisionNo}
-                              </span>
-                              <span
-                                className="ui-case-asset-code"
-                                title={asset.id}
-                              >
-                                {asset.id}
-                              </span>
-                              {meetingId ? (
-                                <span className="ui-case-snapshot-label">
-                                  会话保存
-                                </span>
-                              ) : (
-                                <UiCaseStageBadge stage={caseStage(asset)} />
+                              {eligibleIds.has(asset.id) && (
+                                <Checkbox
+                                  aria-label={'选择' + asset.title}
+                                  checked={selectedSet.has(asset.id)}
+                                  disabled={
+                                    busy || approving || Boolean(recovery)
+                                  }
+                                  onChange={(event) =>
+                                    setSelectedCases((previous) =>
+                                      event.target.checked
+                                        ? [...previous, asset.id]
+                                        : previous.filter(
+                                            (id) => id !== asset.id,
+                                          ),
+                                    )
+                                  }
+                                />
                               )}
-                            </button>
+                              <button
+                                type="button"
+                                className="ui-case-directory-case"
+                                aria-current={asset.id === activeId}
+                                disabled={busy || approving}
+                                onClick={() => select(asset.id)}
+                              >
+                                <strong>{asset.title}</strong>
+                                <span className="ui-case-directory-revision">
+                                  r{asset.revisionNo}
+                                </span>
+                                <span
+                                  className="ui-case-asset-code"
+                                  title={asset.id}
+                                >
+                                  {asset.id}
+                                </span>
+                                <UiCaseStageBadge stage={caseStage(asset)} />
+                              </button>
+                            </div>
                           ))}
                           {!group.length && (
                             <p className="caption ui-case-library-no-rows">
@@ -856,7 +972,7 @@ export function UiCaseWorkbench({
                         ? '当前用例在筛选之外'
                         : '目录仅作用于当前工作台范围'}
                     </span>
-                    {(search || (!meetingId && filter !== 'all')) && (
+                    {(search || filter !== 'all') && (
                       <Button
                         size="small"
                         type="text"
@@ -913,7 +1029,7 @@ export function UiCaseWorkbench({
                         </h2>
                         <p className="caption">
                           {
-                            currentCases.filter(
+                            cases.filter(
                               (item) => item.parentId === activeScene.id,
                             ).length
                           }{' '}
@@ -965,10 +1081,6 @@ export function UiCaseWorkbench({
                           </span>
                           {earlier ? (
                             <Tag>历史修订</Tag>
-                          ) : meetingId ? (
-                            <span className="ui-case-snapshot-label">
-                              会话保存
-                            </span>
                           ) : (
                             <UiCaseStageBadge
                               stage={caseStage(currentAsset ?? active)}
@@ -992,100 +1104,68 @@ export function UiCaseWorkbench({
                                   id === latestRevision ? undefined : id,
                                 );
                             }}
-                            frozen={Boolean(meetingId)}
-                            comparison={
-                              comparison?.assetId === active.id
-                                ? comparison
-                                : undefined
-                            }
                             timeline={
-                              origin ||
-                              originError?.assetId === active.id ||
-                              texts?.length ||
-                              opinions?.length ||
-                              assessments?.length ? (
-                                <Space direction="vertical">
-                                  {origin && (
-                                    <article className="ui-review-opinion">
-                                      <h3>补充来源</h3>
-                                      <p className="caption">
-                                        {origin.caseId} · 修订{' '}
-                                        {origin.revisionId}
-                                        {origin.round &&
-                                          ' · 第 ' + origin.round + ' 轮'}
-                                      </p>
-                                      <p className="preserve-lines">
-                                        {origin.note}
-                                      </p>
-                                      {sourceInScope && !meetingId && (
-                                        <Button
-                                          size="small"
-                                          disabled={busy}
-                                          onClick={() => {
-                                            onCase(origin.caseId);
-                                            onRevision(origin.revisionId);
-                                          }}
-                                        >
-                                          查看源用例修订
-                                        </Button>
-                                      )}
-                                    </article>
-                                  )}
-                                  {originError?.assetId === active.id && (
-                                    <Alert
-                                      type="error"
-                                      showIcon
-                                      title={originError.message}
-                                    />
-                                  )}
-                                  {opinions?.map((opinion) => (
-                                    <p
-                                      className="preserve-lines"
-                                      key={opinion.id}
-                                    >
-                                      {opinion.body}
+                              <Space
+                                direction="vertical"
+                                className="ui-case-history"
+                              >
+                                {displayedReview && (
+                                  <>
+                                    <Typography.Text type="secondary">
+                                      所属测试集 · {displayedReview.setTitle}
+                                    </Typography.Text>
+                                    {displayedReview.latestApproval && (
+                                      <Typography.Text>
+                                        最近审批通过 r
+                                        {
+                                          displayedReview.latestApproval
+                                            .revisionNo
+                                        }{' '}
+                                        ·{' '}
+                                        {formatBeijingTime(
+                                          displayedReview.latestApproval
+                                            .approvedAt,
+                                          true,
+                                        )}
+                                      </Typography.Text>
+                                    )}
+                                  </>
+                                )}
+                                {origin && (
+                                  <article>
+                                    <strong>补充来源</strong>
+                                    <p className="preserve-lines">
+                                      {origin.note}
                                     </p>
-                                  ))}
-                                  {texts?.map((item) => (
-                                    <article
-                                      key={item.opinionId + ':' + item.round}
-                                    >
-                                      <b>
-                                        第 {item.round} 轮 · r
-                                        {item.basis.revisionNo}
-                                      </b>
-                                      {item.reply && (
-                                        <p className="preserve-lines">
-                                          {item.reply.body}
-                                        </p>
-                                      )}
-                                      {item.instruction && (
-                                        <p className="preserve-lines">
-                                          {item.instruction}
-                                        </p>
-                                      )}
-                                    </article>
-                                  ))}
-                                  {assessments?.map((entry) => (
-                                    <article
-                                      key={entry.caseId + ':' + entry.time}
-                                    >
-                                      <b>
-                                        第 {entry.round} 轮 ·{' '}
-                                        {assessmentLabels[entry.outcome]}
-                                      </b>
-                                      <p className="preserve-lines">
-                                        {entry.note}
-                                      </p>
-                                      {entry.instruction && (
-                                        <p className="preserve-lines">
-                                          {entry.instruction}
-                                        </p>
-                                      )}
-                                    </article>
-                                  ))}
-                                </Space>
-                              ) : undefined
+                                    {sourceInScope && (
+                                      <Button
+                                        size="small"
+                                        onClick={() => {
+                                          onCase(origin.caseId);
+                                          onRevision(origin.revisionId);
+                                        }}
+                                      >
+                                        查看源用例修订
+                                      </Button>
+                                    )}
+                                  </article>
+                                )}
+                                {originError?.assetId === active.id && (
+                                  <Alert
+                                    type="error"
+                                    showIcon
+                                    title={originError.message}
+                                  />
+                                )}
+                                <AssetReviewPanel
+                                  key={active.id + ':' + revisionId}
+                                  projectId={scope.projectId}
+                                  asset={currentAsset ?? active}
+                                  revisionId={revisionId}
+                                  tester={false}
+                                  onChanged={onChanged}
+                                />
+                              </Space>
                             }
                           />
                         ) : readError ? null : (
@@ -1105,35 +1185,20 @@ export function UiCaseWorkbench({
                 </section>
                 <aside
                   className="ui-case-workbench-column ui-case-workbench-review"
-                  aria-label="评审与复审"
+                  aria-label={activeScene ? '场景意见' : '用例评审'}
                 >
                   <header className="ui-case-column-head">
-                    <h2>{activeScene ? '场景意见' : '评审与复审'}</h2>
-                    {(readonly || earlier || caseRound) && (
-                      <span className="ui-case-round">
-                        {readonly || earlier
-                          ? '只读'
-                          : '第 ' + caseRound + ' 轮'}
-                      </span>
-                    )}
+                    <h2>{activeScene ? '场景意见' : '用例评审'}</h2>
+                    {(readonly || earlier) && <Tag>只读</Tag>}
                   </header>
                   <div className="ui-case-pane-scroll ui-case-review-content">
                     {active && (
                       <div className="ui-case-review-summary">
-                        {earlier ? (
-                          <Tag>历史修订</Tag>
-                        ) : meetingId ? (
-                          <span className="ui-case-snapshot-label">
-                            会话保存
-                          </span>
-                        ) : (
-                          <UiCaseStageBadge
-                            stage={caseStage(currentAsset ?? active)}
-                          />
-                        )}
-                        <span className="ui-case-asset-code" title={active.id}>
-                          {active.id} · r
-                          {openedRevision?.revisionNo ?? active.revisionNo}
+                        <UiCaseStageBadge
+                          stage={caseStage(currentAsset ?? active)}
+                        />
+                        <span className="caption">
+                          r{openedRevision?.revisionNo ?? active.revisionNo}
                         </span>
                       </div>
                     )}
@@ -1146,87 +1211,32 @@ export function UiCaseWorkbench({
                         tester={tester && !readonly}
                         onChanged={onChanged}
                       />
-                    ) : readonly || earlier ? (
-                      <>
-                        <Alert
-                          type="info"
-                          showIcon
-                          title={
-                            earlier
-                              ? '当前阅读的是历史修订。'
-                              : '当前范围只读。'
-                          }
-                        />
-                        {earlier && (
-                          <Button size="small" onClick={() => onRevision()}>
-                            切到当前修订
-                          </Button>
-                        )}
-                      </>
-                    ) : (
-                      currentAsset && (
-                        <>
-                          <UiCaseReviewPane
-                            key={
-                              currentAsset.id + ':' + currentAsset.revisionId
-                            }
-                            asset={currentAsset}
-                            userId={userId}
-                            writable={writable}
-                            drafts={reviewDrafts}
-                            onRead={setLiveReview}
-                            onBusy={setBusy}
-                            onCompare={(from, to) =>
-                              setComparison({
-                                assetId: currentAsset.id,
-                                from,
-                                to,
-                                key: crypto.randomUUID(),
-                              })
-                            }
-                            onApprove={onApprove}
-                            onChanged={onChanged}
-                            onOpenTeam={(meetingId) =>
-                              onOpenTeam(meetingId, currentAsset)
-                            }
-                            onOpenHistory={(id) =>
-                              onOpenHistory(id, currentAsset.id)
-                            }
-                            onSupplement={(origin) =>
-                              onSupplement(currentAsset, origin)
-                            }
-                          />
-                          <Space wrap size={6}>
-                            {editable && (
-                              <Button
-                                size="small"
-                                icon={<AppIcon name="spark" />}
-                                disabled={busy}
-                                onClick={() => onSupplement(currentAsset)}
-                              >
-                                请 AI 补充用例
-                              </Button>
-                            )}
-                            <Dropdown
-                              trigger={['click']}
-                              menu={{
-                                items: [
-                                  { key: 'details', label: '查看资产详情' },
-                                ],
-                                onClick: () => onDetails(currentAsset),
-                              }}
-                            >
-                              <Button
-                                size="small"
-                                icon={<EllipsisOutlined />}
-                                aria-label="更多资产操作"
-                                disabled={busy}
-                              />
-                            </Dropdown>
-                          </Space>
-                        </>
-                      )
-                    )}
+                    ) : earlier ? (
+                      <Button size="small" onClick={() => onRevision()}>
+                        切到当前修订
+                      </Button>
+                    ) : currentAsset && displayedReview ? (
+                      <UiCaseReviewPane
+                        key={draftKey(currentAsset)}
+                        asset={currentAsset}
+                        review={displayedReview}
+                        draft={drafts[draftKey(currentAsset)] ?? ''}
+                        writable={writable && !recovery}
+                        approving={approving}
+                        approvalReasons={statusOf(currentAsset)?.reasons}
+                        onDraft={(value) =>
+                          setDrafts((previous) => ({
+                            ...previous,
+                            [draftKey(currentAsset)]: value,
+                          }))
+                        }
+                        onBusy={setBusy}
+                        onApprove={() => void approveCases([currentAsset])}
+                        onChanged={onChanged}
+                      />
+                    ) : active && !readError ? (
+                      <Skeleton active paragraph={{ rows: 2 }} />
+                    ) : null}
                   </div>
                 </aside>
               </div>
@@ -1259,7 +1269,7 @@ export function UiCaseWorkbench({
           <>
             {eligible.length ? (
               <Checkbox.Group
-                className="ui-review-start-list"
+                className="ui-case-plan-list"
                 aria-label="计划用例"
                 value={choice}
                 onChange={setChoice}
@@ -1274,7 +1284,7 @@ export function UiCaseWorkbench({
               <p>当前范围暂无可带入计划的批准修订。</p>
             )}
             {blocked && blocked.length > 0 && (
-              <details open className="ui-review-diff">
+              <details open className="ui-case-diff">
                 <summary>暂无计划资格 · {blocked.length} 条</summary>
                 {blocked.map((asset) => (
                   <article key={asset.id}>

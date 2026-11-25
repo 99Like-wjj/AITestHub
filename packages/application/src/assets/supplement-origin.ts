@@ -3,7 +3,6 @@ import {
   caseSupplementOriginResultSchema,
 } from '../../../contracts/src/assets.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
-import { uiReviewMeetingStateSchema } from '../../../contracts/src/ui-reviews.js';
 import type {
   Database,
   SqlExecutor,
@@ -43,49 +42,6 @@ export async function recordCaseSupplementOrigin(
       400,
     );
 
-  if (origin.meetingId) {
-    const { rows } = await tx.query<{ state: unknown }>(
-      `SELECT state FROM app.ui_review_meetings
-       WHERE project_id=$1 AND requirement_version_id=$2 AND id=$3
-         AND case_ids @> ARRAY[$4]::uuid[]`,
-      [
-        created.project_id,
-        created.requirement_version_id,
-        origin.meetingId,
-        origin.caseId,
-      ],
-    );
-    if (!rows[0])
-      throw new DomainError('NOT_FOUND', '此用例不属于所引用的评审会话。', 404);
-    const state = uiReviewMeetingStateSchema.parse(rows[0].state);
-    const exactItem = state.items.some(
-      (item) =>
-        item.basis.caseId === origin.caseId &&
-        (!origin.opinionId || item.opinionId === origin.opinionId) &&
-        (!origin.round || item.round === origin.round) &&
-        (item.basis.revisionId === origin.revisionId ||
-          item.reply?.revisionId === origin.revisionId),
-    );
-    const meetingBasis =
-      !origin.opinionId &&
-      !origin.round &&
-      (state.scope.some(
-        (basis) =>
-          basis.caseId === origin.caseId &&
-          basis.revisionId === origin.revisionId,
-      ) ||
-        state.assessments?.some(
-          (item) =>
-            item.caseId === origin.caseId &&
-            item.revisionId === origin.revisionId,
-        ));
-    if (!exactItem && !meetingBasis)
-      throw new DomainError(
-        'VALIDATION_ERROR',
-        '此修订不是所选评审意见或轮次中记录的来源。',
-        400,
-      );
-  }
   await tx.query(
     `INSERT INTO app.ui_case_supplement_origins
        (case_id,project_id,requirement_version_id,source_case_id,source_revision_id,origin,created_by)
@@ -109,9 +65,6 @@ export async function recordCaseSupplementOrigin(
     {
       sourceCaseId: origin.caseId,
       sourceRevisionId: origin.revisionId,
-      meetingId: origin.meetingId ?? null,
-      opinionId: origin.opinionId ?? null,
-      round: origin.round ?? null,
     },
   );
 }

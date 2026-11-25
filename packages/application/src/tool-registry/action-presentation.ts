@@ -51,7 +51,6 @@ const dictionary: Record<string, string> = {
 };
 const actionTitles: Record<string, string> = {
   'ath_reviews.approve': '批准用例',
-  'ath_reviews.meeting-update': '更新评审会议',
   'ath_assets.import-ui': '导入 UI 用例',
   'ath_assets.remove-scoped-scene': '移除 UI 场景',
   'ath_results.add-evidence': '补充测试证据',

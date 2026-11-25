@@ -336,17 +336,6 @@ async function assertWriteTarget(
   )
     return;
   if (
-    name === 'ath_reviews' &&
-    envelope.op.startsWith('meeting-') &&
-    envelope.id
-  ) {
-    const { rowCount } = await db.query(
-      'SELECT 1 FROM app.ui_review_meetings m JOIN app.requirement_versions v ON v.id=m.requirement_version_id WHERE m.id=$1 AND m.project_id=$2 AND v.requirement_id=$3',
-      [envelope.id, fixed.projectId, expected],
-    );
-    if (rowCount === 1) return;
-  }
-  if (
     (name === 'ath_results' &&
       ['record-human-retest', 'add-evidence'].includes(envelope.op)) ||
     (name === 'ath_issues' && envelope.op === 'file-from-report')

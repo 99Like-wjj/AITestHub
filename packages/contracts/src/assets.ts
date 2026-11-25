@@ -51,14 +51,8 @@ export const createCaseInputSchema = z.strictObject({
 export const caseSupplementOriginSchema = z.strictObject({
   caseId: idSchema,
   revisionId: idSchema,
-  meetingId: idSchema.optional(),
-  opinionId: idSchema.optional(),
-  round: persistedRowVersionSchema.optional(),
   note: z.string().trim().min(1).max(4000),
-}).refine(
-  (origin) => origin.meetingId !== undefined || (origin.opinionId === undefined && origin.round === undefined),
-  '意见或轮次需要明确的评审会话。',
-);
+});
 
 export const caseSupplementOriginResultSchema = z.strictObject({
   origin: caseSupplementOriginSchema.nullable(),
@@ -154,9 +148,6 @@ export const approvalContentSnapshotSchema = z.strictObject({
   case: assetSchema,
   scenario: assetSchema,
   set: assetSchema,
-  meetingDecisions: z.array(z.strictObject({
-    meetingId:idSchema,opinionId:idSchema,round:z.number().int().positive(),revisionId:idSchema,
-  })).optional(),
   opinions: z.array(
     z.strictObject({
       id: idSchema,
@@ -198,7 +189,10 @@ export const approvalPreviewInputSchema = z.strictObject({
     .min(1)
     .max(10000)
     .refine((ids) => new Set(ids).size === ids.length, '目标不可重复'),
-});
+  baselines:z.array(z.strictObject({id:idSchema,revisionId:idSchema,rowVersion:persistedRowVersionSchema})).max(10000).optional(),
+}).refine(input=>!input.baselines||(input.baselines.length===input.objectIds.length&&
+  new Set(input.baselines.map(row=>row.id)).size===input.baselines.length&&
+  input.baselines.every(row=>input.objectIds.includes(row.id))),'审批基准须覆盖全部所选对象');
 export const approveCommitInputSchema = preciseCommitInputSchema.refine(
   (input) => new Set(input.objectIds).size === input.objectIds.length,
   { path: ['objectIds'], message: '目标不可重复' },

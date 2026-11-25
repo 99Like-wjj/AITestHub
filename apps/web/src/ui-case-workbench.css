@@ -110,17 +110,7 @@
   font-weight: 650;
   white-space: nowrap;
 }
-.ui-case-snapshot-label {
-  display: inline-flex;
-  justify-self: end;
-  flex: none;
-  padding: 2px 6px;
-  border-radius: 5px;
-  color: var(--muted);
-  background: var(--hover);
-  font-size: 11px;
-  white-space: nowrap;
-}
+
 .ui-case-metrics button:hover,
 .ui-case-metrics button[aria-pressed='true'],
 .ui-case-directory-case[aria-current='true'] {
@@ -175,15 +165,7 @@
   padding: 5px 12px;
   border-top: 1px solid var(--line);
 }
-.ui-case-round {
-  padding: 2px 7px;
-  border-radius: 5px;
-  color: var(--accent);
-  background: var(--accent-soft);
-  white-space: nowrap;
-  font-size: 11px;
-  font-weight: 700;
-}
+
 .ui-case-pane-scroll {
   flex: 1;
   min-height: 0;
@@ -352,14 +334,7 @@
   align-items: center;
   flex-wrap: wrap;
 }
-.ui-case-review-message {
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-inline-start: 3px solid
-    color-mix(in srgb, var(--accent) 55%, var(--line));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accent-soft) 45%, var(--surface));
-}
+
 .ui-case-review-notice {
   color: var(--accent);
   font-size: 12px;
@@ -390,10 +365,10 @@
   font-size: 12px;
   font-weight: 650;
 }
-.ui-case-reader-content .ui-review-case-text {
+.ui-case-reader-content .ui-case-body-fields {
   margin: 0 0 12px;
 }
-.ui-case-reader-content .ui-review-case-text dt {
+.ui-case-reader-content .ui-case-body-fields dt {
   color: var(--muted);
   font-size: 12px;
   font-weight: 750;
@@ -789,9 +764,7 @@
   padding: 8px 10px;
   border-top: 1px solid var(--line);
 }
-.ui-case-library-row[data-bulk] {
-  grid-template-columns: auto minmax(0, 1fr) 85px auto;
-}
+
 .ui-case-library-row-detail {
   display: grid;
   gap: 3px;
@@ -827,22 +800,146 @@
   .ui-case-library-row {
     grid-template-columns: minmax(0, 1fr) auto;
   }
-  .ui-case-library-row[data-bulk] {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-  }
+
   .ui-case-library-row .ui-case-stage {
     grid-row: 2;
   }
-  .ui-case-library-row[data-bulk] .ui-case-stage {
-    grid-column: 2;
-  }
+
   .ui-case-library-row > button {
     grid-row: 1 / 3;
     grid-column: -2;
   }
 }
 
-.ui-review-assessment-error {
-  color: var(--danger);
+.ui-case-body-fields {
+  margin: 12px 0;
+}
+
+.ui-case-body-fields dt {
+  margin-top: 12px;
+  font-weight: 650;
+}
+
+.ui-case-body-fields dd {
+  margin: 3px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ui-case-body-fields ol {
+  margin: 7px 0;
+  padding-inline-start: 22px;
+}
+
+.ui-case-body-fields li {
+  margin-bottom: 6px;
+}
+
+.ui-case-plan-list {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 12px;
+}
+
+.ui-case-diff {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.ui-case-diff summary {
+  cursor: pointer;
+}
+
+.ui-case-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ui-case-compare pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+}
+
+.ui-case-batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.ui-case-selected-list {
+  position: relative;
   font-size: 12px;
+}
+
+.ui-case-selected-list summary {
+  color: var(--accent-strong, var(--text));
+  cursor: pointer;
+}
+
+.ui-case-selected-list ul {
+  z-index: 2;
+  position: absolute;
+  inset-inline-end: 0;
+  min-width: 230px;
+  max-width: min(360px, 70vw);
+  max-height: 210px;
+  overflow: auto;
+  margin-top: 6px;
+  padding: 10px 10px 10px 26px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.ui-case-directory-entry {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ui-case-directory-entry .ui-case-directory-case {
+  flex: 1;
+  min-width: 0;
+}
+
+.ui-case-opinion-editor,
+.ui-case-saved-opinions {
+  display: grid;
+  gap: 8px;
+}
+
+.ui-case-saved-opinions h3 {
+  margin: 4px 0 0;
+  font-size: 14px;
+}
+
+.ui-case-saved-opinions article {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+}
+
+.ui-case-saved-opinions p {
+  margin: 4px 0;
+}
+
+.ui-case-history {
+  width: 100%;
+}
+
+.ui-case-approval-skips {
+  margin: 4px 0 0;
+  padding-inline-start: 17px;
 }

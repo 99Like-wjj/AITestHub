@@ -8,10 +8,6 @@ import {
   uiCaseImportInputSchema,
   uiCaseImportPreviewInputSchema,
 } from '../../../contracts/src/ui-case-import.js';
-import {
-  uiReviewStartSchema,
-  uiReviewUpdateSchema,
-} from '../../../contracts/src/ui-reviews.js';
 import { renamePlanInputSchema } from '../../../contracts/src/plans.js';
 import { supplementaryEvidenceResourceInputSchema } from '../../../contracts/src/ui-results.js';
 import {
@@ -22,7 +18,6 @@ import {
 import type { Database } from '../../../persistence/src/database.js';
 import { requireProject } from '../access/policy.js';
 import { AssetService } from '../assets/service.js';
-import { UiReviewService } from '../assets/ui-review.js';
 import { IssueService } from '../issues/service.js';
 import { ResultService } from '../results/service.js';
 import type { PlanService } from '../plans/service.js';
@@ -41,7 +36,6 @@ export function registerReviewWorkflowTools(
   plans?: PlanService,
 ) {
   const assets = new AssetService(db);
-  const reviews = new UiReviewService(db);
   const issues = new IssueService(db);
   const results = new ResultService(db);
   const add = registry.add.bind(registry);
@@ -130,77 +124,6 @@ export function registerReviewWorkflowTools(
     'read',
     (actor, args) =>
       assets.uiCaseImportReceipt(actor, args.projectId, args.commandId),
-  );
-
-  const meeting =
-    'UI 评审会议查询、创建、意见草稿及复审。保存人工复审与定稿需要有关决策。';
-  add(
-    'ath_reviews',
-    meeting,
-    'meeting-list',
-    z
-      .strictObject({
-        op: z.literal('meeting-list'),
-        ...project,
-        requirementId: idSchema.optional(),
-        requirementVersionId: idSchema.optional(),
-        caseId: idSchema.optional(),
-        archived: z.boolean().default(false),
-      })
-      .refine(
-        (args) =>
-          Boolean(args.requirementId) !== Boolean(args.requirementVersionId),
-      ),
-    'read',
-    (actor, args) =>
-      reviews.list(
-        actor,
-        args.projectId,
-        args.requirementVersionId ?? null,
-        args.caseId,
-        args.archived,
-        args.requirementId,
-      ),
-  );
-  add(
-    'ath_reviews',
-    meeting,
-    'meeting-get',
-    z.strictObject({
-      op: z.literal('meeting-get'),
-      ...target,
-      caseId: idSchema.optional(),
-    }),
-    'read',
-    (actor, args) => reviews.get(actor, args.projectId, args.id, args.caseId),
-  );
-  add(
-    'ath_reviews',
-    meeting,
-    'meeting-create',
-    input('meeting-create', uiReviewStartSchema),
-    'write',
-    (actor, args) => reviews.create(actor, args.projectId, args.input),
-  );
-  add(
-    'ath_reviews',
-    meeting,
-    'meeting-update',
-    item('meeting-update', uiReviewUpdateSchema),
-    'write',
-    (actor, args) => reviews.update(actor, args.projectId, args.id, args.input),
-    async (actor, args) => {
-      if (['save-draft', 'supplement'].includes(args.input.action)) return;
-      await db.transaction((tx) =>
-        requireProject(tx, actor, args.projectId, 'reviews.approve'),
-      );
-      return {
-        reason: 'human-decision',
-        summary: '确认此会议的评审决定。',
-        scope: { meetingId: args.id, decision: args.input },
-        links: [],
-      };
-    },
   );
 
   const evidence = '按报告、结果修订与步骤追加证据或登记人工复测。';

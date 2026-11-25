@@ -1,14 +1,5 @@
 import { useState } from 'react';
-import {
-  Button,
-  Checkbox,
-  Dropdown,
-  Empty,
-  Input,
-  Select,
-  Skeleton,
-} from 'antd';
-import type { MenuProps } from 'antd';
+import { Button, Dropdown, Empty, Input, Select, Skeleton } from 'antd';
 import { EllipsisOutlined, SearchOutlined } from '@ant-design/icons';
 import { z } from 'zod';
 import {
@@ -35,19 +26,14 @@ export function UiCaseLibraryPane({
   sceneCount,
   search,
   review,
-  selected,
   canWrite,
-  canReview,
   oldBasisCases,
   stageOf,
-  approving,
   onSearch,
   onReview,
   onCurrent,
   onCoverage,
-  onHistory,
   onOpen,
-  onReviewTeam,
   onAdd,
   onImport,
   onOpenCase,
@@ -56,8 +42,6 @@ export function UiCaseLibraryPane({
   canRemove,
   onEdit,
   onRemove,
-  onSelect,
-  onApprove,
 }: {
   scope: CaseScope | null;
   requirement: Requirement | undefined;
@@ -70,19 +54,14 @@ export function UiCaseLibraryPane({
   sceneCount: number | undefined;
   search: string;
   review: string;
-  selected: string[];
   canWrite: boolean;
-  canReview: boolean;
   oldBasisCases: Asset[];
   stageOf: (asset: Asset) => ReturnType<typeof uiStageForReviewState>;
-  approving: boolean;
   onSearch: (value: string) => void;
   onReview: (value: string) => void;
   onCurrent: () => void;
   onCoverage: () => void;
-  onHistory: () => void;
   onOpen: () => void;
-  onReviewTeam: () => void;
   onAdd: () => void;
   onImport: () => void;
   onOpenCase: (asset: Asset) => void;
@@ -91,10 +70,7 @@ export function UiCaseLibraryPane({
   canRemove: (asset: Asset) => boolean;
   onEdit: (asset: Asset) => void;
   onRemove: (asset: Asset) => void;
-  onSelect: (ids: string[]) => void;
-  onApprove: (ids: string[]) => Promise<void>;
 }) {
-  const [bulk, setBulk] = useState(false);
   const [closed, setClosed] = useState<Set<string>>(new Set());
   const canUseScope = Boolean(scope) && available && !loading;
   const currentVersion = requirement?.versions.find(
@@ -114,21 +90,6 @@ export function UiCaseLibraryPane({
       (rows.get(scene.id)?.length ?? 0) > 0 ||
       scene.title.toLocaleLowerCase().includes(keyword),
   );
-  const actions: MenuProps = {
-    items: [
-      ...(canUseScope && canReview ? [{ key: 'team', label: '团队评审' }] : []),
-      ...(canUseScope && canReview
-        ? [{ key: 'batch', label: bulk ? '结束选择用例' : '批量批准' }]
-        : []),
-    ],
-    onClick: ({ key }) => {
-      if (key === 'team') onReviewTeam();
-      if (key === 'batch') {
-        setBulk(!bulk);
-        if (bulk) onSelect([]);
-      }
-    },
-  };
   const scopeMeta = scope
     ? [
         scope.historical ? `资料快照 v${scope.versionNo} · 只读` : '',
@@ -175,9 +136,6 @@ export function UiCaseLibraryPane({
             <Button size="small" disabled={!canUseScope} onClick={onCoverage}>
               用例覆盖检查
             </Button>
-            <Button size="small" disabled={!canUseScope} onClick={onHistory}>
-              评审历史
-            </Button>
             <Button
               size="small"
               type="primary"
@@ -195,7 +153,7 @@ export function UiCaseLibraryPane({
         )}
       </div>
       <div className="ui-case-library-list">
-        {canUseScope && (canWrite || canReview) && (
+        {canUseScope && canWrite && (
           <div className="ui-case-library-actions">
             {canWrite && (
               <Button size="small" onClick={onAdd}>
@@ -205,26 +163,6 @@ export function UiCaseLibraryPane({
             {canWrite && (
               <Button size="small" onClick={onImport}>
                 导入用例
-              </Button>
-            )}
-            {canReview && (
-              <Dropdown trigger={['click']} menu={actions}>
-                <Button
-                  size="small"
-                  icon={<EllipsisOutlined />}
-                  aria-label="更多用例操作"
-                />
-              </Dropdown>
-            )}
-            {bulk && canReview && (
-              <Button
-                size="small"
-                type="primary"
-                loading={approving}
-                disabled={!selected.length}
-                onClick={() => void onApprove(selected)}
-              >
-                预览通过已选 {selected.length} 项
               </Button>
             )}
           </div>
@@ -250,9 +188,9 @@ export function UiCaseLibraryPane({
                 { value: 'all', label: '全部评审状态' },
                 { value: 'unapproved', label: '全部待评审' },
                 { value: 'pending', label: '待评审' },
-                { value: 'needsOptimization', label: '待 AI 修改' },
+                { value: 'needsOptimization', label: '待修改' },
                 { value: 'aiOptimized', label: '待人工复审' },
-                { value: 'approved', label: '已批准' },
+                { value: 'approved', label: '已通过' },
               ]}
             />
           </div>
@@ -290,25 +228,7 @@ export function UiCaseLibraryPane({
                   </header>
                   {open &&
                     group.map((asset) => (
-                      <div
-                        className="ui-case-library-row"
-                        key={asset.id}
-                        data-bulk={bulk || undefined}
-                      >
-                        {bulk && (
-                          <Checkbox
-                            aria-label={`选择${asset.title}`}
-                            disabled={!canReview || Boolean(asset.removedAt)}
-                            checked={selected.includes(asset.id)}
-                            onChange={(event) =>
-                              onSelect(
-                                event.target.checked
-                                  ? [...selected, asset.id]
-                                  : selected.filter((id) => id !== asset.id),
-                              )
-                            }
-                          />
-                        )}
+                      <div className="ui-case-library-row" key={asset.id}>
                         <div className="ui-case-library-row-detail">
                           <strong>{asset.title}</strong>
                           <span className="ui-case-asset-code" title={asset.id}>

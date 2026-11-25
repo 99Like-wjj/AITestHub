@@ -59,8 +59,6 @@ import {
   saveCoverageCheckpointInputSchema,
 } from '../../../contracts/src/coverage-checkpoints.js';
 import { ReviewService } from '../assets/reviews.js';
-import { UiReviewService } from '../assets/ui-review.js';
-import { uiReviewReplySchema } from '../../../contracts/src/ui-reviews.js';
 import { PlanService } from '../plans/service.js';
 import { UiExecutionService } from '../ui-executions/service.js';
 import { ResultService } from '../results/service.js';
@@ -123,7 +121,6 @@ export function createBusinessRegistry(
   registerApiAssetTools(registry, db);
   const assets = new AssetService(db);
   const reviews = new ReviewService(db);
-  const uiReviews = new UiReviewService(db);
   const plans =
     services.plans ??
     (services.testConfiguration
@@ -354,7 +351,7 @@ export function createBusinessRegistry(
     },
   );
   const reviewDescription =
-    '处理现有用例的意见、评审会议和审批。要求批准时，先调用 preview-approve 固定对象，同一轮接着调用 approve 返回待确认卡。只查看评审状态或只要求预览时使用相应读取操作。用例设计另走设计流程。';
+    '处理现有用例的评审建议和审批。优化整批用例前用 pending-suggestions 按需求读取已保存的待处理建议，提交用例新修订后用 optimization-notes 逐条关联原建议。要求批准时，先调用 preview-approve 固定对象，再调用 approve 生成待确认卡。';
   add(
     'ath_reviews',
     reviewDescription,
@@ -407,22 +404,14 @@ export function createBusinessRegistry(
   add(
     'ath_reviews',
     reviewDescription,
-    'meeting-handoff',
-    z.strictObject({ op: z.literal('meeting-handoff'), ...target }),
-    'read',
-    (a, i) => uiReviews.handoff(a, i.projectId, i.id),
-  );
-  add(
-    'ath_reviews',
-    reviewDescription,
-    'meeting-reply',
+    'pending-suggestions',
     z.strictObject({
-      op: z.literal('meeting-reply'),
-      ...target,
-      input: uiReviewReplySchema,
+      op: z.literal('pending-suggestions'),
+      ...project,
+      requirementId: idSchema,
     }),
-    'write',
-    (a, i) => uiReviews.reply(a, i.projectId, i.id, i.input),
+    'read',
+    (a, i) => reviews.pendingSuggestions(a, i.projectId, i.requirementId),
   );
   add(
     'ath_reviews',

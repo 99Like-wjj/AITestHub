@@ -113,8 +113,7 @@ function confirmationCapability(name: string, op: string): Capability {
   if (name === 'ath_results' && ['assess', 'record-human-retest'].includes(op))
     return 'results.assess';
   if (name === 'ath_results' && op === 'add-evidence') return 'results.submit';
-  if (name === 'ath_reviews' && ['approve', 'meeting-update'].includes(op))
-    return 'reviews.approve';
+  if (name === 'ath_reviews' && op === 'approve') return 'reviews.approve';
   if (name === 'ath_issues' && op === 'file-from-report')
     return 'reviews.approve';
   if (

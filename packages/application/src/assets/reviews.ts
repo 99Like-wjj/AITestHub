@@ -13,6 +13,11 @@ import {
   optimizationNotesInputSchema,
   removeOpinionInputSchema,
 } from '../../../contracts/src/assets.js';
+import {
+  uiCaseReviewDetailSchema,
+  uiCaseReviewStageListSchema,
+  uiPendingSuggestionsSchema,
+} from '../../../contracts/src/ui-reviews.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import type {
   Database,
@@ -30,11 +35,18 @@ import {
   invalidateDescendants,
   lockSet,
   reviewContext,
-  type AssetRow,
   type OpinionRow,
 } from './repository.js';
 
-import { uiMeetingGate } from './ui-review.js';
+import {
+  caseApprovalReasons,
+  caseReviewRows,
+  caseReviewStage,
+  caseSuggestions,
+  lockCaseReviewRequirements,
+} from './case-review.js';
+
+const storedApprovalContent = z.object(approvalContentSnapshotSchema.shape);
 
 interface ApprovalRow extends QueryResultRow {
   id: string;
@@ -82,6 +94,108 @@ export class ReviewService {
   constructor(readonly db: Database) {
     this.operations = new OperationService(db);
   }
+  async caseStages(
+    actor: ActorContext,
+    projectId: string,
+    scope: { requirementId: string } | { requirementVersionId: string },
+  ) {
+    return this.db.transaction(async (tx) => {
+      await requireProject(tx, actor, projectId, 'project.read');
+      const items = await caseReviewRows(tx, projectId, scope);
+      return uiCaseReviewStageListSchema.parse({
+        items: items.map((row) => ({
+          caseId: row.id,
+          revisionId: row.revision_id,
+          rowVersion: row.row_version,
+          stage: caseReviewStage(row),
+          reasons: caseApprovalReasons(row),
+        })),
+      });
+    });
+  }
+
+  async pendingSuggestions(
+    actor: ActorContext,
+    projectId: string,
+    requirementId: string,
+  ) {
+    return this.db.transaction(async (tx) => {
+      await requireProject(tx, actor, projectId, 'project.read');
+      const pending = (
+        await caseReviewRows(tx, projectId, { requirementId })
+      ).filter((row) => !row.archived && row.needs_response);
+      const opinions = await caseSuggestions(
+        tx,
+        projectId,
+        pending.map((row) => row.id),
+      );
+      const byCase = new Map<
+        string,
+        Array<(typeof opinions)[number]['suggestion']>
+      >();
+      for (const { caseId, suggestion } of opinions) {
+        if (suggestion.response !== null) continue;
+        const list = byCase.get(caseId) ?? [];
+        list.push(suggestion);
+        byCase.set(caseId, list);
+      }
+      return uiPendingSuggestionsSchema.parse({
+        cases: pending.flatMap((row) => {
+          const suggestions = byCase.get(row.id);
+          return suggestions?.length
+            ? [
+                {
+                  caseId: row.id,
+                  title: row.title,
+                  revisionId: row.revision_id,
+                  rowVersion: row.row_version,
+                  suggestions,
+                },
+              ]
+            : [];
+        }),
+      });
+    });
+  }
+
+  async caseDetail(actor: ActorContext, projectId: string, id: string) {
+    return this.db.transaction(async (tx) => {
+      await requireProject(tx, actor, projectId, 'project.read');
+      const asset = await getAsset(tx, projectId, id, true);
+      if (asset.kind !== 'UI' || asset.target_type !== 'case')
+        throw new DomainError('NOT_FOUND', '此范围内没有该 UI 用例。', 404);
+      const set = await getAsset(tx, projectId, asset.set_id, true);
+      const approval = (
+        await tx.query<{
+          id: string;
+          case_revision_id: string;
+          revision_no: number;
+          approved_at: Date;
+        }>(
+          `SELECT p.id,p.case_revision_id,r.revision_no,p.approved_at FROM app.approval_snapshots p
+         JOIN app.asset_revisions r ON r.id=p.case_revision_id WHERE p.project_id=$1 AND p.case_id=$2
+         ORDER BY p.approval_sequence DESC LIMIT 1`,
+          [projectId, id],
+        )
+      ).rows[0];
+      const suggestions = await caseSuggestions(tx, projectId, [id]);
+      return uiCaseReviewDetailSchema.parse({
+        caseId: id,
+        revisionId: asset.current_revision_id,
+        suggestions: suggestions.map((row) => row.suggestion),
+        setTitle: assetDto(set).title,
+        latestApproval: approval
+          ? {
+              id: approval.id,
+              revisionId: approval.case_revision_id,
+              revisionNo: approval.revision_no,
+              approvedAt: approval.approved_at.toISOString(),
+            }
+          : null,
+      });
+    });
+  }
+
   async opinions(
     actor: ActorContext,
     projectId: string,
@@ -166,6 +280,19 @@ export class ReviewService {
         const initial = await getAsset(transaction, projectId, id);
         await lockSet(transaction, projectId, initial.set_id);
         const asset = await getAsset(transaction, projectId, id);
+        if (asset.kind === 'UI' && asset.target_type === 'case') {
+          if (asset.current_revision_id !== input.targetRevisionId) stale();
+          await lockCaseReviewRequirements(transaction, projectId, [id]);
+          const [current] = await caseReviewRows(transaction, projectId, {
+            caseIds: [id],
+          });
+          if (current?.archived)
+            throw new DomainError(
+              'PRECONDITIONS_MISSING',
+              '归档需求仅可查看评审记录。',
+              422,
+            );
+        }
         if (
           !(
             await transaction.query(
@@ -414,11 +541,30 @@ export class ReviewService {
             422,
           );
         const items = [];
+        const reviewable = new Map(
+          (
+            await caseReviewRows(transaction, projectId, {
+              caseIds: input.objectIds,
+            })
+          ).map((row) => [row.id, row]),
+        );
+        const baselines = new Map(input.baselines?.map((row) => [row.id, row]));
         for (const id of input.objectIds) {
           const asset = await getAsset(transaction, projectId, id);
           if (asset.kind !== input.kind)
             throw new DomainError('NOT_FOUND', '此类型范围内没有该目标。', 404);
-          const context = await this.currentReviewContext(transaction, asset);
+          const context = await reviewContext(transaction, asset);
+          const candidate = reviewable.get(asset.id);
+          const reasons = candidate
+            ? caseApprovalReasons(candidate)
+            : context.reasons;
+          const baseline = baselines.get(id);
+          if (
+            baseline &&
+            (baseline.revisionId !== asset.current_revision_id ||
+              baseline.rowVersion !== asset.row_version)
+          )
+            reasons.push('用例内容或评审信息已更新，请核对后重新审批。');
           items.push({
             id,
             title: assetDto(asset).title,
@@ -426,8 +572,8 @@ export class ReviewService {
             requirementVersionId: asset.requirement_version_id,
             rowVersion: asset.row_version,
             revisionId: asset.current_revision_id,
-            eligible: context.reasons.length === 0,
-            reasons: context.reasons,
+            eligible: reasons.length === 0,
+            reasons,
             contextDigest: context.digest,
           });
         }
@@ -491,33 +637,60 @@ export class ReviewService {
             409,
           );
         const setIds = new Set<string>();
-        for (const item of items)
-          setIds.add((await getAsset(transaction, projectId, item.id)).set_id);
+        for (const item of items) {
+          const asset = await getAsset(transaction, projectId, item.id, true);
+          if (!asset.removed_at) setIds.add(asset.set_id);
+        }
         for (const id of [...setIds].sort())
           await lockSet(transaction, projectId, id);
+        await lockCaseReviewRequirements(
+          transaction,
+          projectId,
+          input.objectIds,
+        );
+        const reviewable = new Map(
+          (
+            await caseReviewRows(transaction, projectId, {
+              caseIds: input.objectIds,
+            })
+          ).map((row) => [row.id, row]),
+        );
         const validated = [];
+        const results = [];
         for (const item of items) {
-          const asset = await getAsset(transaction, projectId, item.id);
+          const asset = await getAsset(transaction, projectId, item.id, true);
+          if (asset.removed_at) {
+            results.push({
+              id: item.id,
+              status: 'conflict',
+              code: 'STALE_BASE_REVISION',
+              statusCode: 412,
+            });
+            continue;
+          }
           if (asset.kind === 'API')
             throw new DomainError(
               'PRECONDITIONS_MISSING',
               '接口用例通过完整调试后保存为可回归。',
               422,
             );
-          const context = await this.currentReviewContext(transaction, asset);
+          const context = await reviewContext(transaction, asset);
+          const candidate = reviewable.get(asset.id);
           validated.push({
             item,
             asset,
             context,
+            reasons: candidate
+              ? caseApprovalReasons(candidate)
+              : context.reasons,
             stale:
               asset.row_version !== item.rowVersion ||
               asset.current_revision_id !== item.revisionId ||
               context.digest !== item.contextDigest,
           });
         }
-        const results = [];
         for (const entry of validated) {
-          const { item, asset, context } = entry;
+          const { item, asset, context, reasons } = entry;
           if (entry.stale) {
             results.push({
               id: item.id,
@@ -527,12 +700,12 @@ export class ReviewService {
             });
             continue;
           }
-          if (!item.eligible || context.reasons.length) {
+          if (!item.eligible || reasons.length) {
             results.push({
               id: item.id,
               status: 'skipped',
               code: 'PRECONDITIONS_MISSING',
-              reasons: context.reasons,
+              reasons: reasons.length ? reasons : item.reasons,
             });
             continue;
           }
@@ -570,9 +743,6 @@ export class ReviewService {
                     scenario: assetDto(scenario),
                     set: assetDto(set),
                     opinions: context.context.opinions,
-                    ...('meetingDecisions' in context
-                      ? { meetingDecisions: context.meetingDecisions }
-                      : {}),
                   }),
                   actor.userId,
                 ],
@@ -580,6 +750,11 @@ export class ReviewService {
             ).rows[0];
             if (!approved) throw new Error('Approval insert returned no row');
             approvalSnapshotId = approved.id;
+            await transaction.query(
+              `UPDATE app.review_opinions SET resolved_approval_id=$2
+              WHERE asset_id=$1 AND resolved_approval_id IS NULL AND removed_at IS NULL`,
+              [asset.id, approvalSnapshotId],
+            );
           }
           await transaction.query(
             `INSERT INTO app.asset_context_approvals(project_id,kind,set_id,asset_id,revision_id,context_digest,snapshot,approved_by)
@@ -627,29 +802,6 @@ export class ReviewService {
       projectId,
     );
   }
-  private async currentReviewContext(
-    transaction: SqlExecutor,
-    asset: AssetRow,
-  ) {
-    const context = await reviewContext(transaction, asset);
-    if (asset.kind !== 'UI' || asset.target_type !== 'case') return context;
-    const gate = await uiMeetingGate(transaction, asset, context.chain);
-    return {
-      ...context,
-      reasons: [...context.reasons, ...gate.reasons],
-      digest: createHash('sha256')
-        .update(
-          canonicalJson({
-            baseline: context.digest,
-            decisions: gate.history,
-            gate: gate.reasons,
-          }),
-        )
-        .digest('hex'),
-      meetingDecisions: gate.history,
-    };
-  }
-
   async latestApprovedInTransaction(
     transaction: SqlExecutor,
     projectId: string,
@@ -665,17 +817,23 @@ export class ReviewService {
     const asset = await getAsset(transaction, projectId, caseId);
     if (asset.target_type !== 'case' || asset.kind !== 'UI')
       throw new DomainError('NOT_FOUND', '没有此类型用例。', 404);
-    const context = await this.currentReviewContext(transaction, asset);
+    const context = await reviewContext(transaction, asset);
+    const [review] = await caseReviewRows(transaction, projectId, {
+      caseIds: [caseId],
+    });
     const row = (
       await transaction.query<ApprovalRow>(
         'SELECT * FROM app.approval_snapshots WHERE project_id=$1 AND kind=$2 AND case_id=$3 ORDER BY approval_sequence DESC LIMIT 1',
         [projectId, kind, caseId],
       )
     ).rows[0];
-    if (context.reasons.length)
+    if (context.reasons.length || review?.needs_response)
       throw new DomainError(
         'PRECONDITIONS_MISSING',
-        context.reasons.join(' '),
+        [
+          ...context.reasons,
+          ...(review?.needs_response ? ['还有修改建议待处理。'] : []),
+        ].join(' '),
         422,
       );
     if (
@@ -696,7 +854,7 @@ export class ReviewService {
       );
     return {
       approval: approvalDto(row),
-      snapshot: approvalContentSnapshotSchema.parse(row.snapshot),
+      snapshot: storedApprovalContent.parse(row.snapshot),
     };
   }
   async getApprovalSnapshotInTransaction(
@@ -715,7 +873,7 @@ export class ReviewService {
       throw new DomainError('NOT_FOUND', '此项目没有该 UI 批准快照。', 404);
     return {
       approval: approvalDto(row),
-      snapshot: approvalContentSnapshotSchema.parse(row.snapshot),
+      snapshot: storedApprovalContent.parse(row.snapshot),
     };
   }
   async getApprovalSnapshot(

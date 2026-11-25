@@ -1,190 +1,22 @@
 import { z } from 'zod';
-import { commandIdSchema, idSchema, timestampSchema } from './base.js';
-import { assetSchema } from './assets.js';
-import { uiCaseContentSchema } from './domain.js';
+import { idSchema, persistedRowVersionSchema, timestampSchema, titleSchema } from './base.js';
 
-const caseIds = z.array(idSchema).min(1).max(1000).refine((ids) => new Set(ids).size === ids.length);
-const opinionBody = z.string().trim().min(1).max(10_000);
-const rowVersion = z.number().int().positive();
-const roundNo = z.number().int().positive();
-
-export const uiReviewStartSchema = z.strictObject({
-  commandId: commandIdSchema,
-  requirementVersionId: idSchema,
-  caseIds,
-  caseWorkbenchBasis: z.strictObject({
-    revisionId: idSchema,
-    rowVersion,
-    draft: z.discriminatedUnion('kind', [
-      z.strictObject({ kind: z.literal('opinion'), body: opinionBody }),
-      z.strictObject({ kind: z.literal('no-change') }),
-    ]).optional(),
-  }).optional(),
+export const uiCaseReviewStageListSchema=z.strictObject({
+  items:z.array(z.strictObject({caseId:idSchema,revisionId:idSchema,rowVersion:persistedRowVersionSchema,
+    stage:z.enum(['pending','needsOptimization','waitingHuman','approved']),reasons:z.array(z.string())})),
 });
 
-const basis = z.strictObject({
-  caseId: idSchema,
-  revisionId: idSchema,
-  revisionNo: rowVersion,
-  rowVersion,
-  scenarioRevisionId: idSchema,
-  setRevisionId: idSchema,
-});
-export const uiReviewDraftOpinionSchema = z.strictObject({
-  id: idSchema.optional(),
-  body: opinionBody,
-  target: z.enum(['case', 'scenario', 'set']),
-  targetId: idSchema,
-  caseIds,
-});
-const opinion = uiReviewDraftOpinionSchema.required({ id: true }).safeExtend({
-  authorId: idSchema,
-  createdAt: timestampSchema,
+const caseSuggestionSchema=z.strictObject({id:idSchema,sourceRevisionId:idSchema,
+  sourceRevisionNo:persistedRowVersionSchema,body:z.string().min(1).max(10000),createdBy:idSchema,
+  createdAt:timestampSchema,response:z.string().nullable(),
 });
 
-const workItem = z.strictObject({
-  opinionId: idSchema,
-  basis,
-  round: roundNo,
-  state: z.enum(['waiting', 'returned', 'resolved', 'rework']),
-  instruction: opinionBody.optional(),
-  reply: z.strictObject({
-    body: opinionBody,
-    outcome: z.enum(['changed', 'retained', 'unaddressed']),
-    revisionId: idSchema,
-    actorId: idSchema,
-    time: timestampSchema,
-  }).optional(),
-  decision: z.strictObject({
-    actorId: idSchema,
-    time: timestampSchema,
-    acceptedRevisionId: idSchema.optional(),
-  }).optional(),
+export const uiCaseReviewDetailSchema=z.strictObject({
+  caseId:idSchema,revisionId:idSchema,suggestions:z.array(caseSuggestionSchema),setTitle:titleSchema,
+  latestApproval:z.strictObject({id:idSchema,revisionId:idSchema,revisionNo:persistedRowVersionSchema,approvedAt:timestampSchema}).nullable(),
 });
 
-export const uiCaseAssessmentOutcomeSchema = z.enum([
-  'resolved',
-  'needsRework',
-  'inconclusive',
-]);
-
-const uiCaseAssessmentSchema = z.strictObject({
-  caseId: idSchema,
-  revisionId: idSchema,
-  round: roundNo,
-  outcome: uiCaseAssessmentOutcomeSchema,
-  note: opinionBody,
-  instruction: opinionBody.optional(),
-  actorId: idSchema,
-  time: timestampSchema,
-});
-
-export const uiReviewMeetingStateSchema = z.strictObject({
-  scope: z.array(basis),
-  draftOpinions: z.array(opinion),
-  noChange: z.array(basis),
-  opinions: z.array(opinion),
-  items: z.array(workItem),
-  assessments: z.array(uiCaseAssessmentSchema).optional(),
-  caseWorkbenchRound: roundNo.optional(),
-  finalized: z.boolean(),
-});
-export type UiReviewMeetingState = z.infer<typeof uiReviewMeetingStateSchema>;
-export type UiReviewWorkItem = z.infer<typeof workItem>;
-export type UiReviewBasis = z.infer<typeof basis>;
-export type UiReviewOpinion = z.infer<typeof opinion>;
-
-export const uiReviewReplySchema = z.strictObject({
-  commandId: commandIdSchema,
-  caseId: idSchema,
-  opinionId: idSchema,
-  round: roundNo,
-  baseRevisionId: idSchema,
-  revisionId: idSchema,
-  outcome: z.enum(['changed', 'retained', 'unaddressed']),
-  body: opinionBody,
-});
-
-export const uiReviewUpdateSchema = z.discriminatedUnion('action', [
-  z.strictObject({
-    commandId: commandIdSchema,
-    action: z.literal('save-draft'),
-    rowVersion,
-    opinion: uiReviewDraftOpinionSchema,
-  }),
-  z.strictObject({
-    commandId: commandIdSchema,
-    action: z.literal('remove-draft'),
-    rowVersion,
-    opinionId: idSchema,
-  }),
-  z.strictObject({
-    commandId: commandIdSchema,
-    action: z.literal('no-change'),
-    rowVersion,
-    caseId: idSchema,
-  }),
-  z.strictObject({
-    commandId: commandIdSchema,
-    action: z.literal('finalize'),
-    rowVersion,
-  }),
-  z.strictObject({
-    commandId: commandIdSchema,
-    action: z.literal('supplement'),
-    rowVersion,
-    opinion: uiReviewDraftOpinionSchema.omit({ id: true }),
-  }),
-  z.strictObject({
-    commandId: commandIdSchema,
-    action: z.literal('decide'),
-    rowVersion,
-    opinionId: idSchema,
-    caseId: idSchema,
-    revisionId: idSchema,
-    decision: z.enum(['resolve', 'return']),
-    instruction: opinionBody.optional(),
-  }),
-  z.strictObject({
-    commandId: commandIdSchema,
-    action: z.literal('assess-case'),
-    rowVersion,
-    caseId: idSchema,
-    revisionId: idSchema,
-    outcome: uiCaseAssessmentOutcomeSchema,
-    note: opinionBody,
-    instruction: opinionBody.optional(),
-  }),
-]);
-export const uiReviewRoomSummarySchema = z.strictObject({
-  id: idSchema,
-  requirementVersionId: idSchema,
-  rowVersion,
-  createdAt: timestampSchema,
-  createdBy: idSchema,
-  caseCount: z.number().int().nonnegative(),
-  finalized: z.boolean(),
-});
-export const uiCaseReviewStageListSchema = z.strictObject({
-  items: z.array(
-    z.strictObject({
-      caseId: idSchema,
-      revisionId: idSchema,
-      stage: z.enum(['pending', 'needsOptimization', 'waitingHuman', 'approved']),
-    }),
-  ),
-});
-
-export const uiReviewMeetingListSchema = z.strictObject({
-  meetings: z.array(uiReviewRoomSummarySchema),
-  activeMeetingId: idSchema.optional(),
-});
-export const uiReviewMeetingMutationSchema = z.strictObject({ meeting: uiReviewRoomSummarySchema });
-export const uiReviewMeetingDetailSchema = uiReviewMeetingMutationSchema.extend({
-  state:uiReviewMeetingStateSchema,
-  cases:z.array(assetSchema),
-  revisions:z.array(z.strictObject({id:idSchema,revisionNo:rowVersion,content:uiCaseContentSchema})),
-});
-export const uiReviewHandoffSchema = uiReviewMeetingMutationSchema.extend({
-  items:z.array(workItem.extend({opinion,baseChanged:z.boolean(),asset:assetSchema})),
+export const uiPendingSuggestionsSchema=z.strictObject({
+  cases:z.array(z.strictObject({caseId:idSchema,title:titleSchema,revisionId:idSchema,
+    rowVersion:persistedRowVersionSchema,suggestions:z.array(caseSuggestionSchema)})),
 });

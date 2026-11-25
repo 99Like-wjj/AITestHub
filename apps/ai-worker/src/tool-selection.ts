@@ -102,10 +102,7 @@ export function businessRoute(prompt: string): string[] {
     /用例|测试集|场景|case|评审/iu.test(prompt)
   )
     return ['ath_reviews', 'ath_assets', 'ath_requirements'];
-  if (
-    /评审|复审|review/iu.test(prompt) &&
-    /用例|case|会议|meeting/iu.test(prompt)
-  )
+  if (/评审|复审|review/iu.test(prompt) && /用例|case/iu.test(prompt))
     return ['ath_reviews', 'ath_assets', 'ath_requirements'];
   return [];
 }

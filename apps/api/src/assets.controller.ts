@@ -14,7 +14,6 @@ import { AssetService } from '../../../packages/application/src/assets/service.j
 import { CoverageCheckpointService } from '../../../packages/application/src/assets/coverage-checkpoints.js';
 import { readCaseSupplementOrigin } from '../../../packages/application/src/assets/supplement-origin.js';
 import { ReviewService } from '../../../packages/application/src/assets/reviews.js';
-import { UiReviewService } from '../../../packages/application/src/assets/ui-review.js';
 import { IdentityService } from '../../../packages/application/src/identity/service.js';
 import { DomainError } from '../../../packages/application/src/errors.js';
 
@@ -183,84 +182,32 @@ export class AssetsController {
     }
     if (path === 'approve' && req.method === 'POST')
       return res.json(await this.reviews.commit(actor, projectId, req.body));
-    if (
-      (path === 'ui-case-review-stages' || path === 'ui-review-meetings') &&
-      req.method === 'GET'
-    ) {
+    if (path === 'ui-case-review-stages' && req.method === 'GET') {
       const requirementId = idSchema.optional().parse(req.query.requirementId);
-      const versionId =
-        idSchema.optional().parse(req.query.requirementVersionId) ?? null;
-      if (Boolean(requirementId) === Boolean(versionId))
-        throw new DomainError(
-          'VALIDATION_ERROR',
-          '请选择需求或固定历史范围。',
-          400,
-        );
-      const review = new UiReviewService(this.assets.db);
-      if (path === 'ui-case-review-stages')
+      const requirementVersionId = idSchema
+        .optional()
+        .parse(req.query.requirementVersionId);
+      if (requirementId && !requirementVersionId)
         return res.json(
-          await review.stages(actor, projectId, versionId, requirementId),
+          await this.reviews.caseStages(actor, projectId, { requirementId }),
         );
+      if (requirementVersionId && !requirementId)
+        return res.json(
+          await this.reviews.caseStages(actor, projectId, {
+            requirementVersionId,
+          }),
+        );
+      throw new DomainError('VALIDATION_ERROR', '请选择需求或资料快照。', 400);
+    }
+    const caseReview = /^([^/]+)\/case-review$/.exec(path)?.[1];
+    if (caseReview && req.method === 'GET')
       return res.json(
-        await review.list(
+        await this.reviews.caseDetail(
           actor,
           projectId,
-          versionId,
-          idSchema.optional().parse(req.query.caseId),
-          booleanQueryValue(false).parse(req.query.archived),
-          requirementId,
+          idSchema.parse(caseReview),
         ),
       );
-    }
-    if (path === 'ui-review-meetings' && req.method === 'POST')
-      return res
-        .status(201)
-        .json(
-          await new UiReviewService(this.assets.db).create(
-            actor,
-            projectId,
-            req.body,
-          ),
-        );
-    const meetingReceipt = /^ui-review-meetings\/receipt\/([^/]+)$/.exec(path);
-    if (meetingReceipt?.[1] && req.method === 'GET') {
-      const operation = req.query.operation;
-      if (
-        operation !== 'reviews.meeting-create' &&
-        operation !== 'reviews.meeting-update'
-      )
-        throw new DomainError('NOT_FOUND', '此评审操作不可查询。', 404);
-      const result = await new UiReviewService(this.assets.db).operations.get(
-        actor,
-        {
-          operation,
-          key: commandIdSchema.parse(decodeURIComponent(meetingReceipt[1])),
-        },
-      );
-      if (result.command.projectId !== projectId)
-        throw new DomainError('NOT_FOUND', '此范围内没有该评审回执。', 404);
-      return res.json({
-        status: result.command.status,
-        response: result.command.response ?? null,
-      });
-    }
-    const meeting = /^ui-review-meetings\/([^/]+)$/.exec(path);
-    if (meeting?.[1]) {
-      const review = new UiReviewService(this.assets.db);
-      const id = idSchema.parse(meeting[1]);
-      if (req.method === 'GET')
-        return res.json(
-          await review.get(
-            actor,
-            projectId,
-            id,
-            idSchema.optional().parse(req.query.caseId),
-            booleanQueryValue(false).parse(req.query.archived),
-          ),
-        );
-      if (req.method === 'POST')
-        return res.json(await review.update(actor, projectId, id, req.body));
-    }
     const origin = /^([^/]+)\/supplement-origin$/.exec(path);
     if (origin?.[1] && req.method === 'GET')
       return res.json(
