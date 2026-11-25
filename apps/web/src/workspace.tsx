@@ -1,3 +1,7 @@
+import {
+  actionIntentResponseSchema,
+  parseActionIntentReply,
+} from '../../../packages/contracts/src/action-intents';
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
   InlineComposer,
@@ -2210,6 +2214,53 @@ export function Workspace({
       pending
     )
       return;
+    const confirmationConversation = destination?.id ?? activeRef.current;
+    if (
+      confirmationConversation &&
+      !inFlight &&
+      !composerSkills.length &&
+      !references.length &&
+      parseActionIntentReply(content)
+    ) {
+      sendDispatchInProgress.current = true;
+      setSending(true);
+      setSendError(undefined);
+      try {
+        const { intent: result } = await api(
+          '/me/conversations/' +
+            confirmationConversation +
+            '/action-intents/reply',
+          { method: 'POST', body: { text: content } },
+          actionIntentResponseSchema,
+        );
+        if (
+          mounted.current &&
+          sendEpoch === identityContextEpoch() &&
+          activeRef.current === confirmationConversation
+        ) {
+          setContent('');
+          window.dispatchEvent(
+            new CustomEvent('aitesthub:conversation-confirmation', {
+              detail: confirmationConversation,
+            }),
+          );
+          if (result.status === 'unknown')
+            setSendError('原提案结果尚待核对，请在本对话中更新原状态。');
+        }
+      } catch (failure) {
+        if (
+          mounted.current &&
+          sendEpoch === identityContextEpoch() &&
+          activeRef.current === confirmationConversation
+        )
+          setSendError(describeError(failure));
+      } finally {
+        sendDispatchInProgress.current = false;
+        if (mounted.current && sendEpoch === identityContextEpoch())
+          setSending(false);
+      }
+      return;
+    }
     if (model && effort && !model.effortValues.includes(effort)) {
       setSendError('所选模型不支持当前参数，请重新选择。');
       setModelPickerOpen(true);

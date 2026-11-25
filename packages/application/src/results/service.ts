@@ -339,6 +339,12 @@ export class ResultService {
 
   async addEvidence(actor: ActorContext, projectId: string, raw: unknown) {
     const input = supplementaryEvidenceInputSchema.parse(raw);
+    if (input.reportReview && input.reportReview.resultId !== input.resultId)
+      throw new DomainError(
+        'VALIDATION_ERROR',
+        '补证结果与报告步骤范围不一致。',
+        400,
+      );
     return this.operations.execute(
       actor,
       'results.evidence-addition',
@@ -348,6 +354,8 @@ export class ResultService {
         await requireProject(tx, actor, projectId, 'results.submit');
       },
       async (tx) => {
+        if (input.reportReview)
+          await lockReportResult(tx, projectId, input.reportReview);
         const initialRead = await this.result(tx, projectId, input.resultId);
         await readRun(tx, projectId, initialRead.run_id, true);
         const initial = await this.result(tx, projectId, input.resultId, true);
@@ -411,7 +419,24 @@ export class ResultService {
           [...evidence.values()],
           'manualAddition',
         );
-        if ([...evidence.values()].some((id) => !linkedBefore.has(id)))
+        const ordinal = input.reportReview?.stepOrdinal;
+        let addedStepLinks = false;
+        if (ordinal !== undefined) {
+          const links = await tx.query(
+            'INSERT INTO app.result_step_evidence_links(result_id,evidence_id,result_revision_id,step_ordinal) SELECT $1,id,$2,$3 FROM unnest($4::uuid[]) id ON CONFLICT DO NOTHING',
+            [
+              initial.id,
+              initial.current_revision_id,
+              ordinal,
+              [...evidence.values()],
+            ],
+          );
+          addedStepLinks = Boolean(links.rowCount);
+        }
+        if (
+          addedStepLinks ||
+          [...evidence.values()].some((id) => !linkedBefore.has(id))
+        )
           await bumpUiDeliveryRunMetadata(tx, initial.run_id);
         const report = await persistReportRevision(
           tx,

@@ -1,3 +1,8 @@
+import {
+  parseActionIntentReply,
+  actionIntentChatReplySchema,
+  mcpActionIntentReplySchema,
+} from '../../../contracts/src/action-intents.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type {
@@ -640,17 +645,77 @@ export class ActionIntents {
     await this.getConversation(actor, conversationId, id);
     return this.resolve(actor, id, raw, 'web-user-event', conversationId);
   }
-  async getMcpForWeb(actor: ActorContext, id: string) {
-    if (actor.entrypoint !== 'web')
-      throw new DomainError('FORBIDDEN', '只接受本人网页会话。', 403);
+  async replyInConversation(
+    actor: ActorContext,
+    conversationId: string,
+    raw: unknown,
+  ) {
+    const input = actionIntentChatReplySchema.parse(raw);
+    const reply = parseActionIntentReply(input.text);
+    if (!reply)
+      throw new DomainError(
+        'VALIDATION_ERROR',
+        '请在原对话回复“确认”或“取消”。',
+        400,
+      );
+    const { intents } = await this.listConversation(
+      actor,
+      conversationId,
+      !reply.locator,
+    );
+    const candidates = reply.locator
+      ? intents.filter(
+          (intent) =>
+            intent.id === reply.locator ||
+            intent.id.slice(0, 8) === reply.locator,
+        )
+      : intents;
+    if (candidates.length !== 1)
+      throw new DomainError(
+        'PRECONDITIONS_MISSING',
+        '请用当前对话里的一条确认编号指定提案。',
+        422,
+      );
+    const target = candidates[0]!;
+    return this.decide(actor, conversationId, target.id, {
+      revision: target.revision,
+      scopeDigest: target.scopeDigest,
+      decision: reply.decision,
+    });
+  }
+
+  async getMcp(actor: ActorContext, id: string) {
+    if (actor.entrypoint !== 'official-mcp' || !actor.keyId)
+      throw new DomainError('FORBIDDEN', '此入口仅接受原 MCP 个人 Key。', 403);
     return this.get(actor, id, 'official-mcp');
   }
-  async decideMcpForWeb(actor: ActorContext, id: string, raw: unknown) {
-    await this.getMcpForWeb(actor, id);
-    return this.resolve(actor, id, raw, 'web-user-event', null);
-  }
-  async resolveForm(actor: ActorContext, id: string, raw: unknown) {
-    return this.resolve(actor, id, raw, 'mcp-form-elicitation');
+
+  async replyViaMcp(actor: ActorContext, raw: unknown) {
+    const input = mcpActionIntentReplySchema.parse(raw);
+    const reply = parseActionIntentReply(input.text);
+    if (
+      !reply ||
+      (reply.locator &&
+        reply.locator !== input.id &&
+        reply.locator !== input.id.slice(0, 8))
+    )
+      throw new DomainError(
+        'PRECONDITIONS_MISSING',
+        '等待本地对话用户对这份提案的明确确认或取消。',
+        422,
+      );
+    await this.getMcp(actor, input.id);
+    return this.resolve(
+      actor,
+      input.id,
+      {
+        revision: input.revision,
+        scopeDigest: input.scopeDigest,
+        decision: reply.decision,
+      },
+      'mcp-chat-authorization',
+      null,
+    );
   }
   private async get(
     actor: ActorContext,
@@ -723,7 +788,7 @@ export class ActionIntents {
     actor: ActorContext,
     id: string,
     raw: unknown,
-    source: 'web-user-event' | 'mcp-form-elicitation',
+    source: 'web-user-event' | 'mcp-chat-authorization',
     expectedConversationId?: string | null,
   ) {
     idSchema.parse(id);
@@ -737,7 +802,8 @@ export class ActionIntents {
     };
     if (
       (source === 'web-user-event' && actor.entrypoint !== 'web') ||
-      (source === 'mcp-form-elicitation' && actor.entrypoint !== 'official-mcp')
+      (source === 'mcp-chat-authorization' &&
+        actor.entrypoint !== 'official-mcp')
     )
       throw new DomainError(
         'FORBIDDEN',
@@ -785,14 +851,6 @@ export class ActionIntents {
           found.interaction_kind !== 'inlineCard')
       )
         throw new DomainError('NOT_FOUND', '当前对话没有此可执行卡。', 404);
-      if (
-        source === 'mcp-form-elicitation' &&
-        (found.interaction_kind !== 'mcpForm' ||
-          ['ath_platform_admin', 'ath_project_members'].includes(
-            found.tool_name,
-          ))
-      )
-        throw new DomainError('FORBIDDEN', '此提案不是当前MCP表单意图。', 403);
       if (found.proposal_revision !== input.revision)
         throw new DomainError(
           'STALE_BASE_REVISION',

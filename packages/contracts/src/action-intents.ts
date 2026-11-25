@@ -12,6 +12,30 @@ export const actionIntentDecisionSchema = z.strictObject({
   scopeDigest: sha256Schema,
   decision: z.enum(['execute', 'cancel']),
 });
+
+export const actionIntentChatReplySchema = z.strictObject({
+  text: z.string().trim().min(1).max(80),
+});
+export const mcpActionIntentReplySchema = actionIntentChatReplySchema.extend({
+  id: idSchema,
+  revision: persistedRowVersionSchema,
+  scopeDigest: sha256Schema,
+});
+
+export function parseActionIntentReply(input: string) {
+  const match =
+    /^(确认(?:执行)?|取消(?:执行)?)(?:\s+([0-9a-f-]{8,36}))?$/iu.exec(
+      input.normalize('NFKC').trim(),
+    );
+  if (!match) return null;
+  return {
+    decision: match[1]?.startsWith('确认')
+      ? ('execute' as const)
+      : ('cancel' as const),
+    locator: match[2]?.toLowerCase(),
+  };
+}
+
 export const actionIntentPresentationSchema = z.strictObject({
   title: z.string().min(1).max(200),
   summary: z.string().max(4000),

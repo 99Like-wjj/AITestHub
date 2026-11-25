@@ -113,6 +113,7 @@ export const webFinalAssessmentInputSchema = finalAssessmentInputSchema.extend({
 export const supplementaryEvidenceInputSchema = z.strictObject({
   commandId: commandIdSchema,
   resultId: idSchema,
+  reportReview: reportProblemReviewScopeSchema.optional(),
   evidenceManifest: z.array(evidenceManifestItemSchema).min(1).max(100),
 });
 export const supplementaryEvidenceResourceInputSchema =
@@ -234,6 +235,7 @@ export const reportFactsSchema = z.strictObject({
           effectiveOutcome: uiOutcomeSchema,
           cleanupState: cleanupStateSchema,
           content: resultItemSchema,
+          manualStepEvidence: z.array(z.strictObject({ evidenceId: idSchema, stepOrdinal: z.number().int().min(1).max(100) })).optional(),
           assessmentRevisionId: idSchema.nullable(),
           assessmentReason: z.string().nullable(),
           assessmentBasisRevisionId: idSchema.nullable(),

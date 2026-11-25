@@ -82,6 +82,29 @@ export async function reportFacts(
      JOIN app.file_resources f ON f.id=e.file_id WHERE e.run_id=$1 ORDER BY e.created_at,e.id`,
     [runId],
   );
+
+  const stepEvidence = new Map<
+    string,
+    Array<{ evidenceId: string; stepOrdinal: number }>
+  >();
+  const scoped = await tx.query<{
+    result_id: string;
+    evidence_id: string;
+    step_ordinal: number;
+  }>(
+    `SELECT e.result_id,e.evidence_id,e.step_ordinal FROM app.result_step_evidence_links e
+     JOIN app.results r ON r.id=e.result_id AND r.current_revision_id=e.result_revision_id
+     WHERE r.project_id=$1 AND r.run_id=$2 ORDER BY e.result_id,e.step_ordinal,e.evidence_id`,
+    [projectId, runId],
+  );
+  for (const link of scoped.rows) {
+    const entries = stepEvidence.get(link.result_id) ?? [];
+    entries.push({
+      evidenceId: link.evidence_id,
+      stepOrdinal: link.step_ordinal,
+    });
+    stepEvidence.set(link.result_id, entries);
+  }
   const byItem = new Map(rows.rows.map((row) => [row.run_item_id, row]));
   const original = emptyCounts();
   const reported = emptyCounts();
@@ -119,6 +142,9 @@ export async function reportFacts(
         effectiveOutcome,
         cleanupState: row.cleanup_state,
         content,
+        ...(stepEvidence.has(row.id)
+          ? { manualStepEvidence: stepEvidence.get(row.id)! }
+          : {}),
         assessmentRevisionId: row.assessment_id,
         assessmentReason: row.assessment_reason,
         assessmentBasisRevisionId: row.assessment_basis_revision_id,

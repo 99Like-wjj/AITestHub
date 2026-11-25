@@ -45,7 +45,7 @@ export function registerManagementTools(
   const projects = new ProjectService(db);
   const add = registry.add.bind(registry);
   const members =
-    '按已授权项目查看成员。set/remove 为精确成员和角色提案，须管理范围和本人网页确认。';
+    '按已授权项目查看成员。set/remove 为精确成员和角色提案，须管理范围和本人在原对话确认。';
   add(
     'ath_project_members',
     members,
@@ -150,7 +150,7 @@ export function registerManagementTools(
 
   const adminName = 'ath_platform_admin';
   const description =
-    '仅平台代理当前平台管理员。读取人员和配置的脱敏状态，提出明确管理变更，写入须由本人通过网页确认。';
+    '仅平台代理当前平台管理员。读取人员和配置的脱敏状态，提出明确管理变更，写入须由本人在原对话确认。';
   async function authorizedWebActor(actor: ActorContext, op?: string) {
     return db.transaction(async (tx) => {
       await requireBusinessAdministrator(tx, actor);
@@ -159,11 +159,12 @@ export function registerManagementTools(
         if (
           proof?.toolName !== adminName ||
           proof.op !== op ||
-          proof.resolutionSource !== 'web-user-event'
+          (proof.resolutionSource !== 'web-user-event' &&
+            proof.resolutionSource !== 'mcp-chat-authorization')
         )
           throw new DomainError(
             'FORBIDDEN',
-            '此操作须由原提案本人通过网页确认。',
+            '此操作须由原提案本人在发起对话确认。',
             403,
           );
       }

@@ -694,9 +694,9 @@ export function createAiBusinessTools(
                 actionIntent: pending,
                 statusPath: `/api/v1/me/conversations/${options.conversationId}/action-intents/${pending.id}`,
                 humanActionRequired: waiting,
-                interaction: 'inline-action-card',
+                interaction: 'conversation-reply',
                 instruction: waiting
-                  ? '请用户在本条回复的执行卡点击执行或取消；文字确认无效。'
+                  ? '展示变更范围，要求用户在本对话回复执行或取消确认。'
                   : '读取原卡状态，不重新执行。',
               });
             }

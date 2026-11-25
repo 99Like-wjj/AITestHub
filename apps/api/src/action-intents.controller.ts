@@ -8,10 +8,7 @@ import { IdentityService } from '../../../packages/application/src/identity/serv
 import { DomainError } from '../../../packages/application/src/errors.js';
 import { booleanQueryValue } from './query-values.js';
 
-@Controller([
-  'api/v1/me/conversations/:conversationId/action-intents',
-  'api/v1/me/mcp-action-intents',
-])
+@Controller('api/v1/me/conversations/:conversationId/action-intents')
 export class ActionIntentsController {
   constructor(
     @Inject(ActionIntents) readonly intents: ActionIntents,
@@ -42,7 +39,7 @@ export class ActionIntentsController {
       )
         throw new DomainError(
           'FORBIDDEN',
-          '执行卡必须由当前平台页面的真实按钮事件提交。',
+          '执行卡必须由当前平台对话提交。',
           403,
         );
     }
@@ -58,34 +55,17 @@ export class ActionIntentsController {
     );
     if (actor.entrypoint !== 'web')
       throw new DomainError('FORBIDDEN', '只接受本人平台网页操作。', 403);
-    const conversationId = idSchema.optional().parse(req.params.conversationId);
-    if (!conversationId) {
-      const matched =
-        /^\/api\/v1\/me\/mcp-action-intents\/([^/]+)(\/decision)?$/.exec(
-          req.path,
-        );
-      if (!matched?.[1])
-        throw new DomainError('NOT_FOUND', '没有此确认操作。', 404);
-      const id = idSchema.parse(matched[1]);
-      res.setHeader('Cache-Control', 'private, no-store');
-      if (!matched[2] && req.method === 'GET')
-        return res.json(await this.intents.getMcpForWeb(actor, id));
-      if (matched[2] && req.method === 'POST')
-        return res.json(
-          await this.intents.decideMcpForWeb(
-            actor,
-            id,
-            actionIntentDecisionSchema.parse(req.body),
-          ),
-        );
-      throw new DomainError('NOT_FOUND', '没有此确认操作。', 404);
-    }
+    const conversationId = idSchema.parse(req.params.conversationId);
     const path =
       req.path
         .split('/action-intents')[1]
         ?.replace(/^\//, '')
         .replace(/\/$/, '') ?? '';
     res.setHeader('Cache-Control', 'private, no-store');
+    if (path === 'reply' && req.method === 'POST')
+      return res.json(
+        await this.intents.replyInConversation(actor, conversationId, req.body),
+      );
     if (!path && req.method === 'GET') {
       const filter = z
         .strictObject({

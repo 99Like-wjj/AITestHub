@@ -385,6 +385,8 @@ export function registerReportReads(
         ? requireReportItem(facts, input.runItemId)
         : null;
       const refs = new Set(item?.result?.content.evidenceRefs);
+      const manual = item?.result?.manualStepEvidence ?? [];
+      const manualIds = new Set(manual.map((entry) => entry.evidenceId));
       const linkedIds = new Set(
         item?.result
           ? (
@@ -396,7 +398,9 @@ export function registerReportReads(
         item
           ? facts.evidence.filter(
               (file) =>
-                refs.has(file.localEvidenceId) || linkedIds.has(file.id),
+                refs.has(file.localEvidenceId) ||
+                linkedIds.has(file.id) ||
+                manualIds.has(file.id),
             )
           : facts.evidence,
         input.offset,
@@ -404,6 +408,7 @@ export function registerReportReads(
       return {
         reportId: input.id,
         revisionId: input.revisionId,
+        manualStepEvidence: manual,
         association: item
           ? 'result-evidence-in-report-revision'
           : 'report-wide',

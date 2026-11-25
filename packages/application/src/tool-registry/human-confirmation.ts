@@ -23,7 +23,8 @@ export interface HumanConfirmationExecutionProof {
   readonly argumentsHash: string;
   readonly arguments: unknown;
   readonly proposalScope: unknown;
-  readonly resolutionSource: 'web-user-event' | 'mcp-form-elicitation';
+  readonly resolutionSource:
+    'web-user-event' | 'mcp-form-elicitation' | 'mcp-chat-authorization';
 }
 export interface HumanConfirmationClaim {
   confirmationId: string;
@@ -170,7 +171,7 @@ export async function withHumanConfirmedExecution<T>(
     humanActor.userId !== serviceActor.userId ||
     (claim.resolutionSource === 'web-user-event' &&
       humanActor.entrypoint !== 'web') ||
-    (claim.resolutionSource === 'mcp-form-elicitation' &&
+    (claim.resolutionSource !== 'web-user-event' &&
       humanActor.entrypoint !== 'official-mcp')
   )
     throw new DomainError(

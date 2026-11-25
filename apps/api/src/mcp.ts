@@ -37,6 +37,7 @@ export const OFFICIAL_MCP_BASE_TOOLS = [
   'ath_requirement_materials',
   'ath_requirement_membership',
   'ath_identity',
+  'ath_action_intents',
   'ath_platform_admin',
   'ath_personal_workspace',
   'ath_project_members',

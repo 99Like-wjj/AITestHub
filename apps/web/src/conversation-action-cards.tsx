@@ -9,7 +9,6 @@ import {
   Typography,
 } from 'antd';
 import {
-  actionIntentDecisionSchema,
   actionIntentListSchema,
   actionIntentResponseSchema,
   type ActionIntent,
@@ -21,7 +20,6 @@ import {
   subscribeIdentityChanges,
 } from './identity-context';
 import {
-  beginIntentDecision,
   canDecideIntent,
   clearIntentDecisionFence,
   intentIsTerminal,
@@ -34,13 +32,11 @@ export function ActionIntentCardView({
   intent,
   pending = false,
   uncertain = false,
-  onDecision,
   onRead,
 }: {
   intent: ActionIntent;
   pending?: boolean;
   uncertain?: boolean;
-  onDecision: (decision: 'execute' | 'cancel') => void;
   onRead: () => void;
 }) {
   const allowed = canDecideIntent(intent.status, intent.expiresAt, uncertain),
@@ -196,21 +192,12 @@ export function ActionIntentCardView({
       ) : null}
       <footer>
         <Space>
-          {allowed ? (
-            <>
-              <Button
-                type="primary"
-                loading={pending}
-                disabled={pending}
-                onClick={() => onDecision('execute')}
-              >
-                执行
-              </Button>
-              <Button disabled={pending} onClick={() => onDecision('cancel')}>
-                取消
-              </Button>
-            </>
-          ) : null}
+          {allowed && (
+            <Typography.Text>
+              在本对话回复「确认 {intent.id.slice(0, 8)}」或「取消{' '}
+              {intent.id.slice(0, 8)}」。
+            </Typography.Text>
+          )}
           <Button type="text" disabled={pending} onClick={onRead}>
             {intent.status === 'executing' ||
             intent.status === 'unknown' ||
@@ -223,7 +210,7 @@ export function ActionIntentCardView({
           {intent.status === 'completed'
             ? '执行结果以实际回执为准。'
             : intent.status === 'waitingConfirmation'
-              ? '仅你的按钮点击可执行此变更。'
+              ? '等待本人对原提案的对话回复。'
               : ''}
         </Typography.Text>
       </footer>
@@ -247,15 +234,11 @@ export function ConversationActionCards({
 }) {
   const [rows, setRows] = useState<ActionIntent[]>([]),
     [error, setError] = useState<string>(),
-    [pendingId, setPendingId] = useState<string>(),
     [uncertain, setUncertain] = useState(new Set<string>()),
     [, setClock] = useState(0);
   const generation = useRef(0),
     activeAbort = useRef<AbortController | undefined>(undefined),
-    deciding = useRef(false),
-    scopeKey = `${conversationId}:${taskId ?? ''}:${messageId ?? ''}`,
-    currentScope = useRef(scopeKey);
-  currentScope.current = scopeKey;
+    scopeKey = `${conversationId}:${taskId ?? ''}:${messageId ?? ''}`;
   const base = `/me/conversations/${conversationId}/action-intents`;
   const acceptRows = useCallback(
     (intents: ActionIntent[]) => {
@@ -298,7 +281,6 @@ export function ConversationActionCards({
   );
   const load = useCallback(
     async (id?: string) => {
-      if (deciding.current) return;
       if (!taskId && !messageId) return;
       const epoch = ++generation.current,
         identity = identityContextEpoch();
@@ -366,8 +348,6 @@ export function ConversationActionCards({
   useEffect(() => {
     setRows([]);
     setUncertain(new Set());
-    setPendingId(undefined);
-    deciding.current = false;
     void loadRef.current();
     return () => activeAbort.current?.abort();
   }, [scopeKey]);
@@ -382,8 +362,6 @@ export function ConversationActionCards({
         setRows([]);
         setError(undefined);
         setUncertain(new Set());
-        setPendingId(undefined);
-        deciding.current = false;
       }),
     [],
   );
@@ -391,8 +369,7 @@ export function ConversationActionCards({
   useEffect(() => {
     if (!executing) return;
     const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible' && !deciding.current)
-        void loadRef.current();
+      if (document.visibilityState === 'visible') void loadRef.current();
     }, 2500);
     return () => window.clearInterval(timer);
   }, [executing, scopeKey]);
@@ -406,8 +383,7 @@ export function ConversationActionCards({
   }, [rows]);
   useEffect(() => {
     const focus = () => {
-      if (document.visibilityState === 'visible' && !deciding.current)
-        void loadRef.current();
+      if (document.visibilityState === 'visible') void loadRef.current();
     };
     window.addEventListener('focus', focus);
     document.addEventListener('visibilitychange', focus);
@@ -416,79 +392,20 @@ export function ConversationActionCards({
       document.removeEventListener('visibilitychange', focus);
     };
   }, [scopeKey]);
-  async function decide(row: ActionIntent, decision: 'execute' | 'cancel') {
-    if (
-      deciding.current ||
-      !canDecideIntent(row.status, row.expiresAt, uncertain.has(row.id))
-    )
-      return;
-    const originalScope = scopeKey,
-      identity = identityContextEpoch(),
-      owner = currentIdentityOwner();
-    if (!owner) {
-      setError('当前账号尚未核对，未发送执行决定。');
-      return;
-    }
-    deciding.current = true;
-    generation.current++;
-    activeAbort.current?.abort();
-    setPendingId(row.id);
-    setError(undefined);
-    try {
-      const input = actionIntentDecisionSchema.parse({
-        revision: row.revision,
-        scopeDigest: row.scopeDigest,
-        decision,
-      });
-      beginIntentDecision(window.localStorage, owner, {
-        id: row.id,
-        conversationId,
-        revision: row.revision,
-        scopeDigest: row.scopeDigest,
-        decision,
-        createdAt: new Date().toISOString(),
-      });
-      setUncertain((current) => new Set([...current, row.id]));
-      const result = (
-        await api(
-          `${base}/${row.id}/decision`,
-          { method: 'POST', body: input },
-          actionIntentResponseSchema,
-        )
-      ).intent;
-      if (
-        originalScope !== currentScope.current ||
-        identity !== identityContextEpoch()
-      )
-        return;
-      if (
-        result.id !== row.id ||
-        result.scopeDigest !== row.scopeDigest ||
-        result.revision < row.revision
-      )
-        throw new Error('原执行回执的精确意图不一致，请只查询原结果。');
-      generation.current++;
-      activeAbort.current?.abort();
-      acceptRows(
-        rows.map((intent) => (intent.id === row.id ? result : intent)),
-      );
-      onResolved?.();
-    } catch (failure) {
-      if (
-        originalScope === currentScope.current &&
-        identity === identityContextEpoch()
-      )
-        setError(describeError(failure));
-    } finally {
-      if (
-        originalScope === currentScope.current &&
-        identity === identityContextEpoch()
-      ) {
-        deciding.current = false;
-        setPendingId(undefined);
+  useEffect(() => {
+    const onReply = (event: Event) => {
+      if (event instanceof CustomEvent && event.detail === conversationId) {
+        void loadRef.current();
+        onResolved?.();
       }
-    }
-  }
+    };
+    window.addEventListener('aitesthub:conversation-confirmation', onReply);
+    return () =>
+      window.removeEventListener(
+        'aitesthub:conversation-confirmation',
+        onReply,
+      );
+  }, [conversationId, onResolved]);
   if (!rows.length && !error) return null;
   return (
     <section
@@ -509,9 +426,7 @@ export function ConversationActionCards({
         <ActionIntentCardView
           key={row.id}
           intent={row}
-          pending={pendingId === row.id}
           uncertain={uncertain.has(row.id)}
-          onDecision={(decision) => void decide(row, decision)}
           onRead={() => void loadRef.current(row.id)}
         />
       ))}

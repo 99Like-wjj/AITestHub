@@ -1,12 +1,4 @@
-import {
-  acceptedContent,
-  inputRequired,
-  inputResponse,
-  type McpServer,
-  type ServerContext,
-  type CallToolResult,
-  type InputRequiredResult,
-} from '@modelcontextprotocol/server';
+import type { McpServer, CallToolResult } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ActorContext } from '../../../packages/contracts/src/identity.js';
 import type { Database } from '../../../packages/persistence/src/database.js';
@@ -18,15 +10,10 @@ import { ReportService } from '../../../packages/application/src/reports/service
 import { ResultService } from '../../../packages/application/src/results/service.js';
 import { registerReportReads } from '../../../packages/application/src/tool-registry/report-reading.js';
 import { ActionIntents } from '../../../packages/application/src/tool-registry/action-intents.js';
-import { DomainError } from '../../../packages/application/src/errors.js';
+import { idSchema } from '../../../packages/contracts/src/base.js';
+import { mcpActionIntentReplySchema } from '../../../packages/contracts/src/action-intents.js';
 
 type SecureCall = (work: () => Promise<unknown>) => Promise<CallToolResult>;
-const confirmationSchema = z.strictObject({ confirm: z.boolean() });
-// MCP elicitation's restricted wire schema disallows additionalProperties. Keep strict
-// response validation separate from the representable form request schema.
-const confirmationFormSchema = z.object({ confirm: z.boolean() });
-
-/** Modern 2026 MRTR form elicitation. No push-style elicitInput or legacy initialize. */
 export function registerBusinessMcpTools(
   server: McpServer,
   db: Database,
@@ -67,97 +54,45 @@ export function registerBusinessMcpTools(
             ),
         },
       },
-      async (
-        raw,
-        ctx: ServerContext,
-      ): Promise<CallToolResult | InputRequiredResult> => {
-        let roundTrip: InputRequiredResult | undefined;
-        const result = await call(async () => {
+      async (raw) =>
+        call(async () => {
           const prepared = await registry.prepare(actor, tool.name, raw);
           if (!prepared.confirmation) return prepared.execute();
           const pending = await confirmations.propose(actor, prepared);
           if (pending.status !== 'waitingConfirmation')
-            return { confirmation: pending };
-          const capabilities = z
-            .object({
-              'io.modelcontextprotocol/clientCapabilities': z.object({
-                elicitation: z.record(z.string(), z.unknown()).optional(),
-              }),
-            })
-            .safeParse(ctx.mcpReq.envelope);
-          const supported = capabilities.success
-            ? capabilities.data['io.modelcontextprotocol/clientCapabilities']
-                .elicitation
-            : undefined;
-          const hasForm =
-            supported !== undefined &&
-            ('form' in supported || Object.keys(supported).length === 0);
-          if (
-            !hasForm ||
-            ['ath_platform_admin', 'ath_project_members'].includes(tool.name)
-          )
-            return {
-              status: 'waitingConfirmation',
-              confirmation: pending,
-              reason: 'CLIENT_FORM_ELICITATION_UNAVAILABLE',
-              compatibility:
-                '此客户端未声明标准表单交互能力；没有将Key或模型文字当成人已确认。',
-              confirmationPath: '/?athIntent=' + pending.id,
-              objectLinks: pending.proposal.links,
-            };
-          const key = `confirm-${pending.id}`;
-          const response = inputResponse(ctx.mcpReq.inputResponses, key);
-          const accepted = acceptedContent(
-            ctx.mcpReq.inputResponses,
-            key,
-            confirmationSchema,
-          );
-          // requestState is only a database correlation ID. Current actor + stored argument/scope digest
-          // are rechecked; no client-supplied state is used as authorization or as an alternate command.
-          if (response.kind !== 'missing') {
-            if (ctx.mcpReq.requestState() !== pending.id)
-              throw new DomainError(
-                'BUSINESS_CONFLICT',
-                '确认响应没有关联本次精确提案。',
-                409,
-              );
-            if (
-              response.kind === 'elicit' &&
-              (response.action === 'decline' ||
-                response.action === 'cancel' ||
-                accepted?.confirm === false)
-            )
-              return confirmations.resolveForm(actor, pending.id, {
-                revision: pending.revision,
-                scopeDigest: pending.scopeDigest,
-                decision: 'cancel',
-              });
-            if (accepted?.confirm === true)
-              return confirmations.resolveForm(actor, pending.id, {
-                revision: pending.revision,
-                scopeDigest: pending.scopeDigest,
-                decision: 'execute',
-              });
-            throw new DomainError(
-              'VALIDATION_ERROR',
-              '客户端确认响应不符合表单契约，没有执行。',
-              400,
-            );
-          }
-          roundTrip = inputRequired({
-            requestState: pending.id,
-            inputRequests: {
-              [key]: inputRequired.elicit({
-                mode: 'form',
-                message: `${pending.proposal.summary}\n项目 ${pending.projectId ?? ''}\n精确范围 ${JSON.stringify(pending.proposal.scope)}\n摘要 ${pending.scopeDigest}\n是否确认执行？`,
-                requestedSchema: confirmationFormSchema,
-              }),
-            },
-          });
-          return { status: 'waitingConfirmation' };
-        });
-        return roundTrip ?? result;
-      },
+            return { status: pending.status, confirmation: pending };
+          const locator = pending.id.slice(0, 8);
+          return {
+            status: 'waitingConfirmation',
+            confirmation: pending,
+            changeScope: pending.proposal.scope,
+            instruction:
+              '在发起操作的本地 AI 对话中向用户展示变更范围。只在用户明确回复确认或取消后，将该条用户原话、提案 ID、版本和摘要交给 ath_action_intents reply。保留原提案和原 Key。',
+            confirmReply: '确认 ' + locator,
+            cancelReply: '取消 ' + locator,
+          };
+        }),
     );
   }
+  server.registerTool(
+    'ath_action_intents',
+    {
+      description:
+        '查看原 MCP 提案，或转交本地对话用户对该提案的最新确认/取消原话。先向人展示变更范围，再提交真实回复。',
+      inputSchema: z.discriminatedUnion('op', [
+        z.strictObject({ op: z.literal('get'), id: idSchema }),
+        z.strictObject({
+          op: z.literal('reply'),
+          input: mcpActionIntentReplySchema,
+        }),
+      ]),
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    (args) =>
+      call(() =>
+        args.op === 'get'
+          ? confirmations.getMcp(actor, args.id)
+          : confirmations.replyViaMcp(actor, args.input),
+      ),
+  );
 }
