@@ -768,6 +768,7 @@ export function createAiBusinessTools(
               name: entry.name,
               ...operationFact,
               state: 'failed',
+              failure: { code: failure.code },
               ...(writeStarted &&
               [
                 'OPERATION_RESULT_UNKNOWN',

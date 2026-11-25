@@ -1146,7 +1146,7 @@ export class ConversationsService {
         ) {
           const explicit = [
             ...input.content.matchAll(
-              /需求\s*(?:「([^」\n]{1,200})」|“([^”\n]{1,200})”|([A-Z][A-Z0-9_-]{1,30}\d))/gu,
+              /需求\s*(?:「([^」\n]{1,200})」|“([^”\n]{1,200})”|([A-Z][A-Z0-9_-]{2,31})(?=$|[^\p{L}\p{N}_-]))/gu,
             ),
           ];
           if (explicit.length === 1) {
