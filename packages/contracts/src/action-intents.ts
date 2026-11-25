@@ -58,6 +58,20 @@ export const actionIntentPresentationSchema = z.strictObject({
     )
     .max(100),
 });
+
+export const actionIntentResultPresentationSchema = z.strictObject({
+  summary: z.string().max(2000),
+  items: z
+    .array(
+      z.strictObject({
+        subject: z.string().min(1).max(250),
+        outcome: z.string().min(1).max(100),
+        detail: z.string().max(1000).nullable(),
+      }),
+    )
+    .max(10000),
+});
+
 export const actionIntentSchema = z.strictObject({
   id: idSchema,
   revision: persistedRowVersionSchema,
@@ -68,6 +82,8 @@ export const actionIntentSchema = z.strictObject({
   conversationId: idSchema.nullable(),
   messageId: idSchema.nullable(),
   ...actionIntentPresentationSchema.shape,
+  targets: z.array(z.string().min(1).max(250)).max(10000).optional(),
+  resultPresentation: actionIntentResultPresentationSchema.optional(),
   status: z.enum([
     'waitingConfirmation',
     'executing',

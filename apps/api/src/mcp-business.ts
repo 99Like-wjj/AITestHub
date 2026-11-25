@@ -67,7 +67,7 @@ export function registerBusinessMcpTools(
             confirmation: pending,
             changeScope: pending.proposal.scope,
             instruction:
-              '在发起操作的本地 AI 对话中向用户展示变更范围。只在用户明确回复确认或取消后，将该条用户原话、提案 ID、版本和摘要交给 ath_action_intents reply。保留原提案和原 Key。',
+              '在发起操作的本地 AI 对话中用自然语言展示变更对象、范围和后续结果。使用提案的展示字段和执行结果摘要。只在用户明确回复确认或取消后，将该条用户原话、提案 ID、版本和摘要交给 ath_action_intents reply。保留原提案和原 Key。',
             confirmReply: '确认 ' + locator,
             cancelReply: '取消 ' + locator,
           };

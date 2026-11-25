@@ -1,25 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Alert, Button, Space, Tag, Typography } from 'antd';
 import {
-  Alert,
-  Button,
-  Collapse,
-  Descriptions,
-  Space,
-  Tag,
-  Typography,
-} from 'antd';
-import {
+  actionIntentDecisionSchema,
   actionIntentListSchema,
   actionIntentResponseSchema,
   type ActionIntent,
 } from '../../../packages/contracts/src/action-intents';
-import { api, ApiError, describeError } from './api';
+import { api, ApiError, describeError, isUncertainMutationError } from './api';
 import {
   currentIdentityOwner,
   identityContextEpoch,
   subscribeIdentityChanges,
 } from './identity-context';
 import {
+  beginIntentDecision,
   canDecideIntent,
   clearIntentDecisionFence,
   intentIsTerminal,
@@ -32,33 +26,40 @@ export function ActionIntentCardView({
   intent,
   pending = false,
   uncertain = false,
+  onDecision,
   onRead,
 }: {
   intent: ActionIntent;
   pending?: boolean;
   uncertain?: boolean;
+  onDecision: (decision: 'execute' | 'cancel') => void;
   onRead: () => void;
 }) {
-  const allowed = canDecideIntent(intent.status, intent.expiresAt, uncertain),
-    displayStatus =
-      intent.status === 'waitingConfirmation' && !allowed && !uncertain
-        ? 'expired'
-        : intent.status;
+  const allowed = canDecideIntent(intent.status, intent.expiresAt, uncertain);
+  const displayStatus =
+    intent.status === 'waitingConfirmation' && !allowed && !uncertain
+      ? 'expired'
+      : intent.status;
+  const result = intent.resultPresentation;
+  const targets = intent.targets ?? [];
+  const showingResult =
+    result && ['completed', 'declined', 'failed'].includes(displayStatus);
+  const needsRead =
+    uncertain || displayStatus === 'unknown' || displayStatus === 'executing';
   return (
     <article
       className="conversation-action-card"
-      aria-label={`操作确认：${intent.title}`}
+      aria-label={(showingResult ? '变更结果：' : '操作确认：') + intent.title}
       data-action-intent={intent.id}
     >
       <header>
-        <div>
+        <div className="conversation-action-title">
           <Typography.Text strong>{intent.title}</Typography.Text>
-          {intent.projectName ? (
+          {intent.projectName && (
             <Typography.Text type="secondary">
-              {' '}
-              · {intent.projectName}
+              {intent.projectName}
             </Typography.Text>
-          ) : null}
+          )}
         </div>
         <Tag
           color={
@@ -66,8 +67,8 @@ export function ActionIntentCardView({
               ? 'gold'
               : displayStatus === 'completed'
                 ? 'green'
-                : displayStatus === 'unknown'
-                  ? 'orange'
+                : displayStatus === 'failed'
+                  ? 'error'
                   : 'default'
           }
         >
@@ -75,145 +76,112 @@ export function ActionIntentCardView({
         </Tag>
       </header>
       <Typography.Paragraph className="conversation-action-summary">
-        {intent.summary}
+        {showingResult ? result.summary : intent.summary}
       </Typography.Paragraph>
-      {intent.changes.length ? (
-        <dl className="conversation-action-changes">
-          {intent.changes.slice(0, 4).map((change, index) => (
-            <div key={index}>
-              <dt>{change.label}</dt>
-              <dd>
-                {change.before !== null ? (
-                  <>
-                    <span>{change.before}</span>
-                    <span aria-label="变更为"> → </span>
-                  </>
-                ) : null}
-                <strong>{change.after ?? '移除'}</strong>
-              </dd>
-            </div>
+      {showingResult && result.items.length > 0 && (
+        <ul className="conversation-action-items" aria-label="逐项变更结果">
+          {result.items.map((item, index) => (
+            <li key={index}>
+              <span>{item.subject}</span>
+              <strong>{item.outcome}</strong>
+              {item.detail && (
+                <span className="conversation-action-item-detail">
+                  {item.detail}
+                </span>
+              )}
+            </li>
           ))}
-        </dl>
-      ) : null}
-      {intent.details.length ? (
+        </ul>
+      )}
+      {!showingResult && targets.length > 0 && (
+        <ul className="conversation-action-items" aria-label="本次变更对象">
+          {targets.map((label, index) => (
+            <li key={index}>
+              <span>{label}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {intent.changes.length > 0 &&
+        (!showingResult || !result.items.length) && (
+          <dl className="conversation-action-changes">
+            {intent.changes.map((change, index) => (
+              <div key={index}>
+                <dt>{change.label}</dt>
+                <dd>
+                  {change.before && (
+                    <>
+                      <span>{change.before}</span>
+                      <span aria-label="变更为"> → </span>
+                    </>
+                  )}
+                  <strong>{change.after ?? '移除'}</strong>
+                </dd>
+              </div>
+            ))}
+          </dl>
+        )}
+      {!showingResult && intent.details.length > 0 && (
         <div className="conversation-action-scope">
-          {intent.details.slice(0, 3).map((detail, index) => (
+          {intent.details.map((item, index) => (
             <span key={index}>
-              {detail.label}：{detail.value}
+              {item.label} · {item.value}
             </span>
           ))}
         </div>
-      ) : null}
-      <Collapse
-        ghost
-        size="small"
-        items={[
-          {
-            key: 'details',
-            label: '查看完整变更与参数',
-            children: (
-              <>
-                <Descriptions
-                  size="small"
-                  column={1}
-                  items={intent.details.map((detail, index) => ({
-                    key: index,
-                    label: detail.label,
-                    children: detail.value,
-                  }))}
-                />
-                {intent.changes.length > 4 ? (
-                  <dl className="conversation-action-changes">
-                    {intent.changes.slice(4).map((change, index) => (
-                      <div key={index}>
-                        <dt>{change.label}</dt>
-                        <dd>
-                          {change.before ?? '无'} → {change.after ?? '移除'}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                ) : null}
-                <Typography.Text type="secondary">
-                  原意图 {intent.id} · 有效期至{' '}
-                  {new Date(intent.expiresAt).toLocaleString()}
-                </Typography.Text>
-                <pre
-                  className="conversation-action-json"
-                  aria-label="只读精确操作参数"
-                >
-                  {JSON.stringify(
-                    {
-                      arguments: intent.arguments,
-                      scope: intent.proposal.scope,
-                    },
-                    null,
-                    2,
-                  )}
-                </pre>
-              </>
-            ),
-          },
-          ...(intent.response === null
-            ? []
-            : [
-                {
-                  key: 'response',
-                  label: '查看执行回执',
-                  children: (
-                    <pre
-                      className="conversation-action-json"
-                      aria-label="原执行结果"
-                    >
-                      {JSON.stringify(intent.response, null, 2)}
-                    </pre>
-                  ),
-                },
-              ]),
-        ]}
-      />
-      {uncertain ? (
+      )}
+      {uncertain && (
         <Alert
           type="warning"
           showIcon
-          title="已发送决定，原结果尚待核对"
-          description="只查询这张卡的原结果，不会重复执行或新建意图。"
+          title="原结果尚待核对"
+          description="请查询同一份提案的原结果。"
         />
-      ) : null}
-      {displayStatus === 'expired' ? (
+      )}
+      {displayStatus === 'expired' && (
         <Typography.Paragraph type="secondary">
-          此意图已失效，不能继续执行。需要操作时，请在对话中重新说明变更。
+          确认已过期，请重新说明需要执行的变更。
         </Typography.Paragraph>
-      ) : null}
-      {intent.status === 'unknown' ? (
+      )}
+      {displayStatus === 'unknown' && (
         <Typography.Paragraph type="secondary">
-          {intent.recovery}
+          结果暂未确认，请查询原结果。
         </Typography.Paragraph>
-      ) : null}
-      <footer>
-        <Space>
+      )}
+      {(allowed || needsRead) && (
+        <footer>
+          <Space size={8}>
+            {allowed && (
+              <>
+                <Button
+                  type="primary"
+                  loading={pending}
+                  disabled={pending}
+                  onClick={() => onDecision('execute')}
+                >
+                  确认
+                </Button>
+                <Button disabled={pending} onClick={() => onDecision('cancel')}>
+                  取消
+                </Button>
+              </>
+            )}
+            {needsRead && (
+              <Button disabled={pending} onClick={onRead}>
+                查询原结果
+              </Button>
+            )}
+          </Space>
           {allowed && (
-            <Typography.Text>
-              在本对话回复「确认 {intent.id.slice(0, 8)}」或「取消{' '}
-              {intent.id.slice(0, 8)}」。
+            <Typography.Text
+              className="conversation-action-chat-hint"
+              type="secondary"
+            >
+              也可回复「确认 {intent.id.slice(0, 8)}」
             </Typography.Text>
           )}
-          <Button type="text" disabled={pending} onClick={onRead}>
-            {intent.status === 'executing' ||
-            intent.status === 'unknown' ||
-            uncertain
-              ? '查询原结果'
-              : '更新状态'}
-          </Button>
-        </Space>
-        <Typography.Text type="secondary">
-          {intent.status === 'completed'
-            ? '执行结果以实际回执为准。'
-            : intent.status === 'waitingConfirmation'
-              ? '等待本人对原提案的对话回复。'
-              : ''}
-        </Typography.Text>
-      </footer>
+        </footer>
+      )}
     </article>
   );
 }
@@ -234,11 +202,15 @@ export function ConversationActionCards({
 }) {
   const [rows, setRows] = useState<ActionIntent[]>([]),
     [error, setError] = useState<string>(),
+    [pendingId, setPendingId] = useState<string>(),
     [uncertain, setUncertain] = useState(new Set<string>()),
     [, setClock] = useState(0);
   const generation = useRef(0),
     activeAbort = useRef<AbortController | undefined>(undefined),
+    deciding = useRef(false),
     scopeKey = `${conversationId}:${taskId ?? ''}:${messageId ?? ''}`;
+  const currentScope = useRef(scopeKey);
+  currentScope.current = scopeKey;
   const base = `/me/conversations/${conversationId}/action-intents`;
   const acceptRows = useCallback(
     (intents: ActionIntent[]) => {
@@ -348,6 +320,8 @@ export function ConversationActionCards({
   useEffect(() => {
     setRows([]);
     setUncertain(new Set());
+    setPendingId(undefined);
+    deciding.current = false;
     void loadRef.current();
     return () => activeAbort.current?.abort();
   }, [scopeKey]);
@@ -406,6 +380,94 @@ export function ConversationActionCards({
         onReply,
       );
   }, [conversationId, onResolved]);
+  async function decide(row: ActionIntent, decision: 'execute' | 'cancel') {
+    if (
+      deciding.current ||
+      !canDecideIntent(row.status, row.expiresAt, uncertain.has(row.id))
+    )
+      return;
+    const originalScope = scopeKey,
+      identity = identityContextEpoch(),
+      owner = currentIdentityOwner();
+    if (!owner) {
+      setError('当前账号尚未核对，未发送执行决定。');
+      return;
+    }
+    deciding.current = true;
+    generation.current++;
+    activeAbort.current?.abort();
+    setPendingId(row.id);
+    setError(undefined);
+    try {
+      const input = actionIntentDecisionSchema.parse({
+        revision: row.revision,
+        scopeDigest: row.scopeDigest,
+        decision,
+      });
+      beginIntentDecision(window.localStorage, owner, {
+        id: row.id,
+        conversationId,
+        revision: row.revision,
+        scopeDigest: row.scopeDigest,
+        decision,
+        createdAt: new Date().toISOString(),
+      });
+      setUncertain((current) => new Set([...current, row.id]));
+      const result = (
+        await api(
+          `${base}/${row.id}/decision`,
+          { method: 'POST', body: input },
+          actionIntentResponseSchema,
+        )
+      ).intent;
+      if (
+        originalScope !== currentScope.current ||
+        identity !== identityContextEpoch()
+      )
+        return;
+      if (
+        result.id !== row.id ||
+        result.scopeDigest !== row.scopeDigest ||
+        result.revision < row.revision
+      )
+        throw new Error('原执行回执的精确意图不一致，请只查询原结果。');
+      generation.current++;
+      activeAbort.current?.abort();
+      acceptRows(
+        rows.map((intent) => (intent.id === row.id ? result : intent)),
+      );
+      onResolved?.();
+    } catch (failure) {
+      if (
+        originalScope === currentScope.current &&
+        identity === identityContextEpoch()
+      ) {
+        if (!isUncertainMutationError(failure)) {
+          clearIntentDecisionFence(
+            window.localStorage,
+            owner,
+            conversationId,
+            row.id,
+          );
+          setUncertain((prior) => {
+            const next = new Set(prior);
+            next.delete(row.id);
+            return next;
+          });
+          void loadRef.current(row.id);
+        }
+        setError(describeError(failure));
+      }
+    } finally {
+      if (
+        originalScope === currentScope.current &&
+        identity === identityContextEpoch()
+      ) {
+        deciding.current = false;
+        setPendingId(undefined);
+      }
+    }
+  }
   if (!rows.length && !error) return null;
   return (
     <section
@@ -426,6 +488,8 @@ export function ConversationActionCards({
         <ActionIntentCardView
           key={row.id}
           intent={row}
+          pending={pendingId === row.id}
+          onDecision={(choice) => void decide(row, choice)}
           uncertain={uncertain.has(row.id)}
           onRead={() => void loadRef.current(row.id)}
         />

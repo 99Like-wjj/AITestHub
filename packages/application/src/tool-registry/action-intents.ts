@@ -1,4 +1,9 @@
 import {
+  actionDisplayValue,
+  actionIntentDisplay,
+} from './action-presentation.js';
+import { businessDisplayName } from '../identity/ai-projection.js';
+import {
   parseActionIntentReply,
   actionIntentChatReplySchema,
   mcpActionIntentReplySchema,
@@ -87,12 +92,14 @@ const safe = (row: ConfirmationRow) =>
     expiresAt: row.expires_at.toISOString(),
     messageId: row.message_id,
     arguments: row.arguments,
-    ...(actionIntentPresentationSchema.safeParse(row.presentation).data ?? {
-      title: '历史业务操作',
-      summary: '此历史提案只读保留，请查看原始详情与执行回执。',
-      projectName: null,
-      changes: [],
-      details: [],
+    ...actionIntentDisplay({
+      tool: row.tool_name,
+      op: row.operation,
+      input: row.arguments,
+      proposal: row.proposal,
+      state: row.state,
+      response: row.response,
+      presentation: row.presentation,
     }),
     scopeDigest: row.scope_digest,
     proposal: row.proposal,
@@ -219,21 +226,29 @@ async function presentation(tx: SqlExecutor, call: PreparedBusinessCall) {
         '成员对象已不存在，未创建执行卡。',
         404,
       );
-    const current = z
+    const member = z.object({
+      userId: z.string(),
+      roles: z.array(z.string()),
+      isAdmin: z.boolean(),
+    });
+    const scope = z
       .object({
-        current: z.object({
-          members: z.array(
-            z.object({
-              userId: z.string(),
-              roles: z.array(z.string()),
-              isAdmin: z.boolean(),
-            }),
-          ),
-        }),
+        current: z
+          .union([member, z.object({ members: z.array(member) })])
+          .nullable(),
       })
-      .parse(call.confirmation?.scope)
-      .current.members.find((m) => m.userId === input.userId);
-    const person = `${user.display_name}（${user.display_account || user.account}）`;
+      .safeParse(call.confirmation?.scope);
+    const stored = scope.data?.current;
+    const current =
+      stored &&
+      ('members' in stored
+        ? stored.members.find((m) => m.userId === input.userId)
+        : stored);
+    const person = businessDisplayName(
+      user.display_name,
+      user.display_account,
+      user.account,
+    );
     result.title =
       call.op === 'remove'
         ? '移除项目成员'
@@ -321,16 +336,12 @@ async function presentation(tx: SqlExecutor, call: PreparedBusinessCall) {
       if (requested.success)
         for (const [key, label] of Object.entries(labels)) {
           if (!(key in requested.data)) continue;
-          const stringify = (v: unknown) =>
-            typeof v === 'string'
-              ? v.slice(0, 2000)
-              : v === undefined || v === null
-                ? null
-                : JSON.stringify(v).slice(0, 2000);
           result.changes.push({
             label,
-            before: current.success ? stringify(current.data[key]) : null,
-            after: stringify(requested.data[key]),
+            before: current.success
+              ? actionDisplayValue(current.data[key])
+              : null,
+            after: actionDisplayValue(requested.data[key]),
           });
         }
     }
