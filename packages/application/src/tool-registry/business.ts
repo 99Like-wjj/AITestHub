@@ -354,7 +354,7 @@ export function createBusinessRegistry(
     },
   );
   const reviewDescription =
-    '读取、记录意见或优化说明。明确要求批准现有UI用例时，调用 preview-approve 生成精确范围，再调用 approve 发起本人确认。查看评审和设计优化各有独立操作。';
+    '处理现有用例的意见、评审会议和审批。要求批准时，先调用 preview-approve 固定对象，同一轮接着调用 approve 返回待确认卡。只查看评审状态或只要求预览时使用相应读取操作。用例设计另走设计流程。';
   add(
     'ath_reviews',
     reviewDescription,

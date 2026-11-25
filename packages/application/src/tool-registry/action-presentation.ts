@@ -58,6 +58,7 @@ const actionTitles: Record<string, string> = {
   'ath_results.assess': '保存人工判定',
   'ath_results.record-human-retest': '登记人工复测',
   'ath_issues.file-from-report': '从报告登记缺陷',
+  'ath_issue_lifecycle.close': '关闭缺陷',
   'ath_platform_admin.create-project': '创建项目',
   'ath_platform_admin.update-user': '调整账号状态',
   'ath_platform_admin.remove-user': '停用并移除账号',
@@ -77,6 +78,8 @@ const knownErrors: Record<string, string> = {
   PRECONDITIONS_MISSING: '当前对象尚未满足操作条件。',
   NOT_FOUND: '当前对象已经不可访问。',
   BUSINESS_CONFLICT: '实际状态与所选范围不一致。',
+  NOT_ELIGIBLE: '当前对象未满足操作条件。',
+  PRECONDITIONS_CHANGED: '操作条件已改变，请重新核对范围。',
 };
 function object(value: unknown): Record<string, unknown> {
   return z.record(z.string(), z.unknown()).safeParse(value).data ?? {};
@@ -115,13 +118,16 @@ function selectedTargets(
   op: string,
   scope: Record<string, unknown>,
 ) {
-  if (tool === 'ath_reviews' && op === 'approve') {
+  if (
+    (tool === 'ath_reviews' && op === 'approve') ||
+    (tool === 'ath_issue_lifecycle' && op === 'close')
+  ) {
     const selected = Array.isArray(scope.selectedIds)
       ? new Set(scope.selectedIds)
       : null;
-    return rows(scope.items).filter(
-      (item) => !selected || selected.has(item.id),
-    );
+    const items =
+      tool === 'ath_reviews' ? scope.items : object(scope.preview).items;
+    return rows(items).filter((item) => !selected || selected.has(item.id));
   }
   if (tool === 'ath_assets' && op === 'import-ui') {
     const packages = rows(object(scope.preview).packages);
@@ -184,9 +190,11 @@ export function actionIntentDisplay(data: {
   const summary =
     key === 'ath_reviews.approve' && selected.length
       ? '准备批准 ' + selected.length + ' 个评审对象。'
-      : key === 'ath_assets.import-ui' && selected.length
-        ? '准备导入 ' + selected.length + ' 条用例。'
-        : (labels(memberLabel(stored.summary), 1000) ?? '请核对以下变更。');
+      : key === 'ath_issue_lifecycle.close' && selected.length
+        ? '准备关闭 ' + selected.length + ' 个缺陷。'
+        : key === 'ath_assets.import-ui' && selected.length
+          ? '准备导入 ' + selected.length + ' 条用例。'
+          : (labels(memberLabel(stored.summary), 1000) ?? '请核对以下变更。');
   const targets = proposed.length ? proposed : target ? [target] : [];
   const changes = stored.changes
     .map(({ label, before, after }) => ({
@@ -221,16 +229,24 @@ export function actionIntentDisplay(data: {
           .map((item) => [item.id, name(item)]),
       );
       const items = actual.slice(0, 10000).map((item, index) => {
-        const state = typeof item.status === 'string' ? item.status : undefined;
+        const issue = object(item.issue);
+        const status =
+          key === 'ath_issue_lifecycle.close' && item.status === 'accepted'
+            ? issue.state
+            : item.status;
         return {
           subject:
             name(item) ??
-            names.get(item.id) ??
+            name(issue) ??
+            names.get(item.id ?? item.objectId) ??
             (key === 'ath_assets.import-ui'
               ? name(selected[index] ?? {})
               : null) ??
             '第 ' + (index + 1) + ' 项',
-          outcome: state ? (dictionary[state] ?? '已返回结果') : '已返回结果',
+          outcome:
+            typeof status === 'string'
+              ? (dictionary[status] ?? '已返回结果')
+              : '已返回结果',
           detail: readableReason(item),
         };
       });

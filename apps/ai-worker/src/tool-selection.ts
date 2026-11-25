@@ -85,16 +85,18 @@ export function businessRoute(prompt: string): string[] {
   if (/我的(?:草稿|对话|会话|通知|文件)|文件中心|私有工作台/iu.test(prompt))
     return ['ath_personal_workspace'];
   if (
+    /加入|添加|加到|加进|拉入|移出|移除|退出|参与人|participants?/iu.test(
+      prompt,
+    ) &&
+    /需求|requirement/iu.test(prompt)
+  )
+    return ['ath_requirement_membership', 'ath_requirements', 'ath_identity'];
+  if (
     /我是谁|我(?:的|这个|当前)(?:账号|账户|用户|身份|显示名)|当前登录(?:账号|用户)|who am i/iu.test(
       prompt,
     )
   )
     return ['ath_identity'];
-  if (
-    /加入|添加|拉入|移出|退出|参与人|participants?/iu.test(prompt) &&
-    /需求|requirement/iu.test(prompt)
-  )
-    return ['ath_requirement_membership', 'ath_requirements', 'ath_identity'];
   if (
     /审批|批准|评审通过|approve/iu.test(prompt) &&
     /用例|测试集|场景|case|评审/iu.test(prompt)
@@ -109,14 +111,23 @@ export function businessRoute(prompt: string): string[] {
 }
 
 export function needsSkill(prompt: string): boolean {
-  return (
-    /(?:^|[^a-z0-9-])\/(?:ath-case-design|ath-api-regression|ath-project-knowledge)(?=[\s\]]|$)/iu.test(
-      prompt,
-    ) ||
-    /(?:生成|设计|编写|优化|整理).{0,16}(?:用例|测点|项目知识|接口自动化)|(?:用例|项目知识).{0,8}(?:生成|优化|整理)/iu.test(
+  if (
+    /(?:^|[^a-z0-9-])\/(?:ath-case-design|ath-api-regression|ath-project-knowledge)(?=[\s\]，。]|$)/iu.test(
       prompt,
     )
-  );
+  )
+    return true;
+  return prompt.split(/[，,。！？?!；;\n]/u).some((clause) => {
+    if (
+      /(?:不要|无需|不用|禁止|不需要)\s*(?:生成|设计|编写|优化|整理)/u.test(
+        clause,
+      )
+    )
+      return false;
+    return /(?:生成|设计|编写|优化|整理)(?:(?!审批|批准|评审|复审|确认|意见|结果|报告).){0,16}(?:用例|测点|项目知识|接口自动化)(?!的?(?:审批|批准|评审|复审|确认|意见|结果|状态|报告))|(?:用例|项目知识)(?:的|先)?(?:生成|优化|整理)(?!过|后|结论|结果|记录|历史|意见)/iu.test(
+      clause,
+    );
+  });
 }
 
 interface ToolContext {
@@ -138,8 +149,12 @@ export function createModelToolSelection(
   const discoveryQueries = new Set<string>();
   let discoveredInStep = false;
   let discoveryPaused = false;
+  let skillAllowed = true;
   let currentNames: readonly string[] = [];
   let planNext: (() => Set<string>) | undefined;
+  const eligibleName = (name: string) =>
+    authorizedNames.has(name) &&
+    (skillAllowed || name !== SHARED_SKILL_RULE_TOOL_NAME);
   const discovery = tool(
     async ({ names, offset = 0 }) => {
       const invocationId = randomUUID();
@@ -175,23 +190,20 @@ export function createModelToolSelection(
           });
         }
         discoveryQueries.add(queryKey);
-        if (!distinctNames)
+        if (!distinctNames) {
+          const eligible = availableNames.filter(eligibleName);
           return reply({
-            availableTools: availableNames.slice(
-              offset,
-              offset + catalogPageSize,
-            ),
+            availableTools: eligible.slice(offset, offset + catalogPageSize),
             nextOffset:
-              offset + catalogPageSize < availableNames.length
+              offset + catalogPageSize < eligible.length
                 ? offset + catalogPageSize
                 : null,
             instruction:
               'This catalog lists eligible names. Only attached definitions can be called.',
           });
+        }
         discoveredInStep = true;
-        const eligible = distinctNames.filter((name) =>
-          authorizedNames.has(name),
-        );
+        const eligible = distinctNames.filter(eligibleName);
         for (const name of eligible) {
           requested.delete(name);
           requested.add(name);
@@ -205,9 +217,7 @@ export function createModelToolSelection(
         return reply({
           selectedForNextStep: eligible.filter((name) => next?.has(name)),
           deferred: eligible.filter((name) => !next?.has(name)),
-          unavailable: distinctNames.filter(
-            (name) => !authorizedNames.has(name),
-          ),
+          unavailable: distinctNames.filter((name) => !eligibleName(name)),
           instruction:
             'Use only attached definitions. For a deferred tool, request it alone if still needed. Do not repeat an unchanged discovery request.',
         });
@@ -257,6 +267,8 @@ export function createModelToolSelection(
       const current = prompts[0] ?? '';
       const explicit = new Set(current.match(/\b(?:ath_|ext_)[\w-]+\b/g));
       const priorityActions = businessRoute(current);
+      const skillRequested = needsSkill(current);
+      skillAllowed = priorityActions.length === 0 || skillRequested;
       const matched = prompts.flatMap((prompt) =>
         relatedTools
           .filter(({ terms }) => terms.test(prompt))
@@ -279,7 +291,7 @@ export function createModelToolSelection(
       const priorities = [
         ...priorityActions,
         ...explicit,
-        ...(needsSkill(current) ? [SHARED_SKILL_RULE_TOOL_NAME] : []),
+        ...(skillRequested ? [SHARED_SKILL_RULE_TOOL_NAME] : []),
         ...referenced,
         ...matched,
         ...(context.officeOnly
@@ -311,6 +323,7 @@ export function createModelToolSelection(
           if (
             !candidate ||
             selected.has(name) ||
+            !eligibleName(name) ||
             name === AI_TOOL_DISCOVERY_NAME
           )
             continue;
