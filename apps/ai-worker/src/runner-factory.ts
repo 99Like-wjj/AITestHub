@@ -30,6 +30,7 @@ import { AgentWebService } from '../../../packages/application/src/agent-web/ser
 import type { AgentCalculationService } from '../../../packages/application/src/agent-calculation/service.js';
 import type { AgentDocumentsService } from '../../../packages/application/src/agent-documents/service.js';
 import type { AgentScheduleService } from '../../../packages/application/src/agent-schedules/service.js';
+import type { PersonalBusinessServices } from '../../../packages/application/src/tool-registry/personal.js';
 import { AgentOfficeService } from '../../../packages/application/src/agent-office/service.js';
 import type { AgentRepositoryService } from '../../../packages/application/src/agent-repository/service.js';
 import type { AgentRetrievalService } from '../../../packages/application/src/agent-retrieval/service.js';
@@ -41,6 +42,7 @@ export function createConversationRunnerFactory(
   broker: SecretBroker,
   options: {
     modelRetryPolicy?: Partial<AiModelRetryPolicy>;
+    personalBusiness?: PersonalBusinessServices;
     fileReader?: PersonalFileReader;
     searchEndpoint?: string;
     calculation?: AgentCalculationService;
@@ -222,6 +224,9 @@ export function createConversationRunnerFactory(
       // Wire-format support permits the tool loop; this is not a supplier capability verification.
       toolCalling: true,
       businessServices: {
+        ...options.personalBusiness,
+        configuration,
+        externalMcp,
         testConfiguration,
         plans,
         apiExecution,

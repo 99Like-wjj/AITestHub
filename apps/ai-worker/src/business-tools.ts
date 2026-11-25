@@ -21,7 +21,7 @@ import { assertTaskCapability } from '../../../packages/application/src/conversa
 import { requirementCandidatesInputSchema } from '../../../packages/contracts/src/requirements.js';
 import { ReportService } from '../../../packages/application/src/reports/service.js';
 import { ResultService } from '../../../packages/application/src/results/service.js';
-import { registerModelReportReads } from './report-reading.js';
+import { registerReportReads } from './report-reading.js';
 
 const officeRequirementFindSchema = z.union([
   requirementCandidatesInputSchema.safeExtend({ op: z.literal('find') }),
@@ -140,6 +140,9 @@ export const AI_BUSINESS_TOOL_NAMES = [
   'ath_requirements',
   'ath_requirement_materials',
   'ath_requirement_membership',
+  'ath_identity',
+  'ath_platform_admin',
+  'ath_personal_workspace',
   'ath_requirement_state',
   'ath_project_members',
   'ath_operation_status',
@@ -326,6 +329,46 @@ async function assertWriteTarget(
       '请在项目操作范围内创建独立场景或解除需求关联。',
       409,
     );
+  if (
+    name === 'ath_assets' &&
+    body.requirementId === expected &&
+    ['create-scoped-scene', 'import-ui'].includes(envelope.op)
+  )
+    return;
+  if (
+    name === 'ath_reviews' &&
+    envelope.op.startsWith('meeting-') &&
+    envelope.id
+  ) {
+    const { rowCount } = await db.query(
+      'SELECT 1 FROM app.ui_review_meetings m JOIN app.requirement_versions v ON v.id=m.requirement_version_id WHERE m.id=$1 AND m.project_id=$2 AND v.requirement_id=$3',
+      [envelope.id, fixed.projectId, expected],
+    );
+    if (rowCount === 1) return;
+  }
+  if (
+    (name === 'ath_results' &&
+      ['record-human-retest', 'add-evidence'].includes(envelope.op)) ||
+    (name === 'ath_issues' && envelope.op === 'file-from-report')
+  ) {
+    const report = z
+      .object({
+        resultId: z.uuid().optional(),
+        reportReview: z.object({ resultId: z.uuid() }).optional(),
+      })
+      .parse(body);
+    const resultId = report.resultId ?? report.reportReview?.resultId;
+    if (
+      resultId &&
+      (
+        await db.query(
+          "SELECT 1 FROM app.results r JOIN app.run_items i ON i.id=r.run_item_id JOIN app.requirement_versions v ON v.id=(i.snapshot->>'requirementVersionId')::uuid WHERE r.id=$1 AND r.project_id=$2 AND v.requirement_id=$3",
+          [resultId, fixed.projectId, expected],
+        )
+      ).rowCount === 1
+    )
+      return;
+  }
   if (name === 'ath_requirement_materials' && !envelope.requirementId)
     throw new DomainError(
       'BUSINESS_CONFLICT',
@@ -455,10 +498,11 @@ export function createAiBusinessTools(
     db,
     options.services?.auxiliary?.requirementNameAdmission(),
   );
-  registerModelReportReads(
+  registerReportReads(
     registry,
     new ReportService(db),
     new ResultService(db),
+    true,
   );
   const confirmations = new ActionIntents(db, registry);
   const entries = [...registry.tools.values()].filter((entry) =>
@@ -494,10 +538,17 @@ export function createAiBusinessTools(
         async (raw: unknown) => {
           const invocationId = randomUUID();
           let writeStarted = false;
+          const action = z
+            .object({ op: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/) })
+            .safeParse(raw);
+          const operationFact = action.success
+            ? { operation: action.data.op }
+            : {};
           options.emit({
             type: 'tool',
             invocationId,
             name: entry.name,
+            ...operationFact,
             state: 'started',
           });
           try {
@@ -587,6 +638,11 @@ export function createAiBusinessTools(
             }
             if (entry.operations.get(prepared.op)?.access === 'write') {
               await options.assertEffectsSettled?.();
+            }
+            if (
+              operation?.access === 'write' &&
+              operation.scope === 'project'
+            ) {
               await assertWriteTarget(
                 db,
                 entry.name,
@@ -611,6 +667,7 @@ export function createAiBusinessTools(
                 type: 'tool',
                 invocationId,
                 name: entry.name,
+                ...operationFact,
                 state: waiting
                   ? 'waitingConfirmation'
                   : pending.status === 'completed' ||
@@ -691,6 +748,7 @@ export function createAiBusinessTools(
               type: 'tool',
               invocationId,
               name: entry.name,
+              ...operationFact,
               state: 'completed',
               ...(sourceRefs.length ? { sourceRefs } : {}),
             });
@@ -708,6 +766,7 @@ export function createAiBusinessTools(
               type: 'tool',
               invocationId,
               name: entry.name,
+              ...operationFact,
               state: 'failed',
               ...(writeStarted &&
               [
@@ -726,7 +785,7 @@ export function createAiBusinessTools(
         },
         {
           name: entry.name,
-          description: entry.description,
+          description: registry.description(entry),
           schema: registry.schema(entry),
         },
       );

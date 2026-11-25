@@ -455,6 +455,10 @@ export async function createApp(db: Database) {
     apiExecution,
     schedules,
     auxiliary,
+    configuration,
+    externalMcp,
+    conversations: conversationsService,
+    fileCenter,
   });
   registerInternalTools(businessRegistry, db);
   @Module({
@@ -649,6 +653,10 @@ export async function createApp(db: Database) {
     apiExecution,
     schedules,
     auxiliary,
+    configuration,
+    externalMcp,
+    conversations: conversationsService,
+    fileCenter,
   });
   app.useBodyParser('json', { limit: '1mb' });
   app.useGlobalFilters(new SafeErrorFilter());

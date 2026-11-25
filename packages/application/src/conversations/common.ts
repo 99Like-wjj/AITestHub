@@ -1,6 +1,10 @@
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import type { SqlExecutor } from '../../../persistence/src/database.js';
-import { currentUser, requireProject } from '../access/policy.js';
+import {
+  currentUser,
+  permitsPersonalData,
+  requireProject,
+} from '../access/policy.js';
 import { DomainError } from '../errors.js';
 import {
   conversationDisplayTitle,
@@ -49,7 +53,7 @@ export async function personalActor(
 ): Promise<void> {
   await currentUser(tx, actor);
   if (
-    actor.entrypoint !== 'web' &&
+    !permitsPersonalData(actor) &&
     !(internal && actor.entrypoint === 'internal-ai')
   )
     throw new DomainError(

@@ -94,7 +94,6 @@ export function registerIssueTools(
       await db.transaction((tx) =>
         requireProject(tx, a, i.projectId, 'reviews.approve'),
       );
-      if (a.entrypoint !== 'internal-ai') return;
       return {
         reason: 'human-decision',
         summary:
@@ -122,7 +121,6 @@ export function registerIssueTools(
       await db.transaction((tx) =>
         requireProject(tx, a, i.projectId, 'reviews.approve'),
       );
-      if (a.entrypoint !== 'internal-ai') return;
       return {
         reason: 'human-decision',
         summary: '将以下候选判为非缺陷；不会修改原始结果或人工最终结论。',
@@ -427,8 +425,6 @@ export function registerIssueTools(
           '关闭确认预览不存在或摘要不符。',
           409,
         );
-      if (a.entrypoint === 'official-mcp' && i.input.objectIds.length === 1)
-        return;
       return {
         reason:
           i.input.objectIds.length > 1 ? 'precise-scope' : 'human-decision',

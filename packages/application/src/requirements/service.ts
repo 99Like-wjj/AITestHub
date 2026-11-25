@@ -5,6 +5,7 @@ import {
   createRequirementResourceInputSchema as createRequirementInputSchema,
   addRequirementVersionResourceInputSchema as addRequirementVersionInputSchema,
   requirementParticipantsInputSchema,
+  requirementParticipantDeltaInputSchema,
   requirementStateInputSchema,
   requirementArchiveInputSchema,
   requirementCandidatesInputSchema,
@@ -24,6 +25,7 @@ import type {
 import { requireProject, requireProjectDraftWrite } from '../access/policy.js';
 import { DomainError, stale } from '../errors.js';
 import { audit } from '../events.js';
+import { businessDisplayName } from '../identity/ai-projection.js';
 import { OperationService } from '../operations/service.js';
 import { rejectMissingAcceptedReceipt } from '../recovery/receipts.js';
 import { RequirementDeletionService } from './deletion.js';
@@ -656,6 +658,137 @@ export class RequirementService {
           { userIds: input.userIds },
         );
         return { completed: true, rowVersion: input.rowVersion + 1 };
+      },
+      projectId,
+    );
+  }
+
+  async participantCandidates(
+    actor: ActorContext,
+    projectId: string,
+    id: string,
+    search: string,
+  ) {
+    return this.db.transaction(async (tx) => {
+      await requireProject(tx, actor, projectId, 'project.read');
+      await this.get(tx, projectId, id);
+      const { rows } = await tx.query<{ id: string; display_name: string }>(
+        `WITH eligible AS (
+           SELECT u.id, CASE
+             WHEN lower(btrim(u.display_name)) IN (u.account,lower(btrim(u.display_account))) THEN '项目成员'
+             ELSE u.display_name END display_name
+           FROM app.project_members m JOIN app.users u ON u.id=m.user_id
+           WHERE m.project_id=$1 AND m.active AND u.active
+         )
+         SELECT id,display_name FROM eligible
+         WHERE position(lower($2) in lower(display_name)) > 0
+         ORDER BY display_name,id LIMIT 100`,
+        [projectId, search],
+      );
+      return {
+        candidates: rows.map((row) => ({
+          id: row.id,
+          displayName: row.display_name,
+        })),
+      };
+    });
+  }
+
+  async changeParticipants(
+    actor: ActorContext,
+    projectId: string,
+    id: string,
+    action: 'add' | 'remove',
+    raw: unknown,
+  ) {
+    const input = requirementParticipantDeltaInputSchema.parse(raw);
+    const ids = [
+      ...new Set([
+        ...input.userIds,
+        ...(input.includeSelf ? [actor.userId] : []),
+      ]),
+    ].sort();
+    return this.operations.execute(
+      actor,
+      'requirements.participants-' + action,
+      input.commandId,
+      { projectId, id, rowVersion: input.rowVersion, ids },
+      (tx) =>
+        requireProject(
+          tx,
+          actor,
+          projectId,
+          'requirements.participants.write',
+        ).then(() => undefined),
+      async (tx) => {
+        const requirement = await this.get(tx, projectId, id, true);
+        if (requirement.row_version !== input.rowVersion) stale();
+        const { rows } = await tx.query<{
+          user_id: string;
+          display_name: string;
+          account: string;
+          display_account: string;
+        }>(
+          `SELECT u.id AS user_id,u.display_name,u.account,u.display_account
+           FROM app.project_members m JOIN app.users u ON u.id=m.user_id
+           WHERE m.project_id=$1 AND m.user_id=ANY($2::uuid[]) AND m.active AND u.active
+           ORDER BY u.id FOR SHARE OF m,u`,
+          [projectId, ids],
+        );
+        if (rows.length !== ids.length)
+          throw new DomainError(
+            'PRECONDITIONS_MISSING',
+            '名单含当前项目不可加入的人员，本次未修改。',
+            422,
+          );
+        const changed =
+          action === 'add'
+            ? await tx.query<{ user_id: string }>(
+                `INSERT INTO app.requirement_participants(requirement_id,project_id,user_id,added_by)
+             SELECT $1,$2,id,$4 FROM unnest($3::uuid[]) id
+             ON CONFLICT(requirement_id,user_id) DO UPDATE
+             SET active=true,updated_at=clock_timestamp()
+             WHERE NOT app.requirement_participants.active RETURNING user_id`,
+                [id, projectId, ids, actor.userId],
+              )
+            : await tx.query<{ user_id: string }>(
+                `UPDATE app.requirement_participants SET active=false,updated_at=clock_timestamp()
+             WHERE requirement_id=$1 AND project_id=$2 AND user_id=ANY($3::uuid[]) AND active RETURNING user_id`,
+                [id, projectId, ids],
+              );
+        const changedIds = new Set(changed.rows.map((row) => row.user_id));
+        if (changedIds.size) {
+          await tx.query(
+            'UPDATE app.requirements SET row_version=row_version+1 WHERE id=$1',
+            [id],
+          );
+          await audit(
+            tx,
+            actor,
+            'requirement.participants-' + action,
+            id,
+            projectId,
+            { userIds: [...changedIds].sort() },
+          );
+        }
+        const people = rows.map((row) => ({
+          id: row.user_id,
+          displayName: businessDisplayName(
+            row.display_name,
+            row.account,
+            row.display_account,
+          ),
+        }));
+        const applied = people.filter((person) => changedIds.has(person.id));
+        const already = people.filter((person) => !changedIds.has(person.id));
+        return {
+          requirementId: id,
+          commandId: input.commandId,
+          rowVersion: requirement.row_version + Number(changedIds.size > 0),
+          ...(action === 'add'
+            ? { added: applied, alreadyParticipant: already }
+            : { removed: applied, alreadyAbsent: already }),
+        };
       },
       projectId,
     );

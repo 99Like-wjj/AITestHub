@@ -69,6 +69,16 @@ import { DomainError } from '../errors.js';
 import { BusinessToolRegistry } from './registry.js';
 import type { TestConfigurationService } from '../test-configuration/service.js';
 import type { ApiExecutionControlService } from '../api-execution/control.js';
+import {
+  registerPersonalTools,
+  type PersonalBusinessServices,
+} from './personal.js';
+import {
+  registerManagementTools,
+  type ManagementServices,
+} from './management.js';
+import { registerReviewWorkflowTools } from './review-workflow.js';
+import { registerParticipationTools } from './participants.js';
 import { registerIssueTools } from './issues.js';
 import { registerInternalConfigurationTools } from './configuration.js';
 import { registerKnowledgeTools } from './knowledge.js';
@@ -87,7 +97,8 @@ const shape = <S extends z.ZodType>(op: string, input: S) =>
 const link = (projectId: string, page: string, id?: string) =>
   `/api/v1/projects/${projectId}/${page}${id ? `/${id}` : ''}`;
 
-export interface BusinessServices {
+export interface BusinessServices
+  extends ManagementServices, PersonalBusinessServices {
   auxiliary?: AuxiliaryService;
   files?: FilesService;
   schedules?: ScheduleBusinessService;
@@ -103,6 +114,9 @@ export function createBusinessRegistry(
   services: BusinessServices = {},
 ): BusinessToolRegistry {
   const registry = new BusinessToolRegistry();
+  registerParticipationTools(registry, db);
+  registerManagementTools(registry, db, services);
+  registerPersonalTools(registry, db, services);
   registerRequirementStateTools(registry, db);
   registerRequirementQueryTools(registry, db, services.auxiliary);
   registerUiDeliveryTools(registry, db, services.files);
@@ -340,7 +354,7 @@ export function createBusinessRegistry(
     },
   );
   const reviewDescription =
-    '读取意见、记录意见和优化说明；批准是tester的人工决定，AI优化不构成批准。';
+    '读取、记录意见或优化说明。明确要求批准现有UI用例时，调用 preview-approve 生成精确范围，再调用 approve 发起本人确认。查看评审和设计优化各有独立操作。';
   add(
     'ath_reviews',
     reviewDescription,
@@ -441,8 +455,6 @@ export function createBusinessRegistry(
           '确认预览不存在或摘要不匹配。',
           409,
         );
-      if (a.entrypoint === 'official-mcp' && i.input.objectIds.length === 1)
-        return;
       return {
         reason:
           i.input.objectIds.length > 1 ? 'precise-scope' : 'human-decision',
@@ -990,6 +1002,7 @@ export function createBusinessRegistry(
     },
   );
   registerIssueTools(registry, db, plans);
+  registerReviewWorkflowTools(registry, db, plans);
   registerKnowledgeTools(registry, db);
   if (services.auxiliary) registerAuxiliaryTools(registry, services.auxiliary);
   if (services.schedules) registerScheduleTools(registry, services.schedules);

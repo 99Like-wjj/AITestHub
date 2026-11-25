@@ -1,26 +1,16 @@
 import type { McpServer, CallToolResult } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import {
-  idSchema,
-  commandIdSchema,
-  persistedRowVersionSchema,
-} from '../../../packages/contracts/src/base.js';
+import { idSchema } from '../../../packages/contracts/src/base.js';
 import type { ActorContext } from '../../../packages/contracts/src/identity.js';
 import { fileRegistrationSchema } from '../../../packages/contracts/src/domain.js';
 import {
   createRequirementResourceInputSchema as createRequirementInputSchema,
   addRequirementVersionResourceInputSchema as addRequirementVersionInputSchema,
-  requirementParticipantsInputSchema,
 } from '../../../packages/contracts/src/requirements.js';
-import {
-  configurationKindSchema,
-  saveTestConfigurationInputSchema,
-} from '../../../packages/contracts/src/test-configuration.js';
 import type { Database } from '../../../packages/persistence/src/database.js';
 import { RequirementService } from '../../../packages/application/src/requirements/service.js';
 import type { FilesService } from '../../../packages/application/src/files/service.js';
 import type { TestConfigurationService } from '../../../packages/application/src/test-configuration/service.js';
-import { DomainError } from '../../../packages/application/src/errors.js';
 import type { BusinessServices } from '../../../packages/application/src/tool-registry/business.js';
 import {
   prepareRequirementVersionResourceInputSchema as prepareRequirementVersionInputSchema,
@@ -111,41 +101,6 @@ export function registerDomainTools(
             );
       }),
   );
-  server.registerTool(
-    'ath_requirement_membership',
-    {
-      description: '本项目需求参与名单。修改名单不增加角色，不刷新业务活跃。',
-      inputSchema: z.discriminatedUnion('op', [
-        z.strictObject({ op: z.literal('get'), ...target }),
-        z.strictObject({
-          op: z.literal('set'),
-          ...target,
-          input: requirementParticipantsInputSchema,
-        }),
-      ]),
-      annotations: writeAnnotations,
-    },
-    async (input) =>
-      call(async () => {
-        if (input.op === 'set')
-          return requirements.participants(
-            actor,
-            input.projectId,
-            input.requirementId,
-            input.input,
-          );
-        const detail = await requirements.detail(
-          actor,
-          input.projectId,
-          input.requirementId,
-        );
-        return {
-          requirementId: detail.requirement.id,
-          rowVersion: detail.requirement.rowVersion,
-          participants: detail.participants,
-        };
-      }),
-  );
   // ath_requirement_state is registered through the common business registry so permanent
   // deletion uses the same durable impact/MRTR confirmation as native AI, never a model boolean.
 
@@ -197,148 +152,4 @@ export function registerDomainTools(
           };
         }),
     );
-
-  const configuration = services.testConfiguration;
-  if (!configuration) return;
-  const configurationInput = z.discriminatedUnion('op', [
-    z.strictObject({
-      op: z.literal('list'),
-      projectId: idSchema,
-      kind: configurationKindSchema.optional(),
-    }),
-    z.strictObject({ op: z.literal('get'), projectId: idSchema, id: idSchema }),
-    z.strictObject({
-      op: z.literal('create'),
-      projectId: idSchema,
-      input: saveTestConfigurationInputSchema,
-    }),
-    z.strictObject({
-      op: z.literal('update'),
-      projectId: idSchema,
-      id: idSchema,
-      input: saveTestConfigurationInputSchema,
-    }),
-    z.strictObject({
-      op: z.literal('disable'),
-      projectId: idSchema,
-      id: idSchema,
-      input: z.strictObject({
-        commandId: commandIdSchema,
-        rowVersion: persistedRowVersionSchema,
-      }),
-    }),
-  ]);
-  server.registerTool(
-    'ath_test_configuration',
-    {
-      description:
-        '维护项目环境/用途/账号/绑定/认证的非秘密配置；凭据只在网页安全输入，SQL不在此执行。',
-      inputSchema: configurationInput,
-      annotations: writeAnnotations,
-    },
-    async (input) =>
-      call(async () => {
-        if (input.op === 'list')
-          return configuration.list(actor, input.projectId, input.kind);
-        if (input.op === 'get')
-          return configuration.get(actor, input.projectId, input.id);
-        if (input.op === 'disable') {
-          const current = await configuration.get(
-            actor,
-            input.projectId,
-            input.id,
-          );
-          return configuration.save(actor, input.projectId, input.id, {
-            ...input.input,
-            content: { ...current.configuration.content, active: false },
-          });
-        }
-        return configuration.save(
-          actor,
-          input.projectId,
-          input.op === 'update' ? input.id : undefined,
-          input.input,
-        );
-      }),
-  );
-  server.registerTool(
-    'ath_database_connections',
-    {
-      description:
-        '读取/维护本项目数据库连接非秘密定义，权限按业务角色，不能执行任意SQL或读取凭据。',
-      inputSchema: z.discriminatedUnion('op', [
-        z.strictObject({ op: z.literal('list'), projectId: idSchema }),
-        z.strictObject({
-          op: z.literal('metadata'),
-          projectId: idSchema,
-          id: idSchema,
-        }),
-        z.strictObject({
-          op: z.literal('create'),
-          projectId: idSchema,
-          input: saveTestConfigurationInputSchema,
-        }),
-        z.strictObject({
-          op: z.literal('update'),
-          projectId: idSchema,
-          id: idSchema,
-          input: saveTestConfigurationInputSchema,
-        }),
-        z.strictObject({
-          op: z.literal('disable'),
-          projectId: idSchema,
-          id: idSchema,
-          input: z.strictObject({
-            commandId: commandIdSchema,
-            rowVersion: persistedRowVersionSchema,
-          }),
-        }),
-      ]),
-      annotations: writeAnnotations,
-    },
-    async (input) =>
-      call(async () => {
-        if (input.op === 'list')
-          return configuration.list(
-            actor,
-            input.projectId,
-            'databaseConnection',
-          );
-        if (input.op === 'metadata') {
-          const result = await configuration.get(
-            actor,
-            input.projectId,
-            input.id,
-            'databaseConnection',
-          );
-          if (result.configuration.content.kind !== 'databaseConnection')
-            throw new DomainError('NOT_FOUND', '没有此数据库连接。', 404);
-          return result;
-        }
-        if (input.op === 'disable') {
-          const current = await configuration.get(
-            actor,
-            input.projectId,
-            input.id,
-            'databaseConnection',
-          );
-          return configuration.save(actor, input.projectId, input.id, {
-            ...input.input,
-            content: { ...current.configuration.content, active: false },
-          });
-        }
-        if (input.input.content.kind !== 'databaseConnection')
-          throw new DomainError(
-            'VALIDATION_ERROR',
-            '此工具仅维护数据库连接定义。',
-            400,
-          );
-        return configuration.save(
-          actor,
-          input.projectId,
-          input.op === 'update' ? input.id : undefined,
-          input.input,
-        );
-      }),
-  );
 }

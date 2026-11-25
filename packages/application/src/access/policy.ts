@@ -44,7 +44,36 @@ export async function requirePlatformAdmin(
   actor: ActorContext,
 ): Promise<void> {
   const user = await currentUser(sql, actor);
-  if (actor.entrypoint !== 'web' || !user.is_platform_admin) forbidden();
+  if (
+    actor.entrypoint !== 'web' ||
+    !user.is_platform_admin ||
+    (actor.keyId && !actor.allowedCapabilities?.includes('platform.manage'))
+  )
+    forbidden();
+}
+
+export async function requireBusinessAdministrator(
+  sql: SqlExecutor,
+  actor: ActorContext,
+) {
+  const user = await currentUser(sql, actor);
+  if (
+    !user.is_platform_admin ||
+    actor.entrypoint === 'worker' ||
+    (actor.entrypoint === 'official-mcp' &&
+      (!actor.keyId || !actor.allowedCapabilities?.includes('platform.manage')))
+  )
+    forbidden();
+}
+
+export function permitsPersonalData(actor: ActorContext): boolean {
+  return (
+    actor.entrypoint === 'web' ||
+    actor.entrypoint === 'internal-ai' ||
+    (actor.entrypoint === 'official-mcp' &&
+      !!actor.keyId &&
+      actor.allowedCapabilities?.includes('personal.data') === true)
+  );
 }
 
 function inheritsPlatformAdmin(
@@ -193,7 +222,12 @@ async function authorizeProject(
   if (testerActions.has(capability)) allowed = tester;
   if (capability === 'project.members.manage')
     allowed =
-      (actor.entrypoint === 'web' || actor.entrypoint === 'internal-ai') &&
+      (actor.entrypoint === 'web' ||
+        actor.entrypoint === 'internal-ai' ||
+        (actor.entrypoint === 'official-mcp' &&
+          !!actor.keyId &&
+          actor.allowedCapabilities?.includes('project.members.manage') ===
+            true)) &&
       member.is_admin;
   if (capability === 'test-configuration.write')
     allowed = tester || member.is_admin;

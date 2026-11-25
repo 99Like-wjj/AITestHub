@@ -1,3 +1,4 @@
+import { McpActionConfirmation } from './mcp-action-confirmation';
 import {
   Component,
   lazy,
@@ -743,6 +744,7 @@ function SignedIn({
 
   return (
     <Layout className="app-shell">
+      <McpActionConfirmation />
       {!standaloneWorkspace && (
         <Layout.Sider
           width={179.2}

@@ -4,6 +4,7 @@ import type { ActorContext } from '../../../contracts/src/identity.js';
 import { canonicalJson } from '../operations/service.js';
 import { DomainError } from '../errors.js';
 import { assertSafeModelInput } from '../security/model-input.js';
+import { projectPersonData } from '../identity/ai-projection.js';
 
 function safeToolData(value: unknown): void {
   assertSafeModelInput(value);
@@ -37,6 +38,8 @@ export interface ConfirmationScope {
   scope: unknown;
   links: string[];
 }
+export type BusinessTargetScope = 'project' | 'personal' | 'platform';
+
 export interface PreparedBusinessCall {
   toolName: string;
   op: string;
@@ -49,6 +52,7 @@ interface Operation {
   schema: z.ZodType;
   prepare: (actor: ActorContext, raw: unknown) => Promise<PreparedBusinessCall>;
   access: 'read' | 'write';
+  scope: BusinessTargetScope;
   internalOnly: boolean;
 }
 export interface BusinessTool {
@@ -72,6 +76,7 @@ export class BusinessToolRegistry {
       input: z.infer<S>,
     ) => Promise<ConfirmationScope | undefined>,
     internalOnly = false,
+    targetScope: BusinessTargetScope = 'project',
   ): void {
     let entry = this.tools.get(name);
     if (!entry) {
@@ -84,11 +89,16 @@ export class BusinessToolRegistry {
     entry.operations.set(op, {
       schema,
       access,
+      scope: targetScope,
       internalOnly,
       prepare: async (actor, raw) => {
         const input = schema.parse(raw);
         safeToolData(input);
-        const scope = await confirmation?.(actor, input);
+        const originalScope = await confirmation?.(actor, input);
+        const scope = originalScope && {
+          ...originalScope,
+          scope: projectPersonData(originalScope.scope),
+        };
         if (scope) safeToolData(scope);
         const project = z.object({ projectId: z.string() }).safeParse(input);
         const nestedProject = z
@@ -124,7 +134,7 @@ export class BusinessToolRegistry {
               }
             : {}),
           execute: async () => {
-            const result = await execute(actor, input);
+            const result = projectPersonData(await execute(actor, input));
             safeToolData(result);
             return result;
           },
@@ -132,6 +142,15 @@ export class BusinessToolRegistry {
         return call;
       },
     });
+  }
+  description(
+    tool: BusinessTool,
+    entrypoint: ActorContext['entrypoint'] = 'internal-ai',
+  ): string {
+    const operations = [...tool.operations.entries()]
+      .filter(([, op]) => !op.internalOnly || entrypoint === 'internal-ai')
+      .map(([name, op]) => op.access + ' ' + name);
+    return tool.description + '\n操作：' + operations.join('、');
   }
   schema(
     tool: BusinessTool,

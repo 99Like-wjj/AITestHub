@@ -1,3 +1,4 @@
+import { permitsPersonalData } from '../access/policy.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import {
   markNotificationGroupsReadReceiptSchema,
@@ -120,7 +121,7 @@ export class NotificationService {
   constructor(readonly db: Database) {}
   private async personal(tx: SqlExecutor, actor: ActorContext) {
     await currentUser(tx, actor);
-    if (actor.entrypoint !== 'web')
+    if (!permitsPersonalData(actor))
       throw new DomainError('FORBIDDEN', '站内通知仅供本人平台会话。', 403);
   }
   private async relatedTesters(

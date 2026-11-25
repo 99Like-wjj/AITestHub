@@ -181,6 +181,7 @@ export const capabilitySchema = z.enum([
   'issues.lifecycle',
   'knowledge.write',
   'personal-key.manage',
+  'personal.data',
 ]);
 export const capabilitiesSchema = z.array(capabilitySchema);
 export const actorContextSchema = z.strictObject({

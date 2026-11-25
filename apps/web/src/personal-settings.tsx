@@ -4,6 +4,7 @@ import {
   App,
   Avatar,
   Button,
+  Checkbox,
   Form,
   Input,
   Modal,
@@ -35,20 +36,35 @@ import {
 import { PersonalUsagePanel } from './usage';
 import {
   keysListSchema,
+  capabilitySchema,
+  type Capability,
   personalKeyCreatedSchema,
 } from '../../../packages/contracts/src/identity';
 import './personal-settings-page.css';
 import { AgentMemoryPanel } from './agent-memory';
 import { AgentSchedules } from './agent-schedules';
 
-function KeySettings() {
+type KeyForm = {
+  name: string;
+  privateData?: boolean;
+  projectManagement?: boolean;
+  platformManagement?: boolean;
+};
+const protectedKeyScopes: Capability[] = [
+  'personal.data',
+  'project.members.manage',
+  'platform.manage',
+  'personal-key.manage',
+];
+
+function KeySettings({ user }: { user: User }) {
   const { modal, message } = App.useApp();
   const [keys, setKeys] = useState<PersonalKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const [rawKey, setRawKey] = useState<string>();
-  const [form] = Form.useForm<{ name: string }>();
+  const [form] = Form.useForm<KeyForm>();
 
   async function load(signal?: AbortSignal) {
     setLoading(true);
@@ -74,13 +90,28 @@ function KeySettings() {
     return () => abort.abort();
   }, []);
 
-  async function create(values: { name: string }) {
+  async function create(values: KeyForm) {
     setPending(true);
     setError(undefined);
     try {
       const result = await api(
         '/me/keys',
-        { method: 'POST', body: values },
+        {
+          method: 'POST',
+          body: {
+            name: values.name,
+            allowedCapabilities: [
+              ...capabilitySchema.options.filter(
+                (scope) => !protectedKeyScopes.includes(scope),
+              ),
+              ...(values.privateData ? ['personal.data'] : []),
+              ...(values.projectManagement ? ['project.members.manage'] : []),
+              ...(values.platformManagement && user.isPlatformAdmin
+                ? ['platform.manage']
+                : []),
+            ],
+          },
+        },
         personalKeyCreatedSchema,
       );
       setRawKey(result.rawKey);
@@ -132,7 +163,7 @@ function KeySettings() {
       <Form
         form={form}
         layout="inline"
-        onFinish={(values: { name: string }) => void create(values)}
+        onFinish={(values: KeyForm) => void create(values)}
       >
         <Form.Item
           name="name"
@@ -148,6 +179,17 @@ function KeySettings() {
         >
           <Input maxLength={80} disabled={pending} />
         </Form.Item>
+        <Form.Item name="privateData" valuePropName="checked">
+          <Checkbox disabled={pending}>本人工作台</Checkbox>
+        </Form.Item>
+        <Form.Item name="projectManagement" valuePropName="checked">
+          <Checkbox disabled={pending}>项目管理提案</Checkbox>
+        </Form.Item>
+        {user.isPlatformAdmin && (
+          <Form.Item name="platformManagement" valuePropName="checked">
+            <Checkbox disabled={pending}>平台管理提案</Checkbox>
+          </Form.Item>
+        )}
         <Form.Item>
           <Button
             type="primary"
@@ -593,7 +635,7 @@ export function PersonalSettings({
             label: '个人 Key',
             children: (
               <>
-                <KeySettings />
+                <KeySettings user={user} />
                 <div className="divider" />
                 <ExternalMcpPersonalKeys />
                 <Button

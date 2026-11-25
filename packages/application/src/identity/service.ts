@@ -23,9 +23,11 @@ import type {
 import {
   currentUser,
   listProjectAccess,
+  requireProject,
   requirePlatformAdmin,
 } from '../access/policy.js';
 import { audit } from '../events.js';
+import { businessDisplayName } from './ai-projection.js';
 import { DomainError, stale } from '../errors.js';
 import {
   hashPassword,
@@ -186,6 +188,44 @@ export class IdentityService {
       return {
         user: userDto(user),
         projects: projects.map(({ memberVersion: _memberVersion, ...p }) => p),
+      };
+    });
+  }
+
+  async businessSelf(actor: ActorContext, projectId?: string) {
+    return this.db.transaction(async (tx) => {
+      await currentUser(tx, actor);
+      const user = (
+        await tx.query<
+          Pick<
+            UserRow,
+            | 'id'
+            | 'account'
+            | 'display_account'
+            | 'display_name'
+            | 'theme'
+            | 'row_version'
+          >
+        >(
+          'SELECT id,account,display_account,display_name,theme,row_version FROM app.users WHERE id=$1',
+          [actor.userId],
+        )
+      ).rows[0]!;
+      const project = projectId
+        ? await requireProject(tx, actor, projectId, 'project.read')
+        : undefined;
+      return {
+        user: {
+          id: user.id,
+          displayName: businessDisplayName(
+            user.display_name,
+            user.account,
+            user.display_account,
+          ),
+          theme: user.theme,
+          rowVersion: user.row_version,
+        },
+        ...(project ? { project: { id: projectId, ...project } } : {}),
       };
     });
   }
@@ -410,6 +450,49 @@ export class IdentityService {
           displayName: u.display_name,
           active: u.active,
         })),
+      };
+    });
+  }
+
+  async businessUserPage(actor: ActorContext, raw: unknown) {
+    const input = adminUserPageQuerySchema.parse(raw);
+    return this.db.transaction(async (tx) => {
+      await requirePlatformAdmin(tx, actor);
+      const result = await tx.query<{
+        id: string;
+        display_name: string;
+        active: boolean;
+        is_platform_admin: boolean;
+        row_version: number;
+        total: string;
+      }>(
+        `WITH projected AS (
+          SELECT id,CASE WHEN lower(btrim(display_name)) IN (account,lower(btrim(display_account))) THEN '平台成员'
+            ELSE display_name END display_name,active,is_platform_admin,row_version
+          FROM app.users WHERE ($4::boolean OR removed_at IS NULL)
+        )
+        SELECT *,count(*) OVER()::text total FROM projected
+        WHERE position(lower($1) in lower(display_name)) > 0 OR $1=''
+        ORDER BY display_name,id LIMIT $2 OFFSET $3`,
+        [
+          input.search,
+          input.pageSize,
+          (input.page - 1) * input.pageSize,
+          input.includeRemoved,
+        ],
+      );
+      await audit(tx, actor, 'identity.business-directory-read', actor.userId);
+      return {
+        page: input.page,
+        pageSize: input.pageSize,
+        users: result.rows.map((row) => ({
+          id: row.id,
+          displayName: row.display_name,
+          active: row.active,
+          isPlatformAdmin: row.is_platform_admin,
+          rowVersion: row.row_version,
+        })),
+        total: Number(result.rows[0]?.total ?? 0),
       };
     });
   }

@@ -1,3 +1,4 @@
+import { FileCenterService } from '../../../packages/application/src/agent-workspace/file-center.js';
 import { createDatabaseFromEnvironment } from '../../../packages/persistence/src/config.js';
 import { createSandboxClientFromEnvironment } from '../../../packages/agent-runtime/src/environment.js';
 import { AgentWorkspaceService } from '../../../packages/application/src/agent-workspace/service.js';
@@ -98,6 +99,12 @@ async function main() {
     createConversationRunnerFactory(database, configuration, broker, {
       fileReader,
       officeSchedules,
+      personalBusiness: {
+        conversations: scheduledConversations,
+        fileCenter: new FileCenterService(
+          new AgentWorkspaceService(database, files),
+        ),
+      },
       ...(retrieval ? { retrieval } : {}),
       ...(repository ? { repository } : {}),
       documents,

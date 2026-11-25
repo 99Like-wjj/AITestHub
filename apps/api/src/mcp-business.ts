@@ -14,6 +14,9 @@ import {
   createBusinessRegistry,
   type BusinessServices,
 } from '../../../packages/application/src/tool-registry/business.js';
+import { ReportService } from '../../../packages/application/src/reports/service.js';
+import { ResultService } from '../../../packages/application/src/results/service.js';
+import { registerReportReads } from '../../../packages/application/src/tool-registry/report-reading.js';
 import { ActionIntents } from '../../../packages/application/src/tool-registry/action-intents.js';
 import { DomainError } from '../../../packages/application/src/errors.js';
 
@@ -32,13 +35,19 @@ export function registerBusinessMcpTools(
   services: BusinessServices,
 ): void {
   const registry = createBusinessRegistry(db, services);
+  registerReportReads(
+    registry,
+    new ReportService(db),
+    new ResultService(db),
+    false,
+  );
   const confirmations = new ActionIntents(db, registry);
   for (const tool of registry.tools.values()) {
     if (tool.internalOnly) continue;
     server.registerTool(
       tool.name,
       {
-        description: tool.description,
+        description: registry.description(tool, 'official-mcp'),
         inputSchema: registry.schema(tool, 'official-mcp'),
         annotations: {
           readOnlyHint:
@@ -83,13 +92,17 @@ export function registerBusinessMcpTools(
           const hasForm =
             supported !== undefined &&
             ('form' in supported || Object.keys(supported).length === 0);
-          if (!hasForm)
+          if (
+            !hasForm ||
+            ['ath_platform_admin', 'ath_project_members'].includes(tool.name)
+          )
             return {
               status: 'waitingConfirmation',
               confirmation: pending,
               reason: 'CLIENT_FORM_ELICITATION_UNAVAILABLE',
               compatibility:
                 '此客户端未声明标准表单交互能力；没有将Key或模型文字当成人已确认。',
+              confirmationPath: '/?athIntent=' + pending.id,
               objectLinks: pending.proposal.links,
             };
           const key = `confirm-${pending.id}`;

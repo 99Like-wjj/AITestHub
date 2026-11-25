@@ -419,10 +419,16 @@ const referenceAvailabilitySchema = z.enum([
   'notParsed',
   'notIntegrated',
 ]);
+export const aiToolSelectionPayloadSchema = z.strictObject({
+  type: z.literal('toolSelection'),
+  tools: z.array(z.string().regex(/^ath_[a-z0-9_-]{1,60}$/)).max(30),
+  otherToolCount: z.number().int().nonnegative(),
+});
 export const aiToolEventPayloadSchema = z.strictObject({
   type: z.literal('tool'),
   invocationId: idSchema,
   name: z.string().max(200),
+  operation: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional(),
   state: z.enum(['started', 'completed', 'failed', 'waitingConfirmation', 'notDispatched']),
   confirmationId: idSchema.optional(),
   externalInvocationId: idSchema.optional(),
@@ -524,6 +530,11 @@ export const aiTaskEventSchema = z.discriminatedUnion('type', [
       type: z.literal('modelRetry'),
       retry: modelRetryEventSchema,
     }),
+  }),
+  z.strictObject({
+    ...eventBase,
+    type: z.literal('ai.toolSelection'),
+    payload: aiToolSelectionPayloadSchema,
   }),
   z.strictObject({
     ...eventBase,

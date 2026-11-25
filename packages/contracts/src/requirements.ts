@@ -67,6 +67,15 @@ export const requirementParticipantsInputSchema = z.strictObject({
     .max(1000)
     .refine((ids) => new Set(ids).size === ids.length, '参与人不可重复'),
 });
+
+export const requirementParticipantDeltaInputSchema = z
+  .strictObject({
+    commandId: commandIdSchema,
+    rowVersion: persistedRowVersionSchema,
+    includeSelf: z.boolean().default(false),
+    userIds: z.array(idSchema).max(1000).default([]),
+  })
+  .refine((input) => input.includeSelf || input.userIds.length > 0, '请选择本人或项目成员');
 export const requirementStateInputSchema = z.strictObject({
   commandId: commandIdSchema,
   rowVersion: persistedRowVersionSchema,

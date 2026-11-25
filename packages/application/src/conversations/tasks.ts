@@ -16,6 +16,7 @@ import { commandIdSchema } from '../../../contracts/src/base.js';
 import {
   aiErrorDetailsSchema,
   type aiToolEventPayloadSchema,
+  type aiToolSelectionPayloadSchema,
   frozenConversationReferenceSchema,
   operationTargetSchema,
 } from '../../../contracts/src/conversations.js';
@@ -113,6 +114,7 @@ export type RunnerEvent =
   | z.infer<typeof aiModelDispatchedPayloadSchema>
   | { type: 'modelRetry'; retry: ModelRetryEvent }
   | z.infer<typeof aiToolEventPayloadSchema>
+  | z.infer<typeof aiToolSelectionPayloadSchema>
   | { type: 'contextReset'; reason: AiContextResetReason };
 export interface ConversationRunner {
   readonly executionOrigin?: 'fixture' | 'liveProvider' | 'legacyUnknown';

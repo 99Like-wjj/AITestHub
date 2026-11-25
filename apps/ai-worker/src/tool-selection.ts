@@ -14,7 +14,6 @@ const coreTools = [
   AI_PROGRESS_TOOL_NAME,
   'ath_projects_list',
   'ath_task_context',
-  SHARED_SKILL_RULE_TOOL_NAME,
 ];
 
 // Cap the schemas supplied together, independently of each provider's token budget.
@@ -79,6 +78,46 @@ const relatedTools = [
     ],
   },
 ];
+
+export function businessRoute(prompt: string): string[] {
+  if (/平台管理员|全员|辅助模型|模型配置|外部MCP配置/iu.test(prompt))
+    return ['ath_platform_admin'];
+  if (/我的(?:草稿|对话|会话|通知|文件)|文件中心|私有工作台/iu.test(prompt))
+    return ['ath_personal_workspace'];
+  if (
+    /我是谁|我(?:的|这个|当前)(?:账号|账户|用户|身份|显示名)|当前登录(?:账号|用户)|who am i/iu.test(
+      prompt,
+    )
+  )
+    return ['ath_identity'];
+  if (
+    /加入|添加|拉入|移出|退出|参与人|participants?/iu.test(prompt) &&
+    /需求|requirement/iu.test(prompt)
+  )
+    return ['ath_requirement_membership', 'ath_requirements', 'ath_identity'];
+  if (
+    /审批|批准|评审通过|approve/iu.test(prompt) &&
+    /用例|测试集|场景|case|评审/iu.test(prompt)
+  )
+    return ['ath_reviews', 'ath_assets', 'ath_requirements'];
+  if (
+    /评审|复审|review/iu.test(prompt) &&
+    /用例|case|会议|meeting/iu.test(prompt)
+  )
+    return ['ath_reviews', 'ath_assets', 'ath_requirements'];
+  return [];
+}
+
+export function needsSkill(prompt: string): boolean {
+  return (
+    /(?:^|[^a-z0-9-])\/(?:ath-case-design|ath-api-regression|ath-project-knowledge)(?=[\s\]]|$)/iu.test(
+      prompt,
+    ) ||
+    /(?:生成|设计|编写|优化|整理).{0,16}(?:用例|测点|项目知识|接口自动化)|(?:用例|项目知识).{0,8}(?:生成|优化|整理)/iu.test(
+      prompt,
+    )
+  );
+}
 
 interface ToolContext {
   prompts: readonly string[];
@@ -215,9 +254,9 @@ export function createModelToolSelection(
         candidates.map((candidate) => [candidate.name, candidate]),
       );
       const prompts = context.prompts.map((prompt) => prompt.slice(0, 4_000));
-      const explicit = new Set(
-        prompts.join('\n').match(/\b(?:ath_|ext_)[\w-]+\b/g),
-      );
+      const current = prompts[0] ?? '';
+      const explicit = new Set(current.match(/\b(?:ath_|ext_)[\w-]+\b/g));
+      const priorityActions = businessRoute(current);
       const matched = prompts.flatMap((prompt) =>
         relatedTools
           .filter(({ terms }) => terms.test(prompt))
@@ -238,7 +277,9 @@ export function createModelToolSelection(
         return [];
       });
       const priorities = [
+        ...priorityActions,
         ...explicit,
+        ...(needsSkill(current) ? [SHARED_SKILL_RULE_TOOL_NAME] : []),
         ...referenced,
         ...matched,
         ...(context.officeOnly

@@ -98,7 +98,18 @@ const safe = (row: ConfirmationRow) =>
   });
 function confirmationCapability(name: string, op: string): Capability {
   if (name === 'ath_project_members') return 'project.members.manage';
-  if (name === 'ath_results' && op === 'assess') return 'results.assess';
+  if (name === 'ath_results' && ['assess', 'record-human-retest'].includes(op))
+    return 'results.assess';
+  if (name === 'ath_results' && op === 'add-evidence') return 'results.submit';
+  if (name === 'ath_reviews' && ['approve', 'meeting-update'].includes(op))
+    return 'reviews.approve';
+  if (name === 'ath_issues' && op === 'file-from-report')
+    return 'reviews.approve';
+  if (
+    name === 'ath_assets' &&
+    ['import-ui', 'remove-scoped-scene'].includes(op)
+  )
+    return 'assets.write';
   if (name === 'ath_retests' && op === 'record-manual-result')
     return 'issues.lifecycle';
   return findMcpOperation(name, op)?.capability ?? 'project.read';
@@ -417,10 +428,20 @@ export class ActionIntents {
     await currentUser(tx, actor);
     if (row.owner_id !== actor.userId)
       throw new DomainError('NOT_FOUND', '没有此账号的确认提案。', 404);
+    const originActor: ActorContext =
+      row.origin === 'official-mcp' && row.key_id
+        ? {
+            userId: actor.userId,
+            requestId: actor.requestId,
+            entrypoint: 'official-mcp',
+            keyId: row.key_id,
+          }
+        : actor;
+    if (originActor !== actor) await currentUser(tx, originActor);
     if (row.project_id)
       await requireProject(
         tx,
-        actor,
+        originActor,
         row.project_id,
         confirmationCapability(row.tool_name, row.operation),
       );
@@ -619,10 +640,23 @@ export class ActionIntents {
     await this.getConversation(actor, conversationId, id);
     return this.resolve(actor, id, raw, 'web-user-event', conversationId);
   }
+  async getMcpForWeb(actor: ActorContext, id: string) {
+    if (actor.entrypoint !== 'web')
+      throw new DomainError('FORBIDDEN', '只接受本人网页会话。', 403);
+    return this.get(actor, id, 'official-mcp');
+  }
+  async decideMcpForWeb(actor: ActorContext, id: string, raw: unknown) {
+    await this.getMcpForWeb(actor, id);
+    return this.resolve(actor, id, raw, 'web-user-event', null);
+  }
   async resolveForm(actor: ActorContext, id: string, raw: unknown) {
     return this.resolve(actor, id, raw, 'mcp-form-elicitation');
   }
-  private async get(actor: ActorContext, id: string) {
+  private async get(
+    actor: ActorContext,
+    id: string,
+    origin?: ConfirmationRow['origin'],
+  ) {
     idSchema.parse(id);
     return this.db.transaction(async (tx) => {
       const row = (
@@ -631,7 +665,7 @@ export class ActionIntents {
           [id, actor.userId],
         )
       ).rows[0];
-      if (!row)
+      if (!row || (origin !== undefined && row.origin !== origin))
         throw new DomainError('NOT_FOUND', '没有此账号的确认提案。', 404);
       await this.authorize(tx, actor, row);
       return { intent: safe(row) };
@@ -690,7 +724,7 @@ export class ActionIntents {
     id: string,
     raw: unknown,
     source: 'web-user-event' | 'mcp-form-elicitation',
-    expectedConversationId?: string,
+    expectedConversationId?: string | null,
   ) {
     idSchema.parse(id);
     const parsed = actionIntentDecisionSchema.parse(raw);
@@ -739,7 +773,13 @@ export class ActionIntents {
         throw new DomainError('NOT_FOUND', '没有此账号的确认提案。', 404);
       await this.authorize(tx, actor, found);
       if (
-        expectedConversationId !== undefined &&
+        expectedConversationId === null &&
+        (found.origin !== 'official-mcp' ||
+          found.interaction_kind !== 'mcpForm')
+      )
+        throw new DomainError('NOT_FOUND', '没有此账号的 MCP 确认提案。', 404);
+      if (
+        typeof expectedConversationId === 'string' &&
         (found.conversation_id !== expectedConversationId ||
           found.origin !== 'internal-ai' ||
           found.interaction_kind !== 'inlineCard')
@@ -747,7 +787,10 @@ export class ActionIntents {
         throw new DomainError('NOT_FOUND', '当前对话没有此可执行卡。', 404);
       if (
         source === 'mcp-form-elicitation' &&
-        found.interaction_kind !== 'mcpForm'
+        (found.interaction_kind !== 'mcpForm' ||
+          ['ath_platform_admin', 'ath_project_members'].includes(
+            found.tool_name,
+          ))
       )
         throw new DomainError('FORBIDDEN', '此提案不是当前MCP表单意图。', 403);
       if (found.proposal_revision !== input.revision)

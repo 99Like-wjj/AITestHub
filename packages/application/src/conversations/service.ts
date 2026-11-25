@@ -1137,6 +1137,37 @@ export class ConversationsService {
           conversationId,
           true,
         );
+        let operationTarget = input.operationTarget;
+        if (
+          !schedule &&
+          input.accessMode === 'full' &&
+          !operationTarget?.requirementId &&
+          /加入|添加|拉入|退出|移出|批准|审批|评审通过/u.test(input.content)
+        ) {
+          const explicit = [
+            ...input.content.matchAll(
+              /需求\s*(?:「([^」\n]{1,200})」|“([^”\n]{1,200})”|([A-Z][A-Z0-9_-]{1,30}\d))/gu,
+            ),
+          ];
+          if (explicit.length === 1) {
+            const [, quoted, alternate, number] = explicit[0]!;
+            const projects = operationTarget
+              ? [operationTarget.projectId]
+              : (await listProjectAccess(tx, actor)).map(({ id }) => id);
+            const matches = await tx.query<{ id: string; project_id: string }>(
+              'SELECT id,project_id FROM app.requirements WHERE project_id=ANY($1::uuid[]) AND (business_number=$2 OR title=$2) ORDER BY id LIMIT 2',
+              [projects, quoted ?? alternate ?? number],
+            );
+            if (matches.rows.length === 1) {
+              const requirement = matches.rows[0]!;
+              operationTarget = {
+                ...operationTarget,
+                projectId: requirement.project_id,
+                requirementId: requirement.id,
+              };
+            }
+          }
+        }
         if (
           (
             await tx.query(
@@ -1190,7 +1221,7 @@ export class ConversationsService {
               selection.effort,
               snapshot,
               JSON.stringify(refs),
-              input.operationTarget,
+              operationTarget,
             ],
           );
         }
@@ -1209,7 +1240,7 @@ export class ConversationsService {
               serviceRevision: selection.serviceRevision,
               effort: selection.effort,
             },
-            input.operationTarget,
+            operationTarget,
             input.dataScope,
           ],
         );
