@@ -19,6 +19,7 @@ import { assertSourceProjectAllowed } from '../../../packages/application/src/co
 import { recoveryFencesReady } from '../../../packages/application/src/recovery/fences.js';
 import { assertTaskCapability } from '../../../packages/application/src/conversations/task-capabilities.js';
 import { requirementCandidatesInputSchema } from '../../../packages/contracts/src/requirements.js';
+import { optimizationNotesReceiptSchema } from '../../../packages/contracts/src/assets.js';
 import { ReportService } from '../../../packages/application/src/reports/service.js';
 import { ResultService } from '../../../packages/application/src/results/service.js';
 import { registerReportReads } from './report-reading.js';
@@ -757,6 +758,15 @@ export function createAiBusinessTools(
                 preview: result,
                 instruction:
                   '预览供工具固定对象。用户要求批准时，请在本轮继续调用 ath_reviews approve 生成对话确认卡，再请人确认。向用户说明对象名称和动作，内部 ID 与摘要仅作工具参数。',
+              });
+            if (
+              entry.name === 'ath_reviews' &&
+              prepared.op === 'optimization-notes'
+            )
+              return JSON.stringify({
+                ...optimizationNotesReceiptSchema.parse(result),
+                instruction:
+                  '本回执中的用例已读回本次修订。用它报告处理结果。如需单独回读意见，使用 ath_reviews opinions 读取该修订。',
               });
             return JSON.stringify(result);
           } catch (error: unknown) {
