@@ -3,10 +3,10 @@ import { z } from 'zod';
 import {
   documentMediaTypes,
   documentReadQuerySchema,
-  documentReadResultSchema,
+  sandboxDocumentReadResultSchema,
   type DocumentParserPort,
   type DocumentReadQuery,
-  type DocumentReadResult,
+  type DocumentParserResult,
 } from '../../../contracts/src/agent-documents.js';
 import type {
   AgentSandboxPort,
@@ -20,17 +20,17 @@ const cacheMaximumBytes = 32 * 1024 * 1024;
 const cacheMaximumEntries = 16;
 const cacheTtlMs = 120_000;
 interface CachedDocument {
-  result: DocumentReadResult;
+  result: DocumentParserResult;
   bytes: number;
   expiresAt: number;
 }
 interface PendingDocument {
-  promise: Promise<DocumentReadResult>;
+  promise: Promise<DocumentParserResult>;
   controller: AbortController;
   subscribers: Set<symbol>;
   settled: boolean;
 }
-const parserWireSchema = documentReadResultSchema
+const parserWireSchema = sandboxDocumentReadResultSchema
   .omit({ images: true })
   .extend({
     images: z
@@ -60,7 +60,7 @@ export class SandboxDocumentParser implements DocumentParserPort {
         this.cachedBytes -= value.bytes;
       }
   }
-  private store(key: string, result: DocumentReadResult) {
+  private store(key: string, result: DocumentParserResult) {
     this.prune();
     const bytes = Buffer.byteLength(JSON.stringify(result));
     if (bytes > cacheMaximumBytes) return;
@@ -83,7 +83,7 @@ export class SandboxDocumentParser implements DocumentParserPort {
   private subscribe(
     pending: PendingDocument,
     signal?: AbortSignal,
-  ): Promise<DocumentReadResult> {
+  ): Promise<DocumentParserResult> {
     return new Promise((resolve, reject) => {
       const subscriber = Symbol();
       let done = false;
@@ -179,7 +179,7 @@ export class SandboxDocumentParser implements DocumentParserPort {
     mediaType: (typeof documentMediaTypes)[number],
     query: DocumentReadQuery,
     signal: AbortSignal,
-  ): Promise<DocumentReadResult> {
+  ): Promise<DocumentParserResult> {
     const formats = ['pdf', 'docx', 'xlsx', 'pptx'] as const;
     const format = formats[documentMediaTypes.indexOf(mediaType)];
     if (!format)
@@ -284,6 +284,6 @@ export class SandboxDocumentParser implements DocumentParserPort {
         '文档图像批次超过限制或定位无效，请缩小读取范围。',
         422,
       );
-    return documentReadResultSchema.parse({ ...parsed, images });
+    return sandboxDocumentReadResultSchema.parse({ ...parsed, images });
   }
 }

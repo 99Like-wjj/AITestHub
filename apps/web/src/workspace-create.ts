@@ -153,13 +153,19 @@ export async function dispatchConversationCreate(
   // Consume the one dispatch permission synchronously; a double click cannot POST twice.
   dispatched.add(key(record));
   try {
-    const body = conversationCreateInputSchema.parse({
+    const body = conversationCreateInputSchema.safeParse({
       ...input,
       commandId: record.commandId,
     });
+    if (!body.success)
+      throw new ApiError(
+        '对话归属信息无效，请刷新页面后重新选择需求。',
+        400,
+        'VALIDATION_ERROR',
+      );
     const response = await api(
       '/me/conversations',
-      { method: 'POST', body },
+      { method: 'POST', body: body.data },
       conversationCreatedSchema,
     );
     if (

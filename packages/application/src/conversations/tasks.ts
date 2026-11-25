@@ -15,9 +15,9 @@ import type { ActorContext } from '../../../contracts/src/identity.js';
 import { commandIdSchema } from '../../../contracts/src/base.js';
 import {
   aiErrorDetailsSchema,
+  type aiToolEventPayloadSchema,
   frozenConversationReferenceSchema,
   operationTargetSchema,
-  type AiToolSourceReference,
 } from '../../../contracts/src/conversations.js';
 import type {
   Database,
@@ -112,16 +112,7 @@ export type RunnerEvent =
   | z.infer<typeof aiSummaryPayloadSchema>
   | z.infer<typeof aiModelDispatchedPayloadSchema>
   | { type: 'modelRetry'; retry: ModelRetryEvent }
-  | {
-      type: 'tool';
-      invocationId: string;
-      name: string;
-      state: 'started' | 'completed' | 'failed' | 'waitingConfirmation';
-      confirmationId?: string;
-      externalInvocationId?: string;
-      sourceRefs?: AiToolSourceReference[];
-      unknownEffect?: boolean;
-    }
+  | z.infer<typeof aiToolEventPayloadSchema>
   | { type: 'contextReset'; reason: AiContextResetReason };
 export interface ConversationRunner {
   readonly executionOrigin?: 'fixture' | 'liveProvider' | 'legacyUnknown';

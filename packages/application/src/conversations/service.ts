@@ -351,7 +351,7 @@ export class ConversationsService {
                 SELECT DISTINCT ON (task_id,payload->>'invocationId') task_id,payload FROM relevant
                 WHERE event_type='ai.tool' ORDER BY task_id,payload->>'invocationId',sequence DESC
               ), flags AS (
-                SELECT task_id,bool_or(payload->>'state'='failed') has_failed_tools,
+                SELECT task_id,bool_or(payload->>'state' IN ('failed','notDispatched')) has_failed_tools,
                   bool_or(COALESCE(payload->>'unknownEffect','false')='true') has_unknown_tool_effects,
                   false has_context_reset FROM latest_tools GROUP BY task_id
                 UNION ALL

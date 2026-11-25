@@ -9,6 +9,7 @@ import { compactModelMessages } from '../agent-context/compaction.js';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import type { WorkspaceAccessMode } from '../../../contracts/src/workspace-access.js';
 import {
+  aiToolEventPayloadSchema,
   aiToolSourceReferenceSchema,
   freezeAiToolSource,
 } from '../../../contracts/src/conversations.js';
@@ -51,7 +52,7 @@ const modeSchema = z.object({
 const toolFactSchema = z.object({
   invocationId: z.uuid(),
   name: z.string().max(200),
-  state: z.enum(['started', 'completed', 'failed', 'waitingConfirmation']),
+  state: aiToolEventPayloadSchema.shape.state,
   unknownEffect: z.boolean().optional(),
   confirmationId: z.uuid().optional(),
   externalInvocationId: z.uuid().optional(),
@@ -197,6 +198,7 @@ export async function readRetainedConversationHistory(
         deniedTasks.add(event.task_id);
         continue;
       }
+      if (parsed.data.state === 'notDispatched') continue;
       const key = `${event.task_id}:${parsed.data.invocationId}`;
       tools.set(key, {
         taskId: event.task_id,

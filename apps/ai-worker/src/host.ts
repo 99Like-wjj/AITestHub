@@ -905,12 +905,16 @@ export class RestrictedAiHost {
       JSON.stringify(proof) +
       '\n[End AITestHub tool transport receipt reference]';
     let modelOrdinal = 0;
+    let toolReplanUsed = false;
+    let acceptedModelStep = false;
+    let initialToolCorrection = false;
+    const toolCorrection =
+      '\n\n[AITestHub runtime feedback] A proposed tool batch in this reply included a name unavailable for that step. None of that batch ran. Use only the tool definitions attached to each request, or answer from results already available and explain any gap. Do not repeat previous operations or assume the rejected batch executed.';
     const retryCoordinator = new AiModelRetryCoordinator();
     // Fixed Deep Agents 1.16.4 compatibility: same-name middleware replaces built-in entries.
     const isolation = createMiddleware({
       name: 'AITestHubCapabilityBoundary',
       wrapModelCall: async (request, handler) => {
-        let completedAttemptId: string | null = null;
         const candidates = request.tools.filter(
           (candidate): candidate is typeof candidate & { name: string } =>
             'name' in candidate &&
@@ -931,146 +935,229 @@ export class RestrictedAiHost {
         const dispatchedTools = new Set(
           allowed.map((candidate) => candidate.name),
         );
-        const response = await retryCoordinator.run({
-          modelOrdinal: ++modelOrdinal,
-          policy: { maxRetries: 0, ...this.options.modelRetryPolicy },
-          ...(input.signal ? { signal: input.signal } : {}),
-          event: async (event) => {
-            if (
-              event.phase === 'scheduled' &&
-              toolEvents.some((toolEvent) => toolEvent.unknownEffect)
-            )
-              throw new DomainError(
-                'OPERATION_RESULT_UNKNOWN',
-                '已有工具写结果未知，请先查询原回执；没有自动重复生成或执行。',
-                409,
-              );
-            await this.#access.assertActive(internalActor, scope);
-            await input.authorizeContext?.();
-            if (event.maxRetries > 0) {
-              await input.onModelRetry?.(event);
-              emit({ type: 'modelRetry', retry: event });
-            }
-          },
-          attempt: async (attempt) => {
-            await this.#access.assertActive(internalActor, scope);
-            await input.authorizeContext?.();
-            let measuredBudget: ModelBudgetEstimate | undefined;
-            const measure = this.options.inspectContextBudget;
-            const fits = measure
-              ? (messages: readonly BaseMessage[]) => {
-                  measuredBudget = measure(
-                    [
-                      ...(request.systemMessage?.text
-                        ? [request.systemMessage]
-                        : []),
-                      ...messages,
-                    ],
-                    allowed,
-                  );
-                  return measuredBudget.fits;
-                }
+        const invoke = async (replan = false) => {
+          if (replan && !acceptedModelStep) initialToolCorrection = true;
+          // Before the first accepted step, bind the correction in the system
+          // prefix so the real user still ends the initial request. Use the
+          // same prefix for subsequent continuations from that accepted step.
+          const systemMessage = initialToolCorrection
+            ? request.systemMessage.concat(toolCorrection)
+            : request.systemMessage;
+          // A native continuation must retain its existing system authority.
+          const correction =
+            replan && acceptedModelStep
+              ? new HumanMessage(toolCorrection.trimStart())
               : undefined;
-            const maxCharacters = this.options.contextMaxCharacters ?? 96_000;
-            const currentUser = (message: BaseMessage) =>
-              message.getType() === 'human' &&
-              visibleText(message) === input.prompt;
-            currentBudget = fits ? { fits, maxCharacters, currentUser } : null;
-            let projection;
-            try {
-              projection = await context.prepare(
-                internalActor,
-                request.messages,
-                {
-                  maxCharacters,
-                  currentUser,
-                  ...(fits ? { fits } : {}),
-                },
-              );
-            } finally {
-              if (measuredBudget)
-                emit({
-                  type: 'contextBudget',
-                  modelAttemptId: attempt.attemptId,
-                  stage: 'preflight',
-                  budget:
-                    agentContextBudgetSnapshotSchema.parse(measuredBudget),
+          let completedAttemptId: string | null = null;
+          const response = await retryCoordinator.run({
+            modelOrdinal: ++modelOrdinal,
+            policy: replan
+              ? { maxRetries: 0 }
+              : { maxRetries: 0, ...this.options.modelRetryPolicy },
+            ...(input.signal ? { signal: input.signal } : {}),
+            event: async (event) => {
+              if (
+                event.phase === 'scheduled' &&
+                toolEvents.some((toolEvent) => toolEvent.unknownEffect)
+              )
+                throw new DomainError(
+                  'OPERATION_RESULT_UNKNOWN',
+                  '已有工具写结果未知，请先查询原回执；没有自动重复生成或执行。',
+                  409,
+                );
+              await this.#access.assertActive(internalActor, scope);
+              await input.authorizeContext?.();
+              if (event.maxRetries > 0) {
+                await input.onModelRetry?.(event);
+                emit({ type: 'modelRetry', retry: event });
+              }
+            },
+            attempt: async (attempt) => {
+              await this.#access.assertActive(internalActor, scope);
+              await input.authorizeContext?.();
+              let measuredBudget: ModelBudgetEstimate | undefined;
+              const measure = this.options.inspectContextBudget;
+              const fits = measure
+                ? (messages: readonly BaseMessage[]) => {
+                    measuredBudget = measure(
+                      [
+                        ...(systemMessage.text ? [systemMessage] : []),
+                        ...messages,
+                        ...(correction ? [correction] : []),
+                      ],
+                      allowed,
+                    );
+                    return measuredBudget.fits;
+                  }
+                : undefined;
+              const maxCharacters = this.options.contextMaxCharacters ?? 96_000;
+              const currentUser = (message: BaseMessage) =>
+                message.getType() === 'human' &&
+                visibleText(message) === input.prompt;
+              currentBudget = fits
+                ? { fits, maxCharacters, currentUser }
+                : null;
+              let projection;
+              try {
+                projection = await context.prepare(
+                  internalActor,
+                  request.messages,
+                  {
+                    maxCharacters,
+                    currentUser,
+                    ...(fits ? { fits } : {}),
+                  },
+                );
+              } finally {
+                if (measuredBudget)
+                  emit({
+                    type: 'contextBudget',
+                    modelAttemptId: attempt.attemptId,
+                    stage: 'preflight',
+                    budget:
+                      agentContextBudgetSnapshotSchema.parse(measuredBudget),
+                  });
+              }
+              const intentId = attempt.attemptId;
+              const priorCalls = new Set(invocations.keys());
+              await input.beforeModelCall?.(intentId, attempt);
+              let answer: Awaited<ReturnType<typeof handler>>;
+              try {
+                answer = await handler({
+                  ...request,
+                  systemMessage,
+                  // This model-only note is budgeted but never added to graph state
+                  // or to the frozen user/system context frame.
+                  messages: correction
+                    ? [...projection.messages, correction]
+                    : projection.messages,
+                  tools: allowed,
                 });
-            }
-            const intentId = attempt.attemptId;
-            const priorCalls = new Set(invocations.keys());
-            await input.beforeModelCall?.(intentId, attempt);
-            let answer: Awaited<ReturnType<typeof handler>>;
-            try {
-              answer = await handler({
-                ...request,
-                messages: projection.messages,
-                tools: allowed,
-              });
-            } catch (error: unknown) {
-              const failure = ownedFailure(error);
+              } catch (error: unknown) {
+                const failure = ownedFailure(error);
+                await input.afterModelCall?.(
+                  intentId,
+                  [...invocations.values()]
+                    .filter((call) => !priorCalls.has(call.callId))
+                    .at(-1),
+                  input.signal?.aborted
+                    ? 'CANCELLED'
+                    : (failure?.code ?? 'AI_RUNTIME_ERROR'),
+                  attempt,
+                  failure instanceof ModelAdapterError
+                    ? {
+                        httpStatus: failure.httpStatus,
+                        providerCode: failure.providerCode,
+                        providerType: failure.providerType,
+                        requestId: failure.requestId,
+                        dispatchCertainty: failure.certainty,
+                        attemptedRequests: failure.attemptedRequests,
+                        retryAfterMs: failure.retryAfterMs,
+                      }
+                    : null,
+                );
+                throw error;
+              }
+              // A persistence failure after a successful inference is terminal. Do not
+              // invoke the receipt callback twice or classify it as a transport retry.
               await input.afterModelCall?.(
                 intentId,
                 [...invocations.values()]
                   .filter((call) => !priorCalls.has(call.callId))
                   .at(-1),
-                input.signal?.aborted
-                  ? 'CANCELLED'
-                  : (failure?.code ?? 'AI_RUNTIME_ERROR'),
+                null,
                 attempt,
-                failure instanceof ModelAdapterError
-                  ? {
-                      httpStatus: failure.httpStatus,
-                      providerCode: failure.providerCode,
-                      providerType: failure.providerType,
-                      requestId: failure.requestId,
-                      dispatchCertainty: failure.certainty,
-                      attemptedRequests: failure.attemptedRequests,
-                      retryAfterMs: failure.retryAfterMs,
-                    }
-                  : null,
+                null,
               );
-              throw error;
-            }
-            // A persistence failure after a successful inference is terminal. Do not
-            // invoke the receipt callback twice or classify it as a transport retry.
-            await input.afterModelCall?.(
-              intentId,
-              [...invocations.values()]
-                .filter((call) => !priorCalls.has(call.callId))
-                .at(-1),
-              null,
-              attempt,
-              null,
+              completedAttemptId = intentId;
+              return answer;
+            },
+          });
+          const metadata = nativeMetadataSchema.parse(
+            response.response_metadata,
+          );
+          if (
+            metadata.ath_finish_reason &&
+            !['stop', 'tool_calls'].includes(metadata.ath_finish_reason)
+          )
+            throw new DomainError(
+              'PRECONDITIONS_MISSING',
+              '模型输出未完整结束，已保留实际过程；不会自动重试。',
+              422,
             );
-            completedAttemptId = intentId;
-            return answer;
-          },
-        });
-        const safeMetadata = nativeMetadataSchema.parse(
-          response.response_metadata,
-        );
-        if (
-          safeMetadata.ath_finish_reason &&
-          !['stop', 'tool_calls'].includes(safeMetadata.ath_finish_reason)
-        )
-          throw new DomainError(
-            'PRECONDITIONS_MISSING',
-            '模型输出未完整结束，已保留实际过程；不会自动重试。',
+          return { response, metadata, completedAttemptId };
+        };
+        const recordRejectedSelection = ({
+          response,
+          completedAttemptId,
+        }: Awaited<ReturnType<typeof invoke>>) => {
+          if (
+            response.tool_calls?.some(
+              (call) =>
+                this.options.toolCalling === false ||
+                !allowedToolNames.has(call.name),
+            )
+          )
+            throw new DomainError(
+              'FORBIDDEN',
+              '模型请求了此任务未开放的工具。',
+              403,
+            );
+          const rejected = response.tool_calls?.filter(
+            (call) => !dispatchedTools.has(call.name),
+          );
+          if (!rejected?.length) return false;
+          if (completedAttemptId)
+            emit({
+              type: 'segment',
+              segmentId: completedAttemptId,
+              phase: 'pending',
+              state: 'interrupted',
+            });
+          // The registered names explain why nothing in this batch entered the tool graph.
+          const names = new Set(rejected.map((call) => call.name));
+          for (const name of names)
+            emit({
+              type: 'tool',
+              name,
+              invocationId: randomUUID(),
+              state: 'notDispatched',
+              failure: {
+                code: 'INVALID_MODEL_OUTPUT',
+                reason: 'toolNotDispatched',
+              },
+            });
+          return true;
+        };
+        const toolSelectionError = () =>
+          new DomainError(
+            'INVALID_MODEL_OUTPUT',
+            '模型请求了本步不可用的工具，已保留原有工具结果。',
             422,
           );
-        if (
-          response.tool_calls?.some(
-            (call) =>
-              this.options.toolCalling === false ||
-              !dispatchedTools.has(call.name),
-          )
-        )
-          throw new DomainError(
-            'FORBIDDEN',
-            '模型提出了未开放工具，已停止此轮。',
-            403,
-          );
+        let accepted = await invoke();
+        if (recordRejectedSelection(accepted)) {
+          if (toolEvents.some((event) => event.unknownEffect))
+            throw new DomainError(
+              'OPERATION_RESULT_UNKNOWN',
+              '已有工具写结果未知，请核对原回执。',
+              409,
+            );
+          if (toolReplanUsed || !dispatchedTools.size)
+            throw toolSelectionError();
+          toolReplanUsed = true;
+          accepted = await invoke(true);
+          if (recordRejectedSelection(accepted)) throw toolSelectionError();
+        }
+        acceptedModelStep = true;
+        const {
+          response,
+          metadata: safeMetadata,
+          completedAttemptId,
+        } = accepted;
+        toolSelection.recordAcceptedCalls(
+          response.tool_calls?.map((call) => call.name) ?? [],
+        );
         if (completedAttemptId)
           emit({
             type: 'segment',
@@ -1227,7 +1314,7 @@ export class RestrictedAiHost {
       : '';
     const toolDiscoveryPrompt =
       !draftOnly && this.options.toolCalling !== false
-        ? ' Only a relevant subset of tool definitions is sent at each step. Use ath_tool_discovery to list or request more tool names if necessary. Wait for a tool definition to be provided before calling it.'
+        ? ' Only a relevant subset of tool definitions is sent at each step. Use ath_tool_discovery to list or request exact definitions. A catalog result is eligibility only. If a definition is deferred, request it alone if needed. Do not repeat an unchanged discovery; use the attached definitions or report what remains unavailable. Runtime feedback about a rejected batch gives no additional authority.'
         : '';
     const buildAgent = () =>
       createDeepAgent({

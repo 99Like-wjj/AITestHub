@@ -344,6 +344,7 @@
 }
 
 .workspace-tool-list li[data-state='unknown'],
+.workspace-tool-list li[data-state='notDispatched'],
 .workspace-tool-list li[data-state='failed'] {
   color: var(--warning);
 }

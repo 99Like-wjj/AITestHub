@@ -27,7 +27,9 @@ import './workspace-stream.css';
 
 type Task = AiTaskStatus['task'];
 type TaskStream = ReturnType<typeof useAiTask>;
-type ToolState = Extract<AiTaskEvent, { type: 'ai.tool' }>['payload']['state'];
+type ToolEvent = Extract<AiTaskEvent, { type: 'ai.tool' }>['payload'];
+type ToolState = ToolEvent['state'];
+type ToolFailure = NonNullable<ToolEvent['failure']>;
 
 export interface WorkspaceTurnProps {
   taskId: string;
@@ -48,6 +50,7 @@ export interface WorkspaceToolRow {
   id: string;
   name: string;
   state: ToolState;
+  failure: ToolFailure | null;
   unknownEffect: boolean;
   confirmationId: string | null;
   startedAt: string;
@@ -72,6 +75,7 @@ export function aggregateWorkspaceTools(
       id: payload.invocationId,
       name: payload.name,
       state: payload.state,
+      failure: payload.failure ?? null,
       unknownEffect: payload.unknownEffect === true,
       confirmationId:
         payload.confirmationId ?? previous?.confirmationId ?? null,
@@ -181,6 +185,23 @@ const toolLabels: Record<ToolState, string> = {
   completed: '已返回',
   failed: '未完成',
   waitingConfirmation: '已提出本人决定事项',
+  notDispatched: '未执行',
+};
+const toolFailureReasons: Record<NonNullable<ToolFailure['reason']>, string> = {
+  unsupportedDocumentFormat:
+    '文件类型不支持。可读取 Markdown、纯文本、PDF 和 Office 文档。',
+  invalidUtf8Text: '文件内容不是有效的 UTF-8 文本。',
+  documentSizeLimit: '文件超过读取上限，请拆分后再读。',
+  toolNotDispatched: '模型请求的工具没有在本步开放。',
+};
+const documentReadErrors: Partial<Record<ToolFailure['code'], string>> = {
+  FORBIDDEN: '当前任务无权读取此文件。',
+  NOT_FOUND: '文件已不可访问。',
+  FILE_NOT_READY: '文件尚未通过完整性校验。',
+  DEPENDENCY_UNAVAILABLE: '文件或解析服务暂不可用。',
+  VALIDATION_ERROR: '读取参数或文档内容无效。',
+  PRECONDITIONS_MISSING: '无法解析文档或读取指定范围。',
+  OPERATION_RESULT_UNKNOWN: '文档解析的沙箱清理尚待确认。',
 };
 const progressLabels = {
   pending: '待处理',
@@ -353,7 +374,10 @@ export function WorkspaceTurn({
   );
   const decisions = tools.filter((tool) => tool.confirmationId !== null);
   const failedTools = tools.filter(
-    (tool) => tool.state === 'failed' || tool.unknownEffect,
+    (tool) =>
+      tool.state === 'failed' ||
+      tool.state === 'notDispatched' ||
+      tool.unknownEffect,
   );
   const contextReset = events.findLast(
     (event) => event.type === 'ai.contextReset',
@@ -374,6 +398,9 @@ export function WorkspaceTurn({
   const stopped = status === 'cancelled';
   const interrupted = status === 'interrupted';
   const failed = status === 'failed';
+  const toolSelectionFailed =
+    task?.errorCode === 'INVALID_MODEL_OUTPUT' &&
+    failedTools.some((tool) => tool.failure?.reason === 'toolNotDispatched');
   const unknown = status === 'unknown';
   const stopping = status === 'cancelling';
   const legacyProjection =
@@ -490,6 +517,14 @@ export function WorkspaceTurn({
                       </span>
                       {duration && (
                         <span className="workspace-tool-time">{duration}</span>
+                      )}
+                      {tool.failure && (
+                        <span className="caption">
+                          {tool.failure.reason
+                            ? toolFailureReasons[tool.failure.reason]
+                            : (documentReadErrors[tool.failure.code] ??
+                              '工具未返回可用结果。')}
+                        </span>
                       )}
                       {tool.knowledgeReferences > 0 && (
                         <span className="workspace-tool-sources">
@@ -620,7 +655,9 @@ export function WorkspaceTurn({
                 ? '任务已中断，未自动重放；请先核对原任务与工具回执。'
                 : unknown
                   ? '业务结果未知，请先查询原任务和工具回执。'
-                  : `本次回复未完成${task?.errorCode ? `：${task.errorCode}` : '。'}`}
+                  : toolSelectionFailed
+                    ? '模型请求了本步不可用的工具。回复未完成，原有工具结果已保留。'
+                    : `本次回复未完成${task?.errorCode ? `：${task.errorCode}` : '。'}`}
           </span>
           {task?.errorDetails && (
             <span className="caption">

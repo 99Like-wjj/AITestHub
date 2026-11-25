@@ -1,4 +1,3 @@
-import { TextDecoder } from 'node:util';
 import type { ActorContext } from '../../../contracts/src/identity.js';
 import { FilesService } from '../files/service.js';
 import type { PersonalFileReader } from './references.js';
@@ -10,6 +9,12 @@ import {
   AgentDocumentsService,
   documentResultText,
 } from '../agent-documents/service.js';
+import {
+  decodeUtf8Source,
+  isTextSource,
+  maximumTextSourceBytes,
+  readBoundedSource,
+} from '../files/source-content.js';
 
 /** Trusted task port; source ACL is rechecked by FilesService. No model-facing file/URL fetch tool. */
 export class ConversationFileReader implements PersonalFileReader {
@@ -25,7 +30,7 @@ export class ConversationFileReader implements PersonalFileReader {
     );
     if (documentMediaTypeSchema.safeParse(source.file.mediaType).success) {
       source.body.destroy();
-      if (!this.documents)
+      if (!this.documents?.parser)
         return {
           text: '[PDF/Office parser is not configured; document content has not been read.]',
           state: 'unsupported' as const,
@@ -88,41 +93,21 @@ export class ConversationFileReader implements PersonalFileReader {
         );
       }
     }
-    if (
-      ![
-        'text/plain',
-        'text/markdown',
-        'text/csv',
-        'application/json',
-        'text/html',
-      ].includes(source.file.mediaType)
-    ) {
+    if (!isTextSource(source.file)) {
       source.body.destroy();
       return { text: null, state: 'unsupported' as const };
     }
-    const decoder = new TextDecoder('utf-8', { fatal: true });
-    let bytes = 0;
-    let text = '';
     try {
-      for await (const raw of source.body) {
-        const chunk: unknown = raw;
-        if (!(chunk instanceof Uint8Array) && typeof chunk !== 'string') {
-          source.body.destroy();
-          return { text: null, state: 'unsupported' as const };
-        }
-        const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
-        bytes += buffer.byteLength;
-        text += decoder.decode(buffer, { stream: true });
-        if (bytes > 1_048_576 || text.length > 100_000) {
-          source.body.destroy();
-          return { text: text.slice(0, 100_000), state: 'incomplete' as const };
-        }
-      }
-      text += decoder.decode();
+      const { bytes, truncated } = await readBoundedSource(
+        source.body,
+        maximumTextSourceBytes,
+      );
+      const text = decodeUtf8Source(bytes, truncated);
       // HTML is source text only. It is never executed, navigated or fetched.
+      if (truncated || text.length > 100_000)
+        return { text: text.slice(0, 100_000), state: 'incomplete' as const };
       return { text, state: 'readable' as const };
     } catch {
-      source.body.destroy();
       return { text: null, state: 'unsupported' as const };
     }
   }
